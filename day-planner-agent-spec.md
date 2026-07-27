@@ -210,46 +210,45 @@ outputs:
 
 ---
 
-### Tool 3: `get_user_preferences`
-**Purpose:** Get user's constraints, preferences, and capabilities
+### Tool 3: `get_user_memory`
+**Purpose:** Retrieve the user's long-term memory — a free-form markdown document the user has written and the agent maintains, covering constraints, preferences, capabilities, and anything else worth remembering about how they live their day.
+
+Unlike a rigid preferences schema, this is prose the user (and the agent) can write naturally — "I usually skip breakfast unless I'm going to the gym" reads and updates more naturally than a boolean field. The agent is expected to parse meaning from the text rather than expect fixed fields.
 
 ```yaml
-name: get_user_preferences
-description: "Retrieve user's stored preferences for day planning"
-inputs: {}
+name: get_user_memory
+description: "Retrieve the user's long-term memory document (markdown) — preferences, constraints, and standing facts the agent has learned over time"
+inputs:
+  section: string (optional — e.g. "gym", "sleep"; omit to fetch the full document)
 outputs:
-  gym:
-    duration_minutes: integer (e.g., 45)
-    preferred_times: list[string] (e.g., ["6-7 PM", "7-8 PM"])
-    can_do_early: boolean
-    location: string
-    address: string (for travel time calculation)
-  commute:
-    office_to_home_minutes: integer
-    office_to_gym_minutes: integer
-    gym_to_home_minutes: integer
-    office_location: string
-  sleep:
-    target_hours: integer (e.g., 8)
-    latest_bedtime: string (time, e.g., "11 PM")
-    earliest_wake: string (time, e.g., "6:30 AM")
-  work:
-    max_hours_per_day: integer
-    unavailable_after: string (time, e.g., "6 PM")
-    focus_block_duration: integer (minutes)
-  meals:
-    breakfast: boolean
-    lunch_duration_minutes: integer
-    dinner_preferred_time: string
-    dinner_duration_minutes: integer
-  energy:
-    low_energy_times: list[string] (e.g., ["2-3 PM", "8-9 PM"])
-    high_energy_times: list[string]
+  content: string (markdown)
+  last_updated: datetime (ISO 8601)
 ```
 
 ---
 
-### Tool 4: `validate_plan`
+### Tool 4: `update_user_memory`
+**Purpose:** Persist something newly learned, corrected, or clarified about the user into the long-term memory document. This is what makes memory *long-term* rather than a static config file — the agent writes to it, not just reads it.
+
+```yaml
+name: update_user_memory
+description: "Append or edit a section of the user's long-term memory markdown document"
+inputs:
+  section: string (e.g. "gym", "sleep", "meals" — matches a markdown heading; created if it doesn't exist)
+  content: string (markdown prose to write)
+  mode: string (enum: "append", "replace") — append adds to the section, replace overwrites it
+  reason: string (short note on why this is being saved, e.g. "user said they now prefer evening workouts")
+outputs:
+  success: boolean
+  section: string
+  updated_at: datetime (ISO 8601)
+```
+
+**When the agent should call this:** whenever the user states a new fact, preference, correction, or standing constraint in conversation (e.g., "actually I hate mornings," "my new gym is closer, only 10 min away," "skip asking about breakfast, I never eat it"). The agent should save it and tell the user what it saved — the same way it would tell them it updated the calendar. It should *not* silently rewrite large chunks of memory without a clear signal that something changed.
+
+---
+
+### Tool 5: `validate_plan`
 **Purpose:** Check if a proposed plan is feasible given constraints
 
 ```yaml
@@ -278,7 +277,7 @@ outputs:
 
 ---
 
-### Tool 5: `suggest_alternatives`
+### Tool 6: `suggest_alternatives`
 **Purpose:** Generate alternative plans when conflicts/constraints exist
 
 ```yaml
@@ -300,7 +299,7 @@ outputs:
 
 ---
 
-### Tool 6: `add_calendar_event`
+### Tool 7: `add_calendar_event`
 **Purpose:** Add or update events on Google Calendar
 
 ```yaml
@@ -321,7 +320,7 @@ outputs:
 
 ---
 
-### Tool 7: `update_task`
+### Tool 8: `update_task`
 **Purpose:** Mark tasks complete or update status
 
 ```yaml
@@ -346,12 +345,13 @@ outputs:
 You are an intelligent day planner assistant. Your role is to help the user 
 plan their day by:
 
-1. UNDERSTANDING: Gather their calendar, tasks, and constraints
+1. UNDERSTANDING: Gather their calendar, tasks, and long-term memory (preferences/constraints)
 2. VALIDATING: Check if proposed plans are feasible (no time overlaps, 
    travel time accounted for, respects preferences)
 3. REASONING: Identify conflicts and constraints
 4. SUGGESTING: Propose realistic alternatives when conflicts exist
 5. EXECUTING: Update calendar/tasks once user agrees
+6. REMEMBERING: Save new facts, preferences, or corrections to long-term memory as they come up
 
 KEY PRINCIPLES:
 - Be conversational and helpful, not robotic
@@ -381,6 +381,12 @@ WHEN VALIDATING A PLAN:
 - Flag warnings (feasibility_score 50-70)
 - Reject infeasible plans (feasibility_score < 50) with alternatives
 
+MEMORY:
+- At the start of a session, read the user's long-term memory (`get_user_memory`) — treat it as ground truth about how they live, not a form to re-ask every time
+- When the user states a new fact, preference, or correction ("actually I hate early mornings", "my gym moved, it's 10 min away now"), save it with `update_user_memory` and briefly confirm what you saved ("Got it, noted you prefer evening workouts now")
+- Don't ask the user to repeat information already in memory
+- If memory is missing something you need (e.g., no gym duration on record), ask once, then save the answer so you never have to ask again
+
 TONE: Friendly, efficient, practical. You're their personal assistant, not a robot.
 ```
 
@@ -388,82 +394,81 @@ TONE: Friendly, efficient, practical. You're their personal assistant, not a rob
 
 ## 6. Data Model
 
-### User Preferences (Stored in Cloud Storage YAML)
+### User Long-Term Memory (Stored in Cloud Storage as Markdown)
 
-```yaml
-# /users/{user_id}/preferences.yaml
+This is no longer a static config file the agent reads once per request — it's a **living memory document**. The user writes to it in their own words (mostly free-text explanations, not fields), and the agent appends or edits sections over time as it learns things in conversation (via `update_user_memory`). Think of it as the agent's evolving understanding of the user, not a form the user filled out once.
 
-user:
-  name: "You"
-  timezone: "Europe/Stockholm"
-  google_calendar_id: "your-email@gmail.com"
-  google_tasks_list_id: "abc123"
-  notion_database_id: "xyz789"
-  slack_user_id: "U123456"
+A short YAML frontmatter block holds the handful of values that are genuinely machine identifiers (not something a user would ever phrase as prose) — timezone and integration IDs. Everything else is markdown headings and prose, one heading per `section` used by `get_user_memory` / `update_user_memory`.
 
-gym:
-  duration_minutes: 45
-  preferred_times:
-    - start: "06:00"
-      end: "07:00"
-    - start: "18:00"
-      end: "19:00"
-  can_do_early: false
-  can_do_during_work: false
-  location: "Planet Fitness Stockholm"
-  address: "Drottninggatan 89, Stockholm"
+```markdown
+---
+# /users/{user_id}/memory.md
+timezone: "Europe/Stockholm"
+google_calendar_id: "your-email@gmail.com"
+google_tasks_list_id: "abc123"
+notion_database_id: "xyz789"
+slack_user_id: "U123456"
+last_updated: "2026-07-20"
+---
 
-commute:
-  work_location: "Office, Stureplan 2, Stockholm"
-  home_location: "Home, Södermalm, Stockholm"
-  work_to_home_minutes: 30
-  home_to_gym_minutes: 15
-  gym_to_work_minutes: 25
-  work_to_gym_minutes: 20
+# About Me
 
-sleep:
-  target_hours: 8
-  earliest_wake_time: "06:30"
-  latest_bedtime: "23:00"
-  strict: true  # Hard constraint
+I'm based in Stockholm. I work a fairly standard office job and try to keep
+work capped around 9 hours a day — I burn out fast if it creeps later than
+6 PM regularly.
 
-work:
-  max_hours_per_day: 9
-  earliest_start: "08:00"
-  latest_end: "18:00"
-  focus_block_duration_minutes: 120
-  min_break_between_blocks: 15
+## Gym
 
-meals:
-  breakfast:
-    eat: true
-    time: "07:30"
-    duration_minutes: 30
-  lunch:
-    eat: true
-    time: "12:00"
-    duration_minutes: 60
-  dinner:
-    eat: true
-    preferred_time: "20:00"
-    duration_minutes: 90
-    can_be_flexible: true
+I go to Planet Fitness on Drottninggatan 89. A full session is about 45
+minutes. I much prefer evening workouts (6-7 PM ish) — I am not a morning
+person and asking me to work out before 8 AM basically guarantees I skip it.
+I can't work out during work hours, my calendar is too packed for that.
 
-energy:
-  low_energy_times:
-    - "14:00-15:00"  # Post-lunch slump
-    - "21:00-22:00"  # Evening fatigue
-  high_energy_times:
-    - "08:00-12:00"  # Morning peak
-    - "16:00-18:00"  # Afternoon recovery
+*(updated 2026-06-02 — I used to do mornings, but that never actually
+stuck, so don't suggest it anymore.)*
 
-birthdays_and_events:
-  - name: "Maria's Birthday"
-    date: "2024-12-20"
-    time: "19:00"
-    location: "Restaurant Name"
-    notes: "Need to buy wine"
+## Commute
+
+Office is at Stureplan 2, home is in Södermalm. Roughly: office → home is
+30 min, home → gym is 15 min, gym → office is 25 min, office → gym is 20 min.
+
+## Sleep
+
+I need a solid 8 hours. I try to be in bed by 11 PM and up by 6:30 AM at the
+latest. This is a hard constraint for me — don't suggest plans that push
+bedtime past 11 unless I explicitly say it's a one-off.
+
+## Work
+
+Max 9 hours a day, ideally 8 AM to 6 PM. I do my best focused work in
+2-hour blocks and need at least 15 minutes between them or I get scattered.
+
+## Meals
+
+I eat breakfast around 7:30 (30 min), lunch at noon (an hour), and dinner
+around 8 PM (90 min) — dinner time is the one I'm most willing to move
+around if something conflicts.
+
+## Energy
+
+I hit a wall after lunch, roughly 2-3 PM — don't schedule anything that
+needs real focus then. Same in the evening around 9-10 PM, I'm winding
+down. Mornings (8 AM-noon) and late afternoon (4-6 PM) are when I actually
+have energy to do hard things.
+
+## Upcoming Events
+
+- Maria's Birthday — 2026-08-14, 7 PM, at [Restaurant Name]. Need to
+  remember to buy wine beforehand.
 ```
+
+**Why markdown instead of YAML here:** the content is mostly explanation and nuance ("I *used to* do mornings, but it never stuck") that reads naturally as prose and awkwardly as strict fields. The agent doesn't need a rigid schema to reason over this — an LLM parses "I much prefer evening workouts" just fine without a `preferred_times` array. Keeping only true identifiers in frontmatter avoids forcing everything into structure that doesn't need it, while still giving the agent a fast, unambiguous way to look up IDs.
+
+**Versioning:** enable object versioning on the storage bucket (Cloud Storage / S3) so agent-written edits are never destructive — you can always diff or roll back to a prior version of `memory.md` if the agent misreads something.
+
+**Two layers of memory:** `memory.md` remains the human-curated, explicit memory — things the user deliberately wrote or told the agent to save via `update_user_memory`. Alongside it, the managed platform's own long-term memory (Vertex AI Agent Engine Memory Bank / Bedrock Agents built-in memory) captures *implicit* facts extracted automatically from conversation, without a human or the agent explicitly deciding "this belongs in memory.md." The agent should treat `memory.md` as authoritative when the two disagree, since it's the version the user can actually read and edit.
+
+**Multi-tenant path:** the `/users/{user_id}/memory.md` layout was already per-user, which is what makes multi-tenant isolation straightforward — each user's memory document, session history, and extracted long-term memory are all scoped by the same `user_id`, so one deployed agent can safely serve more than one person (e.g., Slack workspace members) without their plans or preferences leaking into each other's context.
 
 ---
 
@@ -484,7 +489,7 @@ birthdays_and_events:
       "role": "assistant",
       "content": "Let me check... Report ends 5 PM, travel 20 min, gym 6-7 PM. That's tight. Dinner at 8 PM means 30 min to freshen up. Feasible but rushed.",
       "timestamp": "2024-12-19T07:05:30Z",
-      "tools_called": ["get_calendar_events", "get_user_preferences", "validate_plan"]
+      "tools_called": ["get_calendar_events", "get_user_memory", "validate_plan"]
     }
   ],
   "pending_actions": [
@@ -545,81 +550,101 @@ birthdays_and_events:
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               Cloud Run / App Engine                         │
-│  (FastAPI / Node.js server)                                  │
-│  - Slack bot handler                                         │
-│  - Webhook handlers (calendar, tasks)                        │
+│               Cloud Run / Lambda (thin adapter)               │
+│  - Slack bot handler (signature verification, formatting)    │
+│  - Webhook handlers (calendar, tasks)                         │
+│  - Translates Slack events into agent invocations             │
 └────────────────────────┬────────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│             Vertex AI Agent (or Bedrock)                    │
-│  - Reasoning engine                                          │
-│  - Tool orchestration                                        │
-│  - Plan validation & suggestions                             │
+│      Managed Agent Platform (Vertex AI Agent Engine /        │
+│                    AWS Bedrock Agents)                        │
+│  - Reasoning engine + tool orchestration                      │
+│  - Plan validation & suggestions                               │
+│  - Hosted, versioned session store (per user_id + session_id) │
+│  - Long-term memory (auto-extracted facts, per user)          │
+│  - RAG / grounding over the memory document + future docs     │
 └────────────┬──────────────────────────────┬────────────────┘
              │                              │
       ┌──────▼──────┐              ┌────────▼────────┐
-      │   Google    │              │   Cloud         │
-      │  APIs       │              │   Storage       │
-      │  - Calendar │              │  (Preferences,  │
-      │  - Tasks    │              │   Session mem)  │
+      │   Google    │              │   Cloud Storage /│
+      │  APIs       │              │   S3              │
+      │  - Calendar │              │  (memory.md,      │
+      │  - Tasks    │              │   versioned,      │
+      │             │              │   synced into RAG)│
       └─────────────┘              └─────────────────┘
 ```
 
-### Platform: GCP Vertex AI Agents
+The platform box now does more than "reasoning + tool calling": it also owns session storage, long-term memory, and retrieval — capabilities that used to be hand-rolled (Firestore/DynamoDB sessions, a single flat memory file read in full every time). See the per-cloud deployment guides for exactly which managed services provide each of these.
 
-**Why Vertex AI Agents:**
+### Platform: GCP Vertex AI Agents (Agent Engine)
+
+**Why Vertex AI Agent Engine specifically (not just "Vertex AI"):**
 - Native integration with Google APIs (Calendar, Tasks)
-- Strong reasoning capability out of the box
-- Supports tool calling (function definitions)
+- Strong reasoning capability out of the box, tool calling via the Agent Development Kit (ADK)
 - Managed service (no server maintenance)
-- ~$0.50-1.00 per day for light usage
+- **Agent Engine Sessions** — hosted, versioned conversation store instead of hand-rolled Firestore documents
+- **Agent Engine Memory Bank** — managed long-term memory, auto-extracts durable facts from conversations per user
+- **Vertex AI Search / RAG Engine** — grounds the agent on `memory.md` (and future, larger docs) instead of stuffing the whole file into every prompt
+- Together these also give clean **multi-tenant isolation**: sessions and memory are scoped per `user_id`, so more than one person can use the same deployed agent without cross-talk
+
+This costs more than calling the Gemini API directly from a bare Cloud Run service — you're now paying for managed session/memory/retrieval infrastructure. See [deployment-gcp.md](deployment-gcp.md) for the cost breakdown and trade-off.
 
 **Alternative: AWS Bedrock Agents**
-- Similar reasoning, slightly different API
-- Works if you prefer AWS ecosystem
-- Requires more glue code for Google integrations
+- Same three capabilities via different managed services (Bedrock Agents Sessions, Bedrock Agents built-in memory, Bedrock Knowledge Bases)
+- Requires more glue code for Google integrations (Calendar/Tasks aren't natively wired in the way they are on GCP)
+- See [deployment-aws.md](deployment-aws.md) for the AWS-equivalent architecture and cost breakdown
 
 ### Tech Stack
 
 ```
 Frontend:
   - Slack Bot (primary chat interface)
-  - FastAPI/Express (webhook handler)
-  
+  - Thin webhook adapter (Cloud Run / Lambda)
+
 Backend:
-  - Python or Node.js
-  - Cloud Run (serverless)
-  - Vertex AI Agents (reasoning engine)
-  
+  - Vertex AI Agent Engine (GCP) or Bedrock Agents (AWS) — reasoning + orchestration
+  - Agent Engine Sessions / Bedrock Agents Sessions — hosted conversation state
+  - Agent Engine Memory Bank / Bedrock Agents memory — long-term per-user memory
+  - Vertex AI Search / RAG Engine (GCP) or Bedrock Knowledge Bases (AWS) — RAG grounding
+
 APIs:
   - Google Calendar API
   - Google Tasks API
   - Notion API
   - Slack Bot API
-  
+
 Storage:
-  - Cloud Storage (YAML preferences)
-  - Firestore (session memory, optional)
-  - Secrets Manager (API keys)
-  
+  - Cloud Storage / S3 (memory.md — source of truth, versioned, synced into the RAG index)
+  - Secret Manager / SSM Parameter Store (API keys)
+
 Orchestration:
-  - Cloud Scheduler (morning briefing trigger)
-  - Cloud Tasks (deferred actions)
-  - Pub/Sub (async task processing, optional)
+  - Cloud Scheduler / EventBridge Scheduler (morning briefing trigger)
 
 Deployment:
   - Terraform/Pulumi (IaC)
   - GitHub Actions (CI/CD)
 ```
 
-### Vertex AI Agent Configuration
+### Vertex AI Agent Engine Configuration
 
 ```yaml
 agent_id: "day-planner-agent"
 model: "gemini-2.0-flash-exp" # or latest available
 project_id: "your-gcp-project"
+
+sessions:
+  provider: "agent_engine_sessions"  # hosted, versioned, scoped per user_id + session_id
+
+memory:
+  provider: "agent_engine_memory_bank"  # long-term, auto-extracted, scoped per user_id
+
+grounding:
+  provider: "vertex_ai_search"  # or rag_engine
+  data_store: "day-planner-memory-corpus"
+  source: "gs://day-planner-memory/{user_id}/memory.md"
+  sync: "incremental"  # re-index on Cloud Storage change
 
 tools:
   - id: "get_calendar_events"
@@ -630,9 +655,13 @@ tools:
     type: "custom_function"
     description: "Fetch Google Tasks and Notion tasks"
   
-  - id: "get_user_preferences"
+  - id: "get_user_memory"
     type: "custom_function"
-    description: "Get user preferences and constraints"
+    description: "Get user's long-term memory (markdown): preferences and constraints"
+
+  - id: "update_user_memory"
+    type: "custom_function"
+    description: "Save a new fact, preference, or correction to the user's long-term memory"
   
   - id: "validate_plan"
     type: "custom_function"
@@ -703,7 +732,7 @@ instructions:
 ### Week 2: Reasoning & Logic
 - **Days 1-2:** Implement `validate_plan` logic
 - **Days 3-4:** Implement `suggest_alternatives` logic
-- **Days 5-7:** Preferences YAML + testing
+- **Days 5-7:** Long-term memory doc (markdown) + testing
 
 ### Week 3: Polish & Deployment
 - **Days 1-2:** Error handling, edge cases
@@ -749,7 +778,7 @@ instructions:
 ### Decisions Made
 - [x] Platform: GCP Vertex AI Agents
 - [x] Chat interface: Slack (primary)
-- [x] Storage: Cloud Storage (preferences YAML)
+- [x] Storage: Cloud Storage (long-term memory, markdown, versioned)
 - [x] Deployment: Cloud Run + Cloud Scheduler
 
 ### Decisions Pending
@@ -785,8 +814,12 @@ Once deployed, test with these scenarios:
 - [ ] Google Calendar API enabled + OAuth configured
 - [ ] Google Tasks API enabled
 - [ ] Slack app created + bot token generated
-- [ ] Cloud Run service created
-- [ ] Cloud Storage bucket for preferences
+- [ ] Cloud Run service created (thin Slack adapter)
+- [ ] Cloud Storage bucket for long-term memory (versioning enabled)
+- [ ] Vertex AI Agent Engine deployed (agent + tools via ADK)
+- [ ] Agent Engine Sessions enabled (hosted conversation store)
+- [ ] Agent Engine Memory Bank enabled (long-term per-user memory)
+- [ ] Vertex AI Search / RAG Engine data store created, synced to the memory bucket
 - [ ] Cloud Scheduler job for morning briefing (optional)
 - [ ] Secrets Manager configured (API keys)
 - [ ] Terraform/Pulumi infrastructure as code
