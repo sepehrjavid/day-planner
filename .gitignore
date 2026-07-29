@@ -4,3 +4,5 @@ __pycache__/
 day_planner_agent/.env
 day_planner_agent/credentials.json
 day_planner_agent/token.json
+.adk/
+*/.adk/
