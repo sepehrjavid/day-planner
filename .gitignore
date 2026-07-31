@@ -1,8 +1,19 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 day_planner_agent/.env
 day_planner_agent/credentials.json
 day_planner_agent/token.json
+day_planner_backend/.env
+
+# Terraform state can contain IAM bindings and resource metadata for the key
+# that decrypts user refresh tokens.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+# .terraform.lock.hcl is deliberately NOT ignored — committing it is what pins
+# provider versions across machines and CI.
 .adk/
 */.adk/
