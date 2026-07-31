@@ -1,0 +1,20 @@
+# Pinned for reproducible image builds. Bump deliberately, not incidentally.
+# For a fully locked build (transitive deps pinned by hash too), generate
+# requirements.lock.txt with `pip-compile --generate-hashes requirements.txt`
+# and point the Dockerfile at that instead.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+email-validator==2.2.0
+httpx==0.28.1
+
+# Argon2id — OWASP's current first choice for password hashing. argon2-cffi's
+# defaults track their recommended parameters, and check_needs_rehash lets us
+# raise them later without a migration.
+argon2-cffi==23.1.0
+
+google-cloud-firestore==2.20.0
+google-cloud-kms==3.1.0
+google-auth==2.37.0
