@@ -1,0 +1,19 @@
+# Pinned for reproducible image builds. Bump deliberately, not incidentally.
+# For a fully locked build (transitive deps pinned by hash too), generate
+# requirements.lock.txt with `pip-compile --generate-hashes requirements.txt`
+# and point the Dockerfile at that instead.
+#
+# Deliberately no argon2-cffi or email-validator here: this service never
+# hashes a password or validates a signup email — that's the sibling
+# day_planner_backend_app service's job. A dependency vulnerability in either
+# package can't affect this service's build at all.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+httpx==0.28.1
+
+google-cloud-firestore==2.20.0
+google-cloud-kms==3.1.0
+google-auth==2.37.0

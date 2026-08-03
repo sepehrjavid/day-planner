@@ -5,7 +5,8 @@ __pycache__/
 day_planner_agent/.env
 day_planner_agent/credentials.json
 day_planner_agent/token.json
-day_planner_backend/.env
+day_planner_backend_app/.env
+day_planner_backend_internal/.env
 
 # Terraform state can contain IAM bindings and resource metadata for the key
 # that decrypts user refresh tokens.
