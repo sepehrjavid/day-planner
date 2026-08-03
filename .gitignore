@@ -17,4 +17,5 @@ day_planner_backend_internal/.env
 # .terraform.lock.hcl is deliberately NOT ignored — committing it is what pins
 # provider versions across machines and CI.
 .adk/
-*/.adk/
+*/.adk/day_planner_agent.tar.gz
+day_planner_agent.tar.gz

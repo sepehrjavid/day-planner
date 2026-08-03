@@ -1,0 +1,7 @@
+*
+!app/
+!requirements.txt
+!Dockerfile
+
+**/__pycache__/
+**/*.py[cod]

@@ -14,19 +14,17 @@ Usage:
 """
 
 import sys
-from typing import Literal
 
 import vertexai
 from pydantic import BaseModel, Field
 
 
 class UserProfile(BaseModel):
-    calendar_id: str = Field(
-        description="The user's calendar identifier, e.g. their Google Calendar email address."
-    )
-    calendar_type: Literal["google"] = Field(
-        description="Which calendar provider this is. Only 'google' is supported for now."
-    )
+    # No calendar_id/calendar_type here: calendar connections are owned by
+    # day_planner_backend_internal now (see ../oauth-design.md §7), not
+    # Memory Bank. Storing them here would mean the model could paraphrase
+    # or drop an identity-adjacent field via generative extraction — fine
+    # for a preference, not for which account a user's data comes from.
     preferences: str = Field(
         description=(
             "Free-text notes on the user's standing preferences and constraints "
