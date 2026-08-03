@@ -5,10 +5,14 @@ directly, instead of every turn being sent to Memory Bank's extraction
 pipeline regardless of content.
 
 Two kinds of long-term memory:
-  - The structured profile (calendar_id, calendar_type, preferences) — a
-    single, low-latency source of truth, written via update_profile and
-    read via get_profile. See scripts/register_profile_schema.py for the
-    one-time schema registration this depends on.
+  - The structured profile (preferences only) — a single, low-latency
+    source of truth, written via update_profile and read via get_profile.
+    See scripts/register_profile_schema.py for the one-time schema
+    registration this depends on. Calendar identity is deliberately not
+    part of this profile — it lives in day_planner_backend_internal
+    instead, since Memory Bank is LLM-written and semantically searched,
+    which is the wrong access model for anything credential-adjacent (see
+    ../oauth-design.md §7).
   - Free-form facts that don't fit the profile — saved via save_memory,
     searched via ADK's built-in load_memory tool.
 
@@ -22,7 +26,7 @@ in that wrapper with no such bug, so those are used as-is.
 """
 
 import logging
-from typing import Literal, Optional
+from typing import Optional
 
 import vertexai
 from google.adk.tools import ToolContext
@@ -49,23 +53,22 @@ def _memory_scope(tool_context: ToolContext) -> dict:
 
 async def update_profile(
     tool_context: ToolContext,
-    calendar_id: Optional[str] = None,
-    calendar_type: Optional[Literal["google"]] = None,
     preferences: Optional[str] = None,
 ) -> dict:
     """Save or update the user's structured profile in long-term memory.
 
-    Call this whenever the user states or corrects their calendar identity,
-    or a standing preference/constraint worth remembering across sessions
-    (gym duration/timing, sleep schedule, work hours, meal times, energy
+    Call this whenever the user states or corrects a standing
+    preference/constraint worth remembering across sessions (gym
+    duration/timing, sleep schedule, work hours, meal times, energy
     patterns, etc). Only pass the fields that changed — this merges into
     the existing profile rather than replacing it.
 
+    Calendar connections are not part of this profile and never go through
+    this tool — see get_calendar_events, which returns a connect_url when a
+    user needs to link a calendar. That flow lives entirely outside this
+    conversation, in day_planner_backend_internal.
+
     Args:
-        calendar_id: The user's calendar identifier, e.g. their Google
-            Calendar email address.
-        calendar_type: The calendar provider. Only "google" is supported
-            right now.
         preferences: Free-text preference/constraint update, in your own
             words (e.g. "gym sessions are 1 hour for upper body days").
 
@@ -77,10 +80,6 @@ async def update_profile(
         return {"status": "error", "message": "Memory Bank is not configured."}
 
     statements = []
-    if calendar_id:
-        statements.append(f"The user's calendar_id is {calendar_id}.")
-    if calendar_type:
-        statements.append(f"The user's calendar_type is {calendar_type}.")
     if preferences:
         statements.append(f"User preference: {preferences}")
     if not statements:
@@ -116,8 +115,8 @@ async def get_profile(tool_context: ToolContext) -> dict:
     """Retrieve the user's structured profile from long-term memory.
 
     Call this at the start of a conversation so you don't have to ask the
-    user to repeat things you already know about them: calendar_id,
-    calendar_type, and their standing preferences.
+    user to repeat things you already know about them: their standing
+    preferences.
 
     Returns:
         dict with "status" and "profile" (the field dict, or {} if no

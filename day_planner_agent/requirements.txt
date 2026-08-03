@@ -1,5 +1,6 @@
 google-adk
-google-cloud-aiplatform
+google-cloud-aiplatform[adk,agent_engines]
 google-api-python-client
+google-auth
 google-auth-httplib2
-google-auth-oauthlib
+httpx

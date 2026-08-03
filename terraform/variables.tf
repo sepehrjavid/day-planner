@@ -9,6 +9,21 @@ variable "region" {
   default     = "europe-north1"
 }
 
+variable "agent_region" {
+  type        = string
+  description = <<-EOT
+    Region for the Vertex AI Agent Engine (Reasoning Engine) deployment, and
+    for the subnet + Network Attachment backing its PSC-I egress (network.tf).
+    Deliberately separate from var.region: Agent Engine has much narrower
+    region availability than Cloud Run/KMS and does not support every region
+    those do (notably not europe-north2). As of writing, supported European
+    regions are europe-west1/2/3/4/6/8 and europe-southwest1 — verify against
+    current Vertex AI Agent Engine docs before changing this, availability
+    shifts over time.
+  EOT
+  default     = "europe-west1"
+}
+
 variable "service_name" {
   type        = string
   description = <<-EOT
@@ -23,9 +38,9 @@ variable "internal_service_name" {
   type        = string
   description = <<-EOT
     Cloud Run service name for the internal surface (/internal/* only).
-    Invoker access is granted only to var.agent_service_account_email, never
-    allUsers — this one has no launch-day toggle, because it's never meant
-    to be reachable by an end user's browser, at any point.
+    Invoker access is granted only to the agent's own service account
+    (agent.tf), never allUsers — this one has no launch-day toggle, because
+    it's never meant to be reachable by an end user's browser, at any point.
   EOT
   default     = "day-planner-internal"
 }
@@ -73,12 +88,17 @@ variable "firestore_location" {
   default     = "eur3"
 }
 
-variable "agent_service_account_email" {
+variable "agent_source_archive_path" {
   type        = string
   description = <<-EOT
-    Service account the Vertex AI Agent Engine runtime (and/or Slack adapter)
-    runs as. This is the only identity permitted to call /internal/*.
+    Path to the agent's pre-built source tarball (.tar.gz, base64-read via
+    filebase64()), relative to this directory. Build it with
+    ../day_planner_agent/build_archive.sh, which produces
+    ../day_planner_agent.tar.gz — Terraform doesn't build application
+    artifacts itself, matching how var.app_image/var.internal_image are
+    also built externally and only referenced here.
   EOT
+  default     = "../day_planner_agent.tar.gz"
 }
 
 variable "google_oauth_client_id" {

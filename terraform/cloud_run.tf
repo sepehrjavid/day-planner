@@ -239,7 +239,7 @@ resource "google_cloud_run_v2_service" "internal" {
       }
       env {
         name  = "INTERNAL_CALLER_SERVICE_ACCOUNTS"
-        value = var.agent_service_account_email
+        value = google_service_account.agent.email
       }
       env {
         name  = "STATE_TTL_SECONDS"
@@ -285,15 +285,12 @@ resource "google_cloud_run_v2_service" "internal" {
   }
 }
 
-# Never allUsers. Only created once an agent identity actually exists —
-# empty agent_service_account_email means no one can invoke this service at
-# all yet, which is correct: there's nothing to call it.
+# Never allUsers. google_service_account.agent is the SA agent.tf creates
+# for the agent itself, provisioned by this same module.
 resource "google_cloud_run_v2_service_iam_member" "internal_invoker" {
-  count = var.agent_service_account_email != "" ? 1 : 0
-
   project  = var.project_id
   location = google_cloud_run_v2_service.internal.location
   name     = google_cloud_run_v2_service.internal.name
   role     = "roles/run.invoker"
-  member   = "serviceAccount:${var.agent_service_account_email}"
+  member   = google_service_account.agent.member
 }
