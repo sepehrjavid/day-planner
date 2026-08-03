@@ -1,0 +1,299 @@
+data "google_project" "this" {
+  project_id = var.project_id
+}
+
+locals {
+  # Cloud Run's deterministic URL format. It's derived rather than read from
+  # the resource because the internal service also needs the app service's
+  # URL as an env var (see internal service comment below), and reading
+  # google_cloud_run_v2_service.default.uri here would be a cycle.
+  #
+  # Verify against the `service_uri` output after the first apply — some older
+  # services still get the legacy `-<hash>-` form. If they differ, set
+  # var.public_base_url explicitly and re-apply.
+  public_base_url = coalesce(
+    var.public_base_url,
+    "https://${var.service_name}-${data.google_project.this.number}.${var.region}.run.app"
+  )
+
+  # The internal service's own URL. Nothing external needs this to match
+  # anything — it's only used so the service can correctly identify itself
+  # as the audience of incoming internal OIDC tokens (SELF_BASE_URL). Same
+  # deterministic-URL caveat as public_base_url above: verify against the
+  # `internal_service_uri` output and set var.internal_base_url if they differ.
+  internal_url = coalesce(
+    var.internal_base_url,
+    "https://${var.internal_service_name}-${data.google_project.this.number}.${var.region}.run.app"
+  )
+}
+
+resource "google_service_account" "backend" {
+  project      = var.project_id
+  account_id   = "day-planner-backend"
+  display_name = "Day Planner backend (OAuth connection service)"
+}
+
+# ---------------------------------------------------------------------------
+# App surface: health, auth, oauth, me — everything a browser or end user
+# calls. Gated by var.publicly_exposed (see the IAM binding below): closed
+# during the test phase, one flag flip to open at launch.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_v2_service" "default" {
+  project  = var.project_id
+  name     = var.service_name
+  location = var.region
+
+  # Ingress stays open regardless of var.publicly_exposed — what actually
+  # gates access is the IAM invoker binding below. Google's OAuth server
+  # needs to redirect a user's browser to /auth/*/callback with no GCP
+  # identity attached at all, so once publicly_exposed is true this is the
+  # only thing standing between the internet and every route on this
+  # service.
+  ingress             = "INGRESS_TRAFFIC_ALL"
+  deletion_protection = false
+
+  template {
+    service_account = google_service_account.backend.email
+    timeout         = "60s"
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = var.max_instances
+    }
+
+    containers {
+      image = var.app_image
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+
+      ports {
+        container_port = 8080
+      }
+
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "FIRESTORE_DATABASE"
+        value = "(default)"
+      }
+      env {
+        name  = "KMS_KEY_NAME"
+        value = google_kms_crypto_key.oauth_tokens.id
+      }
+      env {
+        name  = "PUBLIC_BASE_URL"
+        value = local.public_base_url
+      }
+      env {
+        name  = "STATE_TTL_SECONDS"
+        value = tostring(var.state_ttl_seconds)
+      }
+      env {
+        name  = "GOOGLE_OAUTH_CLIENT_ID"
+        value = var.google_oauth_client_id
+      }
+
+      # Mounted from Secret Manager at start-up rather than baked into the
+      # service config, so the value never appears in Terraform state.
+      env {
+        name = "GOOGLE_OAUTH_CLIENT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.google_oauth_client_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      startup_probe {
+        http_get {
+          path = "/healthz"
+        }
+        initial_delay_seconds = 3
+        period_seconds        = 3
+        failure_threshold     = 10
+      }
+    }
+  }
+
+  depends_on = [
+    google_secret_manager_secret_iam_member.backend_accessor,
+    google_kms_crypto_key_iam_member.backend,
+    google_project_iam_member.backend_firestore,
+  ]
+
+  # var.app_image only ever sets the image on first create — CI deploys new
+  # revisions directly with `gcloud run deploy --image`, and this stops
+  # terraform apply from reverting that back to whatever's in tfvars.
+  # Deliberately narrow: only the image is ignored, so plan still catches
+  # real drift on env vars, resources, scaling, and everything else.
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
+}
+
+# The single switch for going live. False (the default, test phase) means
+# nobody without an explicit roles/run.invoker grant can reach the service —
+# not even Google's own OAuth redirect, so the live browser-based OAuth flow
+# can't be exercised against this deployment until this flips. Test that
+# flow locally instead (uvicorn has no IAM layer in front of it) until
+# you're ready to expose everything at once: flip to true and re-apply.
+resource "google_cloud_run_v2_service_iam_member" "public" {
+  count = var.publicly_exposed ? 1 : 0
+
+  project  = var.project_id
+  location = google_cloud_run_v2_service.default.location
+  name     = google_cloud_run_v2_service.default.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# ---------------------------------------------------------------------------
+# Internal surface: /internal/* only. Unlike the app surface above, this one
+# has no launch-day toggle — it's machine-to-machine by nature (it mints
+# tokens capable of reading/writing a user's calendar) and is never meant to
+# be reachable by an end user's browser, at any point. IAM Conditions cannot
+# be combined with allUsers (confirmed against
+# https://docs.cloud.google.com/iam/docs/conditions-overview), so there is no
+# way to carve this out of the app service's own binding — it has to be its
+# own service to stay off the public surface permanently.
+#
+# A separate image entirely (var.internal_image, built from
+# ../day_planner_backend_internal — its own Dockerfile, its own
+# requirements.txt with no argon2-cffi). Same service account as the app
+# service, since it needs the same GCP permissions (Firestore, KMS, the
+# OAuth client secret) to actually refresh and revoke tokens — but no code
+# is shared between the two containers at all.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_v2_service" "internal" {
+  project  = var.project_id
+  name     = var.internal_service_name
+  location = var.region
+
+  # Network-restricted on top of the IAM invoker grant below — belt and
+  # suspenders. This requires the Agent Engine runtime to reach this service
+  # via a Private Service Connect interface (PSC-I) with a Network
+  # Attachment into this project's VPC; Agent Engine has no VPC presence of
+  # its own by default, and without PSC-I configured on the agent side, its
+  # calls will be rejected here before they ever reach the IAM/OIDC check.
+  # See https://docs.cloud.google.com/agent-builder/agent-engine/private-service-connect-interface.
+  ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  deletion_protection = false
+
+  template {
+    service_account = google_service_account.backend.email
+    timeout         = "60s"
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = var.max_instances
+    }
+
+    containers {
+      image = var.internal_image
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+
+      ports {
+        container_port = 8080
+      }
+
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "FIRESTORE_DATABASE"
+        value = "(default)"
+      }
+      env {
+        name  = "KMS_KEY_NAME"
+        value = google_kms_crypto_key.oauth_tokens.id
+      }
+      env {
+        # The app service's URL, not this one's — /internal/connect-link
+        # builds a link pointing at /auth/{provider}/start, which lives on
+        # the app service.
+        name  = "PUBLIC_BASE_URL"
+        value = local.public_base_url
+      }
+      env {
+        # This service's own URL — the audience incoming OIDC tokens are
+        # checked against. Distinct from PUBLIC_BASE_URL above on purpose.
+        name  = "SELF_BASE_URL"
+        value = local.internal_url
+      }
+      env {
+        name  = "INTERNAL_CALLER_SERVICE_ACCOUNTS"
+        value = var.agent_service_account_email
+      }
+      env {
+        name  = "STATE_TTL_SECONDS"
+        value = tostring(var.state_ttl_seconds)
+      }
+      env {
+        name  = "GOOGLE_OAUTH_CLIENT_ID"
+        value = var.google_oauth_client_id
+      }
+
+      env {
+        name = "GOOGLE_OAUTH_CLIENT_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.google_oauth_client_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      startup_probe {
+        http_get {
+          path = "/healthz"
+        }
+        initial_delay_seconds = 3
+        period_seconds        = 3
+        failure_threshold     = 10
+      }
+    }
+  }
+
+  depends_on = [
+    google_secret_manager_secret_iam_member.backend_accessor,
+    google_kms_crypto_key_iam_member.backend,
+    google_project_iam_member.backend_firestore,
+  ]
+
+  # var.internal_image only ever sets the image on first create — CI deploys
+  # new revisions directly with `gcloud run deploy --image`, and this stops
+  # terraform apply from reverting that back to whatever's in tfvars.
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
+}
+
+# Never allUsers. Only created once an agent identity actually exists —
+# empty agent_service_account_email means no one can invoke this service at
+# all yet, which is correct: there's nothing to call it.
+resource "google_cloud_run_v2_service_iam_member" "internal_invoker" {
+  count = var.agent_service_account_email != "" ? 1 : 0
+
+  project  = var.project_id
+  location = google_cloud_run_v2_service.internal.location
+  name     = google_cloud_run_v2_service.internal.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${var.agent_service_account_email}"
+}

@@ -1,6 +1,12 @@
 # Multi-User OAuth & Calendar Connections — Design
 
-**Status:** Design / not yet implemented
+**Status:** Built and deployed as two independent services —
+[day_planner_backend_app](day_planner_backend_app) (signup, login, the OAuth
+redirect, calendar-account management) and
+[day_planner_backend_internal](day_planner_backend_internal) (agent-facing
+`/internal/*` only, never granted `allUsers`), provisioned together by
+[terraform](terraform). See §13 for why they're two codebases and two
+Dockerfiles rather than one service with a routing flag.
 **Depends on:** [deployment-gcp.md](deployment-gcp.md) (Cloud Run adapter + Agent Engine runtime split)
 **Supersedes:** the `InstalledAppFlow` + `token.json` approach in [day_planner_agent/calendar_tool.py](day_planner_agent/calendar_tool.py)
 
@@ -216,7 +222,7 @@ The rule of thumb: *if the agent inventing a plausible-but-wrong value would be 
 
 ### Encryption
 
-**As built** ([day_planner_backend/app/crypto.py](day_planner_backend/app/crypto.py)): the refresh token is encrypted *directly* with a Cloud KMS symmetric key, with `user_id` passed as additional authenticated data so a ciphertext lifted from one user's document can't be decrypted under another's.
+**As built** ([day_planner_backend_app/app/services/crypto.py](day_planner_backend_app/app/services/crypto.py), duplicated in [day_planner_backend_internal/app/services/crypto.py](day_planner_backend_internal/app/services/crypto.py) — both services encrypt/decrypt, so both carry their own copy of this module): the refresh token is encrypted *directly* with a Cloud KMS symmetric key, with `user_id` passed as additional authenticated data so a ciphertext lifted from one user's document can't be decrypted under another's.
 
 This is a deliberate step back from the envelope encryption this doc originally specified. Envelope encryption earns its keep on large payloads or high call volume, where a KMS round-trip per operation would hurt. A refresh token is a few hundred bytes — comfortably inside KMS's 64 KiB limit — read a handful of times per user per day. Under those conditions envelope encryption buys nothing and costs you an AEAD implementation you now own and can get wrong (nonce reuse being the classic). Direct KMS is one call per connect and one per refresh, and there's no crypto to review.
 
@@ -317,3 +323,22 @@ Two gaps that are deliberate but shouldn't stay open:
 
 - **No password reset and no email verification.** `email_verified` is written as `False` and never updated. Neither is hard, but both are the kind of thing that gets skipped until a user is locked out.
 - **GCP Identity Platform is the alternative worth pricing.** It would provide reset, verification, MFA, breach-list checks, and federated login, and would let you delete the hand-rolled hashing and session code entirely. What's built is solid, but rolling your own auth means owning those flows forever.
+
+---
+
+## 13. Two services, two codebases — not one service with a routing flag
+
+The backend went through three shapes before landing here, each forced by the last one's limits:
+
+1. **One Cloud Run service, one `allUsers` grant.** Everything public — signup, login, `/me/*`, `/internal/*`, the OAuth redirect. Simple, but `/internal/*` mints tokens that read/write a user's calendar, and there's no reason that should ever be reachable by an anonymous browser.
+2. **One codebase, `APP_SURFACE` env var picking a router, two Cloud Run services from the same image.** Better — `/internal/*` moved to a service with no `allUsers` grant. But it's still one Python package: a bug in the shared `main.py`/`router.py` wiring, or a dependency vulnerability in `argon2-cffi` (only ever used by password hashing), could still affect the container the agent's credentials flow through, because it's the same image either way.
+3. **Two fully independent codebases** — [day_planner_backend_app](day_planner_backend_app) and [day_planner_backend_internal](day_planner_backend_internal). Separate `Dockerfile`s, separate `requirements.txt` (the internal service carries no `argon2-cffi`, no `email-validator` — it never hashes a password or validates a signup email), separate `app/` trees. `db/store.py`, `db/models.py`, and `providers/` are deliberately duplicated rather than shared as a package: the goal is that a change to one service's build can never accidentally alter the other's.
+
+Why not stop at (2)? Two reasons, both about what "decoupled" is actually buying:
+
+- **Blast radius on the build, not just the route table.** With one image, a supply-chain issue in *any* dependency of the combined `requirements.txt` ships to both services, whether or not that service's code path uses it. With two images, the internal service's dependency set is exactly what `/internal/*` needs and nothing else.
+- **A config bug can't re-expose the boundary.** `APP_SURFACE` was a string compared at runtime — a typo'd env var, a bad default, or a future refactor that forgets to check it would silently mount the wrong router. With separate codebases, `/internal/*` handlers don't exist in the app service's source at all; there's no flag whose misconfiguration could bring them back.
+
+What this costs: two `requirements-dev.txt` to keep patched, two test suites, two things to redeploy. Given `/internal/*` mints working access tokens for a user's Google Calendar, that trade was worth making. It would not obviously be worth making for a lower-stakes internal split — this isn't a template to apply reflexively to every future service boundary in this project.
+
+The two services still share nothing at runtime except the same Firestore database, the same KMS key, and the connect-link URL contract described in §5 — `PUBLIC_BASE_URL` on the internal service is the *app* service's origin (for building `/auth/{provider}/start` links), while `SELF_BASE_URL` is its own origin (for its OIDC audience check). Getting those two swapped is the one cross-service mistake that's easy to make and silent until an agent token gets rejected; see each service's `terraform/cloud_run.tf` block for exactly which `local.*_url` feeds which env var.
