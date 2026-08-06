@@ -12,24 +12,59 @@ from day_planner_agent import backend_client, calendar_tool
 
 
 class FakeEventsResource:
-    def __init__(self, items: list[dict]) -> None:
+    def __init__(self, items: list[dict], inserted: dict | None = None) -> None:
         self._items = items
+        self._inserted = inserted
         self.list_calls: list[dict] = []
+        self.insert_calls: list[dict] = []
 
     def list(self, **kwargs):
         self.list_calls.append(kwargs)
         return self
 
+    def insert(self, **kwargs):
+        self.insert_calls.append(kwargs)
+        return self
+
     def execute(self):
+        if self._inserted is not None:
+            return self._inserted
         return {"items": self._items}
 
 
+class FakeCalendarListResource:
+    """calendarList().get(calendarId=...) — the only place accessRole (and,
+    conveniently, timeZone) comes back, keyed by calendar_id per test."""
+
+    def __init__(self, entries: dict[str, dict]) -> None:
+        self._entries = entries
+        self.get_calls: list[dict] = []
+        self._current: dict = {}
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        self._current = self._entries[kwargs["calendarId"]]
+        return self
+
+    def execute(self):
+        return self._current
+
+
 class FakeCalendarService:
-    def __init__(self, items: list[dict]) -> None:
-        self._events = FakeEventsResource(items)
+    def __init__(
+        self,
+        items: list[dict] | None = None,
+        inserted: dict | None = None,
+        calendar_list_entries: dict[str, dict] | None = None,
+    ) -> None:
+        self._events = FakeEventsResource(items or [], inserted)
+        self._calendar_list = FakeCalendarListResource(calendar_list_entries or {})
 
     def events(self):
         return self._events
+
+    def calendarList(self):
+        return self._calendar_list
 
 
 def _google_item(event_id, summary, start, end, location=None):
@@ -169,3 +204,478 @@ async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
     assert "user_id" not in calendar_tool.get_calendar_events.__code__.co_varnames[
         : calendar_tool.get_calendar_events.__code__.co_argcount
     ]
+
+
+def _google_inserted(event_id, summary, start, end, html_link="https://calendar.example/e"):
+    return {
+        "id": event_id,
+        "summary": summary,
+        "start": {"dateTime": start},
+        "end": {"dateTime": end},
+        "htmlLink": html_link,
+    }
+
+
+async def test_add_calendar_event_needs_auth_when_nothing_connected(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise backend_client.NeedsAuth("https://connect.example/start", "not connected")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Dinner", "2026-08-04T20:00:00-07:00", "2026-08-04T21:30:00-07:00"
+    )
+    assert result == {
+        "status": "needs_auth",
+        "connect_url": "https://connect.example/start",
+        "message": "not connected",
+    }
+
+
+async def test_add_calendar_event_defaults_to_primary_calendar(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-work",
+                    "calendar_id": "me@work.com",
+                    "summary": "Work",
+                    "is_primary": False,
+                },
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Dinner with Arian", "2026-08-04T20:00:00-07:00", "2026-08-04T21:30:00-07:00"
+        ),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Dinner with Arian",
+        "2026-08-04T20:00:00-07:00",
+        "2026-08-04T21:30:00-07:00",
+    )
+
+    assert result == {
+        "status": "success",
+        "event": {
+            "event_id": "e1",
+            "title": "Dinner with Arian",
+            "start_time": "2026-08-04T20:00:00-07:00",
+            "end_time": "2026-08-04T21:30:00-07:00",
+            "html_link": "https://calendar.example/e",
+        },
+    }
+    # The primary calendar's id, not the first one in the raw list — and
+    # never even checked "me@work.com", since the primary was writable.
+    assert service.events().insert_calls[0]["calendarId"] == "me@gmail.com"
+    assert service.calendarList().get_calls == [{"calendarId": "me@gmail.com"}]
+
+
+async def test_add_calendar_event_uses_named_calendar(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                },
+                {
+                    "account_id": "acct-work",
+                    "calendar_id": "me@work.com",
+                    "summary": "Work",
+                    "is_primary": False,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    service = FakeCalendarService(
+        inserted=_google_inserted("e2", "Standup", "2026-08-05T09:00:00-07:00", "2026-08-05T09:15:00-07:00"),
+        calendar_list_entries={"me@work.com": {"accessRole": "writer"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Standup",
+        "2026-08-05T09:00:00-07:00",
+        "2026-08-05T09:15:00-07:00",
+        calendar_summary="Work",
+    )
+
+    assert result["status"] == "success"
+    assert service.events().insert_calls[0]["calendarId"] == "me@work.com"
+
+
+async def test_add_calendar_event_unknown_calendar_name(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Standup",
+        "2026-08-05T09:00:00-07:00",
+        "2026-08-05T09:15:00-07:00",
+        calendar_summary="Nonexistent",
+    )
+
+    assert result["status"] == "not_found"
+
+
+async def test_add_calendar_event_stale_account_needs_auth(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return None
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Standup", "2026-08-05T09:00:00-07:00", "2026-08-05T09:15:00-07:00"
+    )
+
+    assert result["status"] == "needs_auth"
+
+
+async def test_add_calendar_event_all_day_uses_date_field(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        inserted={
+            "id": "e3",
+            "summary": "Trip",
+            "start": {"date": "2026-08-10"},
+            "end": {"date": "2026-08-12"},
+            "htmlLink": "https://calendar.example/e3",
+        },
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Trip", "2026-08-10", "2026-08-12"
+    )
+
+    assert result["status"] == "success"
+    insert_body = service.events().insert_calls[0]["body"]
+    assert insert_body["start"] == {"date": "2026-08-10"}
+    assert insert_body["end"] == {"date": "2026-08-12"}
+
+
+async def test_add_calendar_event_naive_time_resolves_calendar_timezone(tool_context, monkeypatch):
+    """No UTC offset given ('8pm', not '8pm PST') — the tool must look up the
+    target calendar's own timezone rather than asking the user for one."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e4", "Dinner with Arian", "2026-08-04T20:00:00", "2026-08-04T21:30:00"
+        ),
+        calendar_list_entries={
+            "me@gmail.com": {"accessRole": "owner", "timeZone": "America/Los_Angeles"}
+        },
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Dinner with Arian", "2026-08-04T20:00:00", "2026-08-04T21:30:00"
+    )
+
+    assert result["status"] == "success"
+    assert service.calendarList().get_calls[0]["calendarId"] == "me@gmail.com"
+    insert_body = service.events().insert_calls[0]["body"]
+    assert insert_body["start"] == {
+        "dateTime": "2026-08-04T20:00:00",
+        "timeZone": "America/Los_Angeles",
+    }
+    assert insert_body["end"] == {
+        "dateTime": "2026-08-04T21:30:00",
+        "timeZone": "America/Los_Angeles",
+    }
+
+
+async def test_add_calendar_event_explicit_offset_ignores_calendar_timezone(tool_context, monkeypatch):
+    """When the user names a specific offset, the write-access check still
+    runs (it always must), but the calendar's own timeZone must not get
+    stapled onto a dateTime that already carries an explicit offset."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e5", "Call", "2026-08-04T20:00:00-07:00", "2026-08-04T20:30:00-07:00"
+        ),
+        calendar_list_entries={
+            "me@gmail.com": {"accessRole": "owner", "timeZone": "America/Los_Angeles"}
+        },
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Call", "2026-08-04T20:00:00-07:00", "2026-08-04T20:30:00-07:00"
+    )
+
+    assert result["status"] == "success"
+    insert_body = service.events().insert_calls[0]["body"]
+    assert insert_body["start"] == {"dateTime": "2026-08-04T20:00:00-07:00"}
+    assert insert_body["end"] == {"dateTime": "2026-08-04T20:30:00-07:00"}
+
+
+async def test_add_calendar_event_skips_read_only_calendar_and_falls_back(tool_context, monkeypatch):
+    """Reproduces the actual bug: no calendar is flagged primary, and the
+    first one in the list is a read-only subscribed calendar (Google's
+    @import.calendar.google.com convention for 'subscribe from URL' feeds,
+    e.g. a public holiday calendar). Must not blindly write there — must
+    skip it and use the real, writable one instead."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "abc123@import.calendar.google.com",
+                    "summary": "Holidays in Sweden",
+                    "is_primary": False,
+                },
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": False,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e6", "Dinner with Arian", "2026-08-04T20:00:00-07:00", "2026-08-04T21:30:00-07:00"
+        ),
+        calendar_list_entries={
+            "abc123@import.calendar.google.com": {
+                "accessRole": "reader",
+                "summary": "Holidays in Sweden",
+            },
+            "me@gmail.com": {"accessRole": "owner"},
+        },
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Dinner with Arian",
+        "2026-08-04T20:00:00-07:00",
+        "2026-08-04T21:30:00-07:00",
+    )
+
+    assert result["status"] == "success"
+    assert service.events().insert_calls[0]["calendarId"] == "me@gmail.com"
+    checked_ids = [c["calendarId"] for c in service.calendarList().get_calls]
+    assert checked_ids == ["abc123@import.calendar.google.com", "me@gmail.com"]
+
+
+async def test_add_calendar_event_named_calendar_read_only(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "holidays-se@group.v.calendar.google.com",
+                    "summary": "Holidays in Sweden",
+                    "is_primary": False,
+                }
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        calendar_list_entries={
+            "holidays-se@group.v.calendar.google.com": {"accessRole": "reader"}
+        }
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Some event",
+        "2026-08-04T20:00:00-07:00",
+        "2026-08-04T20:30:00-07:00",
+        calendar_summary="Holidays in Sweden",
+    )
+
+    assert result["status"] == "not_writable"
+    assert service.events().insert_calls == []
+
+
+async def test_add_calendar_event_all_candidates_read_only(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "holidays-se@group.v.calendar.google.com",
+                    "summary": "Holidays in Sweden",
+                    "is_primary": False,
+                },
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "shared-by-friend@group.calendar.google.com",
+                    "summary": "Friend's calendar",
+                    "is_primary": False,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        calendar_list_entries={
+            "holidays-se@group.v.calendar.google.com": {
+                "accessRole": "reader",
+                "summary": "Holidays in Sweden",
+            },
+            "shared-by-friend@group.calendar.google.com": {
+                "accessRole": "freeBusyReader",
+                "summary": "Friend's calendar",
+            },
+        }
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Some event", "2026-08-04T20:00:00-07:00", "2026-08-04T20:30:00-07:00"
+    )
+
+    assert result["status"] == "not_writable"
+    assert "Holidays in Sweden" in result["message"]
+    assert "Friend's calendar" in result["message"]
+    assert service.events().insert_calls == []

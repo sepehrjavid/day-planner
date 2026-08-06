@@ -236,6 +236,23 @@ resource "google_project_iam_member" "agent_aiplatform_user" {
   member  = google_service_account.agent.member
 }
 
+# GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=true (below) makes AdkApp export
+# spans and metrics over OTLP to Cloud Trace / Cloud Monitoring in this
+# project, authenticated as the agent's runtime SA. Without these two roles
+# those exports 403 (confirmed in logs: "Failed to export span batch" /
+# "Failed to export metrics batch").
+resource "google_project_iam_member" "agent_trace_agent" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = google_service_account.agent.member
+}
+
+resource "google_project_iam_member" "agent_metric_writer" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = google_service_account.agent.member
+}
+
 # Google's own Vertex AI service agents (not the agent's runtime SA above) —
 # auto-provisioned per project, need Compute Engine permissions to actually
 # wire up PSC-I during deployment, which nothing in roles/aiplatform.*
@@ -365,6 +382,8 @@ resource "google_vertex_ai_reasoning_engine" "day_planner_agent" {
   depends_on = [
     google_project_iam_member.agent_storage_viewer,
     google_project_iam_member.agent_aiplatform_user,
+    google_project_iam_member.agent_trace_agent,
+    google_project_iam_member.agent_metric_writer,
     google_project_iam_member.reasoning_engine_agent_network_viewer,
     google_project_iam_member.vertex_ai_agent_network_admin,
     google_compute_network_attachment.agent_psc,

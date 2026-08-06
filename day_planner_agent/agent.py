@@ -4,7 +4,7 @@ from google.adk.agents import Agent
 from google.adk.tools import load_memory
 from vertexai.agent_engines import AdkApp
 
-from .calendar_tool import get_calendar_events
+from .calendar_tool import add_calendar_event, get_calendar_events
 from .memory_tools import get_profile, save_memory, update_profile
 
 _llm_agent = Agent(
@@ -28,6 +28,22 @@ _llm_agent = Agent(
         "entirely outside this conversation, through that link. If it "
         "returns a \"note\" about skipped or stale accounts, mention that "
         "briefly so the user knows their summary might be incomplete.\n\n"
+        "When the user tells you about something that belongs on their "
+        "calendar — a plan, an appointment, a meeting — use "
+        "add_calendar_event to actually create it; do not just acknowledge "
+        "it or only save it to memory. Confirm the title and time back to "
+        "the user after creating it. It defaults to their primary calendar; "
+        "if they mention a specific calendar (e.g. \"put it on my work "
+        "calendar\") pass that as calendar_summary. If it returns "
+        "\"not_found\", tell the user which calendars are actually "
+        "connected instead of guessing. If it returns \"not_writable\", "
+        "say so plainly (e.g. a holiday or shared calendar they can only "
+        "view) rather than silently trying somewhere else. If it returns "
+        "\"needs_auth\", hand them the connect_url exactly as with "
+        "get_calendar_events. Give start_time/end_time as plain local "
+        "wall-clock time (e.g. \"2026-08-04T20:00:00\" for 8pm) — never ask "
+        "the user what timezone they're in, it's resolved automatically "
+        "from the target calendar.\n\n"
         "Saving to memory is explicit, not automatic — nothing is "
         "remembered unless you call a tool for it:\n"
         "- update_profile: a standing preference/constraint (gym timing, "
@@ -39,7 +55,14 @@ _llm_agent = Agent(
         "Call the relevant tool as soon as the user states something worth "
         "keeping, and briefly confirm what you saved."
     ),
-    tools=[get_calendar_events, load_memory, get_profile, update_profile, save_memory],
+    tools=[
+        get_calendar_events,
+        add_calendar_event,
+        load_memory,
+        get_profile,
+        update_profile,
+        save_memory,
+    ],
 )
 
 # Agent Engine's python_spec deployment (terraform/agent.tf) imports this
