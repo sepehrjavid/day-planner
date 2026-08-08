@@ -38,7 +38,8 @@ async def get_calendar_events(
     Returns:
         A dict with "status". On "success", "events" is a merged,
         time-sorted list across every connected and selected calendar, and
-        an optional "note" flags any accounts that were skipped. On
+        an optional "note" flags any accounts or calendars that were
+        skipped (stale account, or a calendar deleted on Google's side). On
         "needs_auth", "connect_url" is a link to hand the user — give it to
         them and stop; do not try to work around missing calendar access.
     """
@@ -61,6 +62,7 @@ async def get_calendar_events(
 
     events = []
     skipped_accounts = {aid for aid, token in tokens_by_account.items() if token is None}
+    removed_calendars = []
     for target in calendars["calendars"]:
         token = tokens_by_account.get(target["account_id"])
         if token is None:
@@ -72,6 +74,17 @@ async def get_calendar_events(
                 )
             )
         except HttpError as exc:
+            if _is_not_found(exc):
+                # The user deleted this calendar (or unsubscribed) on
+                # Google's side since we last synced it — drop it from
+                # storage so it isn't retried on every future request, and
+                # skip it here rather than failing the whole query over one
+                # stale calendar.
+                await backend_client.remove_calendar(
+                    user_id, target["account_id"], target["calendar_id"]
+                )
+                removed_calendars.append(target.get("summary") or target["calendar_id"])
+                continue
             return {"status": "error", "error_message": str(exc)}
 
     events.sort(key=lambda e: e["start_time"] or "")
@@ -87,6 +100,11 @@ async def get_calendar_events(
         notes.append(
             f"{len(skipped_accounts)} account(s) went stale mid-request and "
             "were skipped."
+        )
+    if removed_calendars:
+        notes.append(
+            f"{len(removed_calendars)} calendar(s) no longer exist on Google "
+            f"and were removed: {', '.join(removed_calendars)}."
         )
     if notes:
         result["note"] = " ".join(notes)
@@ -158,6 +176,7 @@ async def add_calendar_event(
     entry = None
     saw_any_token = False
     read_only_names = []
+    any_removed = False
     for candidate in candidates:
         token = await backend_client.access_token(user_id, candidate["account_id"])
         if token is None:
@@ -166,6 +185,15 @@ async def add_calendar_event(
         try:
             entry = await _fetch_calendar_list_entry(token, candidate["calendar_id"])
         except HttpError as exc:
+            if _is_not_found(exc):
+                # Deleted or unsubscribed on Google's side since we last
+                # synced it — drop it from storage and try the next
+                # candidate instead of failing outright.
+                await backend_client.remove_calendar(
+                    user_id, candidate["account_id"], candidate["calendar_id"]
+                )
+                any_removed = True
+                continue
             return {"status": "error", "error_message": str(exc)}
         if entry.get("accessRole") in _WRITABLE_ROLES:
             target = candidate
@@ -179,16 +207,26 @@ async def add_calendar_event(
                 "message": "That calendar's account needs reconnecting.",
             }
         if calendar_summary:
+            if any_removed and not read_only_names:
+                return {
+                    "status": "not_found",
+                    "message": f"{calendar_summary!r} no longer exists on Google.",
+                }
             return {
                 "status": "not_writable",
                 "message": f"You only have read access to {calendar_summary!r}.",
             }
+        if read_only_names:
+            return {
+                "status": "not_writable",
+                "message": (
+                    "None of your connected calendars can be written to "
+                    f"(read-only: {', '.join(read_only_names)})."
+                ),
+            }
         return {
-            "status": "not_writable",
-            "message": (
-                "None of your connected calendars can be written to "
-                f"(read-only: {', '.join(read_only_names)})."
-            ),
+            "status": "not_found",
+            "message": "No connected calendar to add this to.",
         }
 
     try:
@@ -202,12 +240,26 @@ async def add_calendar_event(
             entry.get("timeZone"),
         )
     except HttpError as exc:
+        if _is_not_found(exc):
+            # Rare race: it existed for the writability check a moment ago
+            # but was deleted before the insert landed.
+            await backend_client.remove_calendar(
+                user_id, target["account_id"], target["calendar_id"]
+            )
+            return {
+                "status": "not_found",
+                "message": "That calendar was just deleted on Google — try again.",
+            }
         return {"status": "error", "error_message": str(exc)}
 
     return {"status": "success", "event": event}
 
 
 _WRITABLE_ROLES = frozenset({"owner", "writer"})
+
+
+def _is_not_found(exc: HttpError) -> bool:
+    return exc.resp.status == 404
 
 
 def _candidate_calendars(calendars: list[dict], calendar_summary: str | None) -> list[dict]:

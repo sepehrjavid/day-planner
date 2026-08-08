@@ -384,6 +384,29 @@ class Store:
             return None
         return ConnectedAccount.from_dict(account_id, snapshot.to_dict() or {})
 
+    async def remove_calendar(
+        self, *, user_id: str, account_id: str, calendar_id: str
+    ) -> ConnectedAccount | None:
+        """Drop one calendar from an account's stored list.
+
+        Used when the agent gets a 404 from Google for a calendar_id we have
+        on file — the user deleted it or unsubscribed from it on Google's
+        side. Idempotent: removing an already-absent calendar_id is a no-op,
+        not an error, since two concurrent requests can both discover the
+        same 404.
+        """
+        ref = self._accounts(user_id).document(account_id)
+        snapshot = await ref.get()
+        if not snapshot.exists:
+            return None
+
+        data = snapshot.to_dict() or {}
+        calendars = [
+            c for c in data.get("calendars", []) if c.get("calendar_id") != calendar_id
+        ]
+        await ref.set({"calendars": calendars, "updated_at": utcnow()}, merge=True)
+        return ConnectedAccount.from_dict(account_id, {**data, "calendars": calendars})
+
     async def set_calendar_selection(
         self, *, user_id: str, account_id: str, selected_calendar_ids: set[str]
     ) -> ConnectedAccount | None:
