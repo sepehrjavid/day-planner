@@ -173,17 +173,6 @@ class FakeStore:
             status=STATUS_NEEDS_REAUTH, encrypted_refresh_token=None, last_error=reason
         )
 
-    async def remove_calendar(self, *, user_id, account_id, calendar_id):
-        # Unlike Firestore, seeded/saved calendars here are raw Calendar
-        # dataclass instances, not dicts — see seed_account/save_account.
-        data = self.accounts.get(user_id, {}).get(account_id)
-        if data is None:
-            return None
-        data["calendars"] = [
-            c for c in data.get("calendars", []) if c.calendar_id != calendar_id
-        ]
-        return self._to_account(account_id, data)
-
     async def delete_account(self, *, user_id, account_id):
         self.accounts.get(user_id, {}).pop(account_id, None)
         if self.users.get(user_id, {}).get("default_account_id") == account_id:

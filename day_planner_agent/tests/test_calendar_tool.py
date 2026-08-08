@@ -8,50 +8,25 @@ calendar_tool.py calls it correctly and handles every response shape it can
 return.
 """
 
-from googleapiclient.errors import HttpError
-
 from day_planner_agent import backend_client, calendar_tool
 
 
-class _FakeResp:
-    def __init__(self, status: int) -> None:
-        self.status = status
-        self.reason = "Not Found" if status == 404 else "Error"
-
-
-def _http_error(status: int = 404) -> HttpError:
-    return HttpError(_FakeResp(status), b'{"error": {"message": "gone"}}')
-
-
 class FakeEventsResource:
-    def __init__(
-        self,
-        items: list[dict],
-        inserted: dict | None = None,
-        raise_for: set[str] | None = None,
-    ) -> None:
+    def __init__(self, items: list[dict], inserted: dict | None = None) -> None:
         self._items = items
         self._inserted = inserted
-        # calendar_ids that should 404 on .list()/.insert() instead of
-        # returning normally — simulates a calendar deleted on Google's side.
-        self._raise_for = raise_for or set()
         self.list_calls: list[dict] = []
         self.insert_calls: list[dict] = []
-        self._current_calendar_id: str | None = None
 
     def list(self, **kwargs):
         self.list_calls.append(kwargs)
-        self._current_calendar_id = kwargs.get("calendarId")
         return self
 
     def insert(self, **kwargs):
         self.insert_calls.append(kwargs)
-        self._current_calendar_id = kwargs.get("calendarId")
         return self
 
     def execute(self):
-        if self._current_calendar_id in self._raise_for:
-            raise _http_error(404)
         if self._inserted is not None:
             return self._inserted
         return {"items": self._items}
@@ -59,16 +34,12 @@ class FakeEventsResource:
 
 class FakeCalendarListResource:
     """calendarList().get(calendarId=...) — the only place accessRole (and,
-    conveniently, timeZone) comes back, keyed by calendar_id per test.
+    conveniently, timeZone) comes back, keyed by calendar_id per test."""
 
-    An entry value of the string "404" simulates a calendar deleted on
-    Google's side since it was last synced.
-    """
-
-    def __init__(self, entries: dict[str, dict | str]) -> None:
+    def __init__(self, entries: dict[str, dict]) -> None:
         self._entries = entries
         self.get_calls: list[dict] = []
-        self._current: dict | str = {}
+        self._current: dict = {}
 
     def get(self, **kwargs):
         self.get_calls.append(kwargs)
@@ -76,8 +47,6 @@ class FakeCalendarListResource:
         return self
 
     def execute(self):
-        if self._current == "404":
-            raise _http_error(404)
         return self._current
 
 
@@ -87,9 +56,8 @@ class FakeCalendarService:
         items: list[dict] | None = None,
         inserted: dict | None = None,
         calendar_list_entries: dict[str, dict] | None = None,
-        events_raise_for: set[str] | None = None,
     ) -> None:
-        self._events = FakeEventsResource(items or [], inserted, events_raise_for)
+        self._events = FakeEventsResource(items or [], inserted)
         self._calendar_list = FakeCalendarListResource(calendar_list_entries or {})
 
     def events(self):
@@ -711,199 +679,3 @@ async def test_add_calendar_event_all_candidates_read_only(tool_context, monkeyp
     assert "Holidays in Sweden" in result["message"]
     assert "Friend's calendar" in result["message"]
     assert service.events().insert_calls == []
-
-
-async def test_get_calendar_events_skips_and_prunes_deleted_calendar(tool_context, monkeypatch):
-    """Google 404s on a calendar the user deleted/unsubscribed from since we
-    last synced it — must skip just that calendar (not fail the whole
-    query) and tell the backend to drop it from storage."""
-
-    async def list_calendars(user_id):
-        return {
-            "connected": True,
-            "needs_reauth": [],
-            "calendars": [
-                {
-                    "account_id": "acct-personal",
-                    "calendar_id": "deleted@group.calendar.google.com",
-                    "summary": "Old Trip Calendar",
-                },
-                {"account_id": "acct-personal", "calendar_id": "me@gmail.com"},
-            ],
-        }
-
-    async def access_token(user_id, account_id):
-        return "AT-1"
-
-    removed_calls = []
-
-    async def remove_calendar(user_id, account_id, calendar_id):
-        removed_calls.append((user_id, account_id, calendar_id))
-
-    service = FakeCalendarService(
-        items=[_google_item("e1", "Standup", "2026-08-01T09:00:00Z", "2026-08-01T10:00:00Z")],
-        events_raise_for={"deleted@group.calendar.google.com"},
-    )
-
-    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
-    monkeypatch.setattr(backend_client, "access_token", access_token)
-    monkeypatch.setattr(backend_client, "remove_calendar", remove_calendar)
-    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
-
-    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
-
-    assert result["status"] == "success"
-    assert [e["event_id"] for e in result["events"]] == ["e1"]
-    assert "Old Trip Calendar" in result["note"]
-    assert removed_calls == [
-        ("user-1", "acct-personal", "deleted@group.calendar.google.com")
-    ]
-
-
-async def test_add_calendar_event_skips_deleted_candidate_and_falls_back(tool_context, monkeypatch):
-    """No calendar named — the primary was deleted on Google's side since
-    the last sync (404 on the calendarList lookup). Must prune it and fall
-    through to the next candidate instead of erroring out."""
-
-    async def list_calendars(user_id):
-        return {
-            "connected": True,
-            "needs_reauth": [],
-            "calendars": [
-                {
-                    "account_id": "acct-personal",
-                    "calendar_id": "deleted@group.calendar.google.com",
-                    "summary": "Old Primary",
-                    "is_primary": True,
-                },
-                {
-                    "account_id": "acct-personal",
-                    "calendar_id": "me@gmail.com",
-                    "summary": "Personal",
-                    "is_primary": False,
-                },
-            ],
-        }
-
-    async def access_token(user_id, account_id):
-        return "AT-1"
-
-    removed_calls = []
-
-    async def remove_calendar(user_id, account_id, calendar_id):
-        removed_calls.append((user_id, account_id, calendar_id))
-
-    service = FakeCalendarService(
-        inserted=_google_inserted(
-            "e7", "Dentist", "2026-08-04T09:00:00-07:00", "2026-08-04T09:30:00-07:00"
-        ),
-        calendar_list_entries={
-            "deleted@group.calendar.google.com": "404",
-            "me@gmail.com": {"accessRole": "owner"},
-        },
-    )
-
-    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
-    monkeypatch.setattr(backend_client, "access_token", access_token)
-    monkeypatch.setattr(backend_client, "remove_calendar", remove_calendar)
-    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
-
-    result = await calendar_tool.add_calendar_event(
-        tool_context, "Dentist", "2026-08-04T09:00:00-07:00", "2026-08-04T09:30:00-07:00"
-    )
-
-    assert result["status"] == "success"
-    assert service.events().insert_calls[0]["calendarId"] == "me@gmail.com"
-    assert removed_calls == [
-        ("user-1", "acct-personal", "deleted@group.calendar.google.com")
-    ]
-
-
-async def test_add_calendar_event_named_calendar_deleted_returns_not_found(tool_context, monkeypatch):
-    async def list_calendars(user_id):
-        return {
-            "connected": True,
-            "needs_reauth": [],
-            "calendars": [
-                {
-                    "account_id": "acct-personal",
-                    "calendar_id": "deleted@group.calendar.google.com",
-                    "summary": "Old Trip Calendar",
-                    "is_primary": False,
-                }
-            ],
-        }
-
-    async def access_token(user_id, account_id):
-        return "AT-1"
-
-    removed_calls = []
-
-    async def remove_calendar(user_id, account_id, calendar_id):
-        removed_calls.append((user_id, account_id, calendar_id))
-
-    service = FakeCalendarService(
-        calendar_list_entries={"deleted@group.calendar.google.com": "404"}
-    )
-
-    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
-    monkeypatch.setattr(backend_client, "access_token", access_token)
-    monkeypatch.setattr(backend_client, "remove_calendar", remove_calendar)
-    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
-
-    result = await calendar_tool.add_calendar_event(
-        tool_context,
-        "Some event",
-        "2026-08-04T09:00:00-07:00",
-        "2026-08-04T09:30:00-07:00",
-        calendar_summary="Old Trip Calendar",
-    )
-
-    assert result["status"] == "not_found"
-    assert removed_calls == [
-        ("user-1", "acct-personal", "deleted@group.calendar.google.com")
-    ]
-
-
-async def test_add_calendar_event_deleted_between_check_and_insert(tool_context, monkeypatch):
-    """Rare race: the writability check passed, but the calendar was deleted
-    on Google's side a moment later, right before the insert landed."""
-
-    async def list_calendars(user_id):
-        return {
-            "connected": True,
-            "needs_reauth": [],
-            "calendars": [
-                {
-                    "account_id": "acct-personal",
-                    "calendar_id": "me@gmail.com",
-                    "summary": "Personal",
-                    "is_primary": True,
-                }
-            ],
-        }
-
-    async def access_token(user_id, account_id):
-        return "AT-1"
-
-    removed_calls = []
-
-    async def remove_calendar(user_id, account_id, calendar_id):
-        removed_calls.append((user_id, account_id, calendar_id))
-
-    service = FakeCalendarService(
-        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
-        events_raise_for={"me@gmail.com"},
-    )
-
-    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
-    monkeypatch.setattr(backend_client, "access_token", access_token)
-    monkeypatch.setattr(backend_client, "remove_calendar", remove_calendar)
-    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
-
-    result = await calendar_tool.add_calendar_event(
-        tool_context, "Standup", "2026-08-05T09:00:00-07:00", "2026-08-05T09:15:00-07:00"
-    )
-
-    assert result["status"] == "not_found"
-    assert removed_calls == [("user-1", "acct-personal", "me@gmail.com")]

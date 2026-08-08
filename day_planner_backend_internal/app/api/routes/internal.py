@@ -21,7 +21,6 @@ from ...schemas.calendars import (
     ConnectLinkRequest,
     ConnectLinkResponse,
     DisconnectRequest,
-    RemoveCalendarRequest,
 )
 from ...services import connections
 from ..deps import (
@@ -138,27 +137,6 @@ async def access_token(
         expires_at=token.expires_at,
         scopes=token.scopes,
     )
-
-
-@router.post("/remove-calendar")
-async def remove_calendar(
-    body: RemoveCalendarRequest,
-    store: Store = Depends(get_store),
-):
-    """Drop a calendar the agent found 404ing on Google's side (deleted or
-    unsubscribed) from the stored list, so it stops being retried on every
-    future request.
-
-    404s if the account itself is gone — otherwise idempotent, since the
-    calendar may already be absent (e.g. two concurrent requests both hit
-    the same stale entry).
-    """
-    account = await store.remove_calendar(
-        user_id=body.user_id, account_id=body.account_id, calendar_id=body.calendar_id
-    )
-    if account is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    return {"status": "removed"}
 
 
 @router.post("/disconnect")

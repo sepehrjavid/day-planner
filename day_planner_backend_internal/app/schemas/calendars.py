@@ -40,11 +40,6 @@ class DisconnectRequest(InternalUserRequest):
     account_id: str
 
 
-class RemoveCalendarRequest(InternalUserRequest):
-    account_id: str
-    calendar_id: str
-
-
 class CalendarTarget(BaseModel):
     account_id: str
     provider: str

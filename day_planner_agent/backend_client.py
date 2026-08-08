@@ -12,14 +12,11 @@ included, with zero credentials checked into this codebase).
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 
 import httpx
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token as google_id_token
-
-logger = logging.getLogger(__name__)
 
 INTERNAL_BACKEND_URL = os.environ["INTERNAL_BACKEND_URL"].rstrip("/")
 
@@ -98,27 +95,3 @@ async def access_token(user_id: str, account_id: str) -> str | None:
         return None
     response.raise_for_status()
     return response.json()["access_token"]
-
-
-async def remove_calendar(user_id: str, account_id: str, calendar_id: str) -> None:
-    """Tell the backend a calendar 404d on Google's side (deleted or
-    unsubscribed) so it stops being retried on every future request.
-
-    Best-effort cleanup, not part of the tool call's own success/failure —
-    the caller has already decided to skip this calendar regardless, so a
-    failure here is logged and swallowed rather than propagated.
-    """
-    try:
-        async with await _client() as client:
-            response = await client.post(
-                "/internal/remove-calendar",
-                json={"user_id": user_id, "account_id": account_id, "calendar_id": calendar_id},
-            )
-        response.raise_for_status()
-    except httpx.HTTPError:
-        logger.warning(
-            "remove_calendar failed for account_id=%s calendar_id=%s",
-            account_id,
-            calendar_id,
-            exc_info=True,
-        )

@@ -220,69 +220,6 @@ def test_rotated_refresh_token_is_persisted(client, store, fake_crypto, monkeypa
 
 
 # ---------------------------------------------------------------------------
-# /internal/remove-calendar
-# ---------------------------------------------------------------------------
-
-
-def test_remove_calendar_drops_it_from_the_stored_list(client, store):
-    account_id = store.seed_account(
-        user_id="u1",
-        calendars=[
-            Calendar("me@gmail.com", "Me", is_primary=True, selected=True),
-            Calendar(
-                "deleted@group.calendar.google.com",
-                "Gone",
-                is_primary=False,
-                selected=True,
-            ),
-        ],
-    )
-
-    response = client.post(
-        "/internal/remove-calendar",
-        json={
-            "user_id": "u1",
-            "account_id": account_id,
-            "calendar_id": "deleted@group.calendar.google.com",
-        },
-    )
-    assert response.status_code == 200
-
-    remaining = store.accounts["u1"][account_id]["calendars"]
-    assert [c.calendar_id for c in remaining] == ["me@gmail.com"]
-
-
-def test_remove_calendar_unknown_account_is_404(client):
-    response = client.post(
-        "/internal/remove-calendar",
-        json={"user_id": "u1", "account_id": "ghost", "calendar_id": "x@y.com"},
-    )
-    assert response.status_code == 404
-
-
-def test_remove_calendar_is_idempotent(client, store):
-    """Already-gone calendar_id — not an error, since two concurrent
-    requests can both discover the same stale entry."""
-    account_id = store.seed_account(
-        user_id="u1",
-        calendars=[Calendar("me@gmail.com", "Me", is_primary=True, selected=True)],
-    )
-
-    response = client.post(
-        "/internal/remove-calendar",
-        json={
-            "user_id": "u1",
-            "account_id": account_id,
-            "calendar_id": "already-gone@group.calendar.google.com",
-        },
-    )
-    assert response.status_code == 200
-    assert [c.calendar_id for c in store.accounts["u1"][account_id]["calendars"]] == [
-        "me@gmail.com"
-    ]
-
-
-# ---------------------------------------------------------------------------
 # /internal/disconnect
 # ---------------------------------------------------------------------------
 
