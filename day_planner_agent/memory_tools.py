@@ -60,8 +60,18 @@ async def update_profile(
     Call this whenever the user states or corrects a standing
     preference/constraint worth remembering across sessions (gym
     duration/timing, sleep schedule, work hours, meal times, energy
-    patterns, etc). Only pass the fields that changed — this merges into
+    patterns, etc), including a recurring goal with a flexible per-session
+    range (e.g. "180 minutes of exercise a week, sessions 30 to 60
+    minutes") — not for a single day's plan, which belongs on the
+    calendar instead. Only pass the fields that changed — this merges into
     the existing profile rather than replacing it.
+
+    The profile must stay minimal: one current statement per topic, never
+    two overlapping ones. If the user is changing a preference already in
+    their profile (check get_profile first), write preferences as the full
+    corrected statement for that topic so it supersedes the stale one,
+    rather than appending a second, conflicting statement about the same
+    thing.
 
     Calendar connections are not part of this profile and never go through
     this tool — see get_calendar_events, which returns a connect_url when a

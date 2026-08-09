@@ -207,6 +207,112 @@ async def add_calendar_event(
     return {"status": "success", "event": event}
 
 
+async def update_calendar_event(
+    tool_context: ToolContext,
+    event_id: str,
+    calendar_id: str,
+    summary: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    location: str | None = None,
+) -> dict:
+    """Modify an existing event on one of the user's connected calendars.
+
+    event_id and calendar_id identify which event to change — both come
+    from a prior get_calendar_events (or add_calendar_event) result's
+    "event_id"/"calendar_id" fields. Never guess or ask the user for
+    these; look the event up first if you don't already have them from
+    earlier in the conversation.
+
+    Only pass the fields that are actually changing — this is a partial
+    update, everything else on the event is left as-is. start_time and
+    end_time, if given, replace the corresponding field independently (you
+    can move just the start, or just the end).
+
+    Args:
+        event_id: The event's id, from a prior get_calendar_events or
+            add_calendar_event result.
+        calendar_id: The calendar the event lives on, from the same prior
+            result (its "calendar_id" field).
+        summary: New event title, if it's changing.
+        start_time: New start time. Same format as add_calendar_event's
+            start_time — local wall-clock time with no UTC offset unless
+            the user names a specific timezone; resolved automatically
+            against the target calendar's own timezone.
+        end_time: New end time, same format as start_time.
+        location: New free-text location, if it's changing.
+
+    Returns:
+        A dict with "status". On "success", "event" has the updated
+        event's id, title, times, and a link. On "needs_auth",
+        "connect_url" is a link to hand the user. On "not_found", either
+        calendar_id doesn't match a connected calendar or event_id doesn't
+        exist there — tell the user rather than guessing. On
+        "not_writable", the calendar is read-only for this user.
+    """
+    if not any([summary, start_time, end_time, location]):
+        return {"status": "error", "message": "No fields provided to update."}
+
+    user_id = tool_context.session.user_id
+
+    try:
+        calendars = await backend_client.list_calendars(user_id)
+    except backend_client.NeedsAuth as exc:
+        return {
+            "status": "needs_auth",
+            "connect_url": exc.connect_url,
+            "message": exc.message,
+        }
+
+    candidate = next(
+        (c for c in calendars["calendars"] if c["calendar_id"] == calendar_id), None
+    )
+    if candidate is None:
+        return {
+            "status": "not_found",
+            "message": f"No connected calendar with id {calendar_id!r}.",
+        }
+
+    token = await backend_client.access_token(user_id, candidate["account_id"])
+    if token is None:
+        return {
+            "status": "needs_auth",
+            "message": "That calendar's account needs reconnecting.",
+        }
+
+    try:
+        entry = await _fetch_calendar_list_entry(token, calendar_id)
+    except HttpError as exc:
+        return {"status": "error", "error_message": str(exc)}
+
+    if entry.get("accessRole") not in _WRITABLE_ROLES:
+        return {
+            "status": "not_writable",
+            "message": f"You only have read access to {entry.get('summary') or calendar_id!r}.",
+        }
+
+    try:
+        event = await _patch_google_event(
+            token,
+            calendar_id,
+            event_id,
+            summary,
+            start_time,
+            end_time,
+            location,
+            entry.get("timeZone"),
+        )
+    except HttpError as exc:
+        if exc.resp.status == 404:
+            return {
+                "status": "not_found",
+                "message": f"No event {event_id!r} on that calendar.",
+            }
+        return {"status": "error", "error_message": str(exc)}
+
+    return {"status": "success", "event": event}
+
+
 _WRITABLE_ROLES = frozenset({"owner", "writer"})
 
 
@@ -284,6 +390,7 @@ async def _insert_google_event(
         end = item.get("end", {})
         return {
             "event_id": item.get("id"),
+            "calendar_id": calendar_id,
             "title": item.get("summary"),
             "start_time": start.get("dateTime", start.get("date")),
             "end_time": end.get("dateTime", end.get("date")),
@@ -293,6 +400,49 @@ async def _insert_google_event(
     # googleapiclient is synchronous; keep it off the event loop like every
     # other blocking call in this codebase.
     return await asyncio.to_thread(_insert)
+
+
+async def _patch_google_event(
+    access_token: str,
+    calendar_id: str,
+    event_id: str,
+    summary: str | None,
+    start_time: str | None,
+    end_time: str | None,
+    location: str | None,
+    calendar_timezone: str | None,
+) -> dict:
+    def _patch() -> dict:
+        creds = Credentials(token=access_token)
+        service = build("calendar", "v3", credentials=creds)
+        body: dict = {}
+        if summary is not None:
+            body["summary"] = summary
+        if start_time is not None:
+            body["start"] = _time_field(start_time, calendar_timezone)
+        if end_time is not None:
+            body["end"] = _time_field(end_time, calendar_timezone)
+        if location is not None:
+            body["location"] = location
+        item = (
+            service.events()
+            .patch(calendarId=calendar_id, eventId=event_id, body=body)
+            .execute()
+        )
+        start = item.get("start", {})
+        end = item.get("end", {})
+        return {
+            "event_id": item.get("id"),
+            "calendar_id": calendar_id,
+            "title": item.get("summary"),
+            "start_time": start.get("dateTime", start.get("date")),
+            "end_time": end.get("dateTime", end.get("date")),
+            "html_link": item.get("htmlLink"),
+        }
+
+    # googleapiclient is synchronous; keep it off the event loop like every
+    # other blocking call in this codebase.
+    return await asyncio.to_thread(_patch)
 
 
 async def _fetch_google_events(

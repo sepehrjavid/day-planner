@@ -8,15 +8,29 @@ calendar_tool.py calls it correctly and handles every response shape it can
 return.
 """
 
+from types import SimpleNamespace
+
+from googleapiclient.errors import HttpError
+
 from day_planner_agent import backend_client, calendar_tool
 
 
 class FakeEventsResource:
-    def __init__(self, items: list[dict], inserted: dict | None = None) -> None:
+    """`inserted` doubles as the fixed response for both insert() and
+    patch() — no test in this file exercises both on the same fake."""
+
+    def __init__(
+        self,
+        items: list[dict],
+        inserted: dict | None = None,
+        patch_error: Exception | None = None,
+    ) -> None:
         self._items = items
         self._inserted = inserted
+        self._patch_error = patch_error
         self.list_calls: list[dict] = []
         self.insert_calls: list[dict] = []
+        self.patch_calls: list[dict] = []
 
     def list(self, **kwargs):
         self.list_calls.append(kwargs)
@@ -26,7 +40,13 @@ class FakeEventsResource:
         self.insert_calls.append(kwargs)
         return self
 
+    def patch(self, **kwargs):
+        self.patch_calls.append(kwargs)
+        return self
+
     def execute(self):
+        if self.patch_calls and self._patch_error is not None:
+            raise self._patch_error
         if self._inserted is not None:
             return self._inserted
         return {"items": self._items}
@@ -56,8 +76,9 @@ class FakeCalendarService:
         items: list[dict] | None = None,
         inserted: dict | None = None,
         calendar_list_entries: dict[str, dict] | None = None,
+        patch_error: Exception | None = None,
     ) -> None:
-        self._events = FakeEventsResource(items or [], inserted)
+        self._events = FakeEventsResource(items or [], inserted, patch_error)
         self._calendar_list = FakeCalendarListResource(calendar_list_entries or {})
 
     def events(self):
@@ -278,6 +299,7 @@ async def test_add_calendar_event_defaults_to_primary_calendar(tool_context, mon
         "status": "success",
         "event": {
             "event_id": "e1",
+            "calendar_id": "me@gmail.com",
             "title": "Dinner with Arian",
             "start_time": "2026-08-04T20:00:00-07:00",
             "end_time": "2026-08-04T21:30:00-07:00",
@@ -679,3 +701,164 @@ async def test_add_calendar_event_all_candidates_read_only(tool_context, monkeyp
     assert "Holidays in Sweden" in result["message"]
     assert "Friend's calendar" in result["message"]
     assert service.events().insert_calls == []
+
+
+async def test_update_calendar_event_no_fields_is_an_error(tool_context):
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com"
+    )
+    assert result["status"] == "error"
+
+
+async def test_update_calendar_event_needs_auth_when_nothing_connected(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise backend_client.NeedsAuth("https://connect.example/start", "not connected")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", summary="Renamed"
+    )
+    assert result == {
+        "status": "needs_auth",
+        "connect_url": "https://connect.example/start",
+        "message": "not connected",
+    }
+
+
+async def test_update_calendar_event_unknown_calendar_id(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-personal", "calendar_id": "me@gmail.com"}
+            ],
+        }
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@work.com", summary="Renamed"
+    )
+    assert result["status"] == "not_found"
+
+
+async def test_update_calendar_event_stale_account_needs_auth(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-personal", "calendar_id": "me@gmail.com"}
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return None
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", summary="Renamed"
+    )
+    assert result["status"] == "needs_auth"
+
+
+async def test_update_calendar_event_read_only_calendar(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-personal", "calendar_id": "me@gmail.com"}
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        calendar_list_entries={"me@gmail.com": {"accessRole": "reader"}}
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", summary="Renamed"
+    )
+    assert result["status"] == "not_writable"
+    assert service.events().patch_calls == []
+
+
+async def test_update_calendar_event_not_found(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-personal", "calendar_id": "me@gmail.com"}
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+        patch_error=HttpError(SimpleNamespace(status=404, reason="Not Found"), b"{}"),
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e-missing", "me@gmail.com", summary="Renamed"
+    )
+    assert result["status"] == "not_found"
+
+
+async def test_update_calendar_event_partial_update_only_sends_changed_fields(
+    tool_context, monkeypatch
+):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-personal", "calendar_id": "me@gmail.com"}
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Dinner with Arian", "2026-08-04T21:00:00", "2026-08-04T22:00:00"
+        ),
+        calendar_list_entries={
+            "me@gmail.com": {"accessRole": "owner", "timeZone": "America/Los_Angeles"}
+        },
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", start_time="2026-08-04T21:00:00"
+    )
+
+    assert result["status"] == "success"
+    assert result["event"]["calendar_id"] == "me@gmail.com"
+    patch_call = service.events().patch_calls[0]
+    assert patch_call["calendarId"] == "me@gmail.com"
+    assert patch_call["eventId"] == "e1"
+    assert patch_call["body"] == {
+        "start": {"dateTime": "2026-08-04T21:00:00", "timeZone": "America/Los_Angeles"}
+    }
