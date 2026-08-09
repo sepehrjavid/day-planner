@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from google.adk.agents import Agent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import load_memory
 from vertexai.agent_engines import AdkApp
@@ -13,14 +14,49 @@ from .calendar_tool import (
 )
 from .memory_tools import get_profile, save_memory, update_profile
 
+# Session-state keys the preload callback below writes to and the
+# instruction reads from. Prefixed so they don't collide with anything a
+# tool call might stash in state.
+_PROFILE_PRELOADED_KEY = "day_planner:profile_preloaded"
+_PRELOADED_PROFILE_KEY = "day_planner:preloaded_profile"
 
-def _build_instruction(_: ReadonlyContext) -> str:
+
+async def _preload_profile(callback_context: CallbackContext) -> None:
+    """Fetches the user's profile once per session, before the model ever
+    sees the first turn.
+
+    Telling the model in its instructions to "call get_profile at the
+    start of a conversation" is a suggestion, not a guarantee — an LLM can
+    and does skip it, which meant the agent sometimes claimed to not know
+    preferences that were actually on file. Running this as a
+    before_agent_callback makes the first turn's profile lookup
+    unconditional instead of dependent on the model choosing to act on an
+    instruction. Later turns are a cheap state-flag check away from a
+    no-op.
+    """
+    if callback_context.state.get(_PROFILE_PRELOADED_KEY):
+        return
+    callback_context.state[_PROFILE_PRELOADED_KEY] = True
+
+    result = await get_profile(callback_context)
+    if result.get("status") == "success" and result.get("profile"):
+        callback_context.state[_PRELOADED_PROFILE_KEY] = result["profile"]
+
+
+def _build_instruction(ctx: ReadonlyContext) -> str:
     # A plain f-string here would bake in whatever date the process happened
     # to import this module on — Agent Engine keeps this Agent instance alive
     # and reuses it across requests for the deployment's whole lifetime, so
     # "today" would silently go stale until the next redeploy. Using a
     # callable (ADK's InstructionProvider) makes ADK re-resolve it on every
     # turn instead.
+    preloaded_profile = ctx.state.get(_PRELOADED_PROFILE_KEY)
+    profile_section = (
+        f"The user's standing preferences, already loaded for this "
+        f"session: {preloaded_profile}\n\n"
+        if preloaded_profile
+        else "No standing preferences are on file for this user yet.\n\n"
+    )
     return (
         f"You are a day planning assistant. Today is {datetime.now().strftime('%B %d, %Y')}. "
         "Your primary job is helping the user actually follow through on "
@@ -30,10 +66,13 @@ def _build_instruction(_: ReadonlyContext) -> str:
         "time blocks. Remembering preferences is in service of that: it's "
         "how you know what to schedule and how to schedule it well, never "
         "a substitute for putting real time on the calendar.\n\n"
-        "At the start of a conversation, call get_profile to recall the "
-        "user's standing preferences. Treat it as ground truth; don't ask "
-        "the user to repeat information already in their profile. For "
-        "anything else you might need that isn't in the profile (a one-off "
+        f"{profile_section}"
+        "Treat this as ground truth and don't ask the user to repeat "
+        "information already there; you don't need to call get_profile "
+        "yourself to see it. It's still available if you want to "
+        "re-check after calling update_profile mid-conversation, since "
+        "the snapshot above is only fetched once, at the start of the "
+        "session. For anything else you might need that isn't in the profile (a one-off "
         "note from a past session, a correction, something that happened), "
         "use load_memory to search. Each load_memory result carries a "
         "timestamp of when that note was saved; if two or more results "
@@ -130,8 +169,8 @@ def _build_instruction(_: ReadonlyContext) -> str:
         "generalizes across days, not a single day's plan "
         "that's already been (or is being) put on the calendar. Keep the "
         "profile minimal: one current statement per topic, never two "
-        "overlapping ones. Before saving, check what get_profile already "
-        "returned — if the user is changing a preference you already have "
+        "overlapping ones. Before saving, check the preferences shown "
+        "above — if the user is changing a preference you already have "
         "(e.g. profile says \"gym 30 min every day\" and they now say "
         "\"gym 45 min twice a day plus 1hr group training weekly\"), pass "
         "preferences as the full corrected statement for that topic so it "
@@ -155,6 +194,7 @@ _llm_agent = Agent(
         "using saved preferences."
     ),
     instruction=_build_instruction,
+    before_agent_callback=_preload_profile,
     tools=[
         get_calendar_events,
         add_calendar_event,

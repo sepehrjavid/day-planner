@@ -388,6 +388,18 @@ resource "google_vertex_ai_reasoning_engine" "day_planner_agent" {
     google_project_iam_member.vertex_ai_agent_network_admin,
     google_compute_network_attachment.agent_psc,
   ]
+
+  # context_spec (Memory Bank's structured-profile schema registration and
+  # its disable-natural-language-memories customization) is set out-of-band
+  # by scripts/register_profile_schema.py, not declared here — this
+  # resource's config has never included it. Without ignore_changes,
+  # Terraform treats that absence as "should be empty" and every apply
+  # silently wipes it back out, breaking day_planner_agent's get_profile
+  # (see scripts/register_profile_schema.py's own docstring: it's meant to
+  # be one-time setup, not something re-applied on every deploy).
+  lifecycle {
+    ignore_changes = [context_spec]
+  }
 }
 
 # ---------------------------------------------------------------------------
