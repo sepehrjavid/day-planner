@@ -313,6 +313,85 @@ async def update_calendar_event(
     return {"status": "success", "event": event}
 
 
+async def delete_calendar_event(
+    tool_context: ToolContext,
+    event_id: str,
+    calendar_id: str,
+) -> dict:
+    """Delete an existing event from one of the user's connected calendars.
+
+    event_id and calendar_id identify which event to remove — both come
+    from a prior get_calendar_events (or add_calendar_event) result's
+    "event_id"/"calendar_id" fields. Never guess or ask the user for
+    these; look the event up first if you don't already have them from
+    earlier in the conversation. This is irreversible — confirm with the
+    user before calling this.
+
+    Args:
+        event_id: The event's id, from a prior get_calendar_events or
+            add_calendar_event result.
+        calendar_id: The calendar the event lives on, from the same prior
+            result (its "calendar_id" field).
+
+    Returns:
+        A dict with "status". On "success", the event was deleted. On
+        "needs_auth", "connect_url" is a link to hand the user. On
+        "not_found", either calendar_id doesn't match a connected calendar
+        or event_id doesn't exist there — tell the user rather than
+        guessing. On "not_writable", the calendar is read-only for this
+        user.
+    """
+    user_id = tool_context.session.user_id
+
+    try:
+        calendars = await backend_client.list_calendars(user_id)
+    except backend_client.NeedsAuth as exc:
+        return {
+            "status": "needs_auth",
+            "connect_url": exc.connect_url,
+            "message": exc.message,
+        }
+
+    candidate = next(
+        (c for c in calendars["calendars"] if c["calendar_id"] == calendar_id), None
+    )
+    if candidate is None:
+        return {
+            "status": "not_found",
+            "message": f"No connected calendar with id {calendar_id!r}.",
+        }
+
+    token = await backend_client.access_token(user_id, candidate["account_id"])
+    if token is None:
+        return {
+            "status": "needs_auth",
+            "message": "That calendar's account needs reconnecting.",
+        }
+
+    try:
+        entry = await _fetch_calendar_list_entry(token, calendar_id)
+    except HttpError as exc:
+        return {"status": "error", "error_message": str(exc)}
+
+    if entry.get("accessRole") not in _WRITABLE_ROLES:
+        return {
+            "status": "not_writable",
+            "message": f"You only have read access to {entry.get('summary') or calendar_id!r}.",
+        }
+
+    try:
+        await _delete_google_event(token, calendar_id, event_id)
+    except HttpError as exc:
+        if exc.resp.status == 404:
+            return {
+                "status": "not_found",
+                "message": f"No event {event_id!r} on that calendar.",
+            }
+        return {"status": "error", "error_message": str(exc)}
+
+    return {"status": "success"}
+
+
 _WRITABLE_ROLES = frozenset({"owner", "writer"})
 
 
@@ -443,6 +522,17 @@ async def _patch_google_event(
     # googleapiclient is synchronous; keep it off the event loop like every
     # other blocking call in this codebase.
     return await asyncio.to_thread(_patch)
+
+
+async def _delete_google_event(access_token: str, calendar_id: str, event_id: str) -> None:
+    def _delete() -> None:
+        creds = Credentials(token=access_token)
+        service = build("calendar", "v3", credentials=creds)
+        service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+
+    # googleapiclient is synchronous; keep it off the event loop like every
+    # other blocking call in this codebase.
+    await asyncio.to_thread(_delete)
 
 
 async def _fetch_google_events(

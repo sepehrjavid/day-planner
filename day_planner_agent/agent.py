@@ -5,7 +5,12 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import load_memory
 from vertexai.agent_engines import AdkApp
 
-from .calendar_tool import add_calendar_event, get_calendar_events, update_calendar_event
+from .calendar_tool import (
+    add_calendar_event,
+    delete_calendar_event,
+    get_calendar_events,
+    update_calendar_event,
+)
 from .memory_tools import get_profile, save_memory, update_profile
 
 
@@ -81,6 +86,18 @@ def _build_instruction(_: ReadonlyContext) -> str:
         "the fields that are actually changing. It fails the same way "
         "add_calendar_event does (\"needs_auth\", \"not_found\", "
         "\"not_writable\") — handle those identically.\n\n"
+        "When the user wants to remove or cancel something already on "
+        "their calendar (and isn't replacing it with a new time — that's "
+        "update_calendar_event instead), use delete_calendar_event. Same "
+        "event_id/calendar_id lookup rule as update_calendar_event: get "
+        "them from a prior get_calendar_events or add_calendar_event "
+        "result, calling get_calendar_events first if you don't already "
+        "have them. Deleting is irreversible, so confirm which specific "
+        "event and its time back to the user before calling it — don't "
+        "delete on a vague reference alone if more than one event could "
+        "match. It fails the same way update_calendar_event does "
+        "(\"needs_auth\", \"not_found\", \"not_writable\") — handle those "
+        "identically.\n\n"
         "Some profile preferences aren't a single fixed instruction but a "
         "goal over a period with a flexible range per session — e.g. "
         "\"gym sessions 30-60 minutes\" plus \"180 minutes of exercise a "
@@ -133,8 +150,8 @@ _llm_agent = Agent(
     model="gemini-2.5-flash",
     description=(
         "Manages a user's connected Google Calendars — checking, creating, "
-        "and updating events — and proactively schedules their standing "
-        "habit goals (e.g. weekly exercise targets) onto the calendar "
+        "updating, and deleting events — and proactively schedules their "
+        "standing habit goals (e.g. weekly exercise targets) onto the calendar "
         "using saved preferences."
     ),
     instruction=_build_instruction,
@@ -142,6 +159,7 @@ _llm_agent = Agent(
         get_calendar_events,
         add_calendar_event,
         update_calendar_event,
+        delete_calendar_event,
         load_memory,
         get_profile,
         update_profile,
