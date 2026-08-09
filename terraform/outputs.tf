@@ -34,6 +34,15 @@ output "backend_service_account" {
   value       = google_service_account.backend.email
 }
 
+output "agent_engine_name" {
+  description = "Value for the AGENT_ENGINE_NAME env var when running the app service locally."
+  # .name is just the short numeric ID; config.py's agent_engine_name wants
+  # the full "projects/{p}/locations/{l}/reasoningEngines/{id}" path, which
+  # is .id on this resource (confirmed against an actual apply's plan
+  # output, not assumed).
+  value = google_vertex_ai_reasoning_engine.day_planner_agent.id
+}
+
 output "kms_key_name" {
   description = "Value for the KMS_KEY_NAME env var when running locally."
   value       = google_kms_crypto_key.oauth_tokens.id

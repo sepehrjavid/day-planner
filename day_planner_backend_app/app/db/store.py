@@ -3,7 +3,9 @@
 Collection layout:
 
   users/{user_id}                                the account: email, password
-                                                 hash, default calendar account
+                                                 hash, default calendar account,
+                                                 agent_session_id (which Agent
+                                                 Engine session /me/chat resumes)
 
   users/{user_id}/connected_accounts/{acct_id}   one per linked calendar
                                                  account. A user can have as
@@ -136,6 +138,27 @@ class Store:
     async def update_password_hash(self, *, user_id: str, password_hash: str) -> None:
         await self._db.collection(USERS).document(user_id).update(
             {"password_hash": password_hash, "updated_at": utcnow()}
+        )
+
+    # ------------------------------------------------------------------
+    # Agent Engine session
+    #
+    # The mapping from a signed-in user to their Agent Engine session_id.
+    # This is what lets /me/chat never accept a session_id from the client:
+    # the client says "continue my chat" by presenting its session token,
+    # same as every other /me route, and the actual session_id is resolved
+    # here instead. See app/services/agent_client.py for why that matters.
+    # ------------------------------------------------------------------
+
+    async def get_agent_session_id(self, user_id: str) -> str | None:
+        snapshot = await self._db.collection(USERS).document(user_id).get()
+        if not snapshot.exists:
+            return None
+        return (snapshot.to_dict() or {}).get("agent_session_id")
+
+    async def set_agent_session_id(self, *, user_id: str, session_id: str) -> None:
+        await self._db.collection(USERS).document(user_id).set(
+            {"agent_session_id": session_id, "updated_at": utcnow()}, merge=True
         )
 
     # ------------------------------------------------------------------

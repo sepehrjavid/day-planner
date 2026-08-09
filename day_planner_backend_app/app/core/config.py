@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     # projects/{p}/locations/{l}/keyRings/{r}/cryptoKeys/{k}
     kms_key_name: str
 
+    # --- Vertex AI Agent Engine (day_planner_agent) ---
+    # Full resource name: projects/{p}/locations/{l}/reasoningEngines/{id}
+    # (terraform output: google_vertex_ai_reasoning_engine.day_planner_agent.name)
+    agent_engine_name: str
+    # Region the reasoning engine is deployed in (var.agent_region in
+    # terraform) — not necessarily the same region as this Cloud Run
+    # service, so kept as its own setting rather than reusing `region`.
+    agent_engine_location: str
+
     # --- Google OAuth client (type: Web application) ---
     google_oauth_client_id: str
     google_oauth_client_secret: str

@@ -113,6 +113,20 @@ resource "google_cloud_run_v2_service" "default" {
         }
       }
 
+      # /me/chat's target. This service's own identity (google_service_account
+      # .backend, via google_vertex_ai_reasoning_engine_iam_member.backend_query
+      # below) is what's allowed to call it — end users never get credentials
+      # capable of invoking Agent Engine directly, which is what makes it safe
+      # for this route to resolve user_id from the session token and trust it.
+      env {
+        name  = "AGENT_ENGINE_NAME"
+        value = google_vertex_ai_reasoning_engine.day_planner_agent.name
+      }
+      env {
+        name  = "AGENT_ENGINE_LOCATION"
+        value = var.agent_region
+      }
+
       startup_probe {
         http_get {
           path = "/healthz"
@@ -128,6 +142,7 @@ resource "google_cloud_run_v2_service" "default" {
     google_secret_manager_secret_iam_member.backend_accessor,
     google_kms_crypto_key_iam_member.backend,
     google_project_iam_member.backend_firestore,
+    google_vertex_ai_reasoning_engine_iam_member.backend_query,
   ]
 
   # var.app_image only ever sets the image on first create — CI deploys new

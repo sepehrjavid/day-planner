@@ -389,3 +389,36 @@ resource "google_vertex_ai_reasoning_engine" "day_planner_agent" {
     google_compute_network_attachment.agent_psc,
   ]
 }
+
+# ---------------------------------------------------------------------------
+# Who is allowed to call the deployment above.
+# ---------------------------------------------------------------------------
+
+# Scoped to this one reasoning engine, not roles/aiplatform.user at the
+# project level (unlike google_project_iam_member.agent_aiplatform_user
+# above, which the agent's own runtime SA needs project-wide for model
+# calls/Memory Bank — the backend SA needs none of that, only permission to
+# invoke this specific deployment). google_service_account.backend is the
+# identity day_planner_backend_app's Cloud Run service runs as (cloud_run.tf)
+# — this binding is what /me/chat's call to Agent Engine actually rests on,
+# and it is deliberately never granted to anything a browser can reach: the
+# only path from an end user to a real user_id value is through
+# current_user_id (a verified session token), never a request parameter —
+# see day_planner_backend_app/app/api/routes/chat.py.
+resource "google_vertex_ai_reasoning_engine_iam_member" "backend_query" {
+  provider = google-beta
+
+  project = var.project_id
+  region  = google_vertex_ai_reasoning_engine.day_planner_agent.region
+  # Unlike google_cloud_run_v2_service.name (already short), this resource's
+  # own .name is the full "projects/{p}/locations/{l}/reasoningEngines/{id}"
+  # path — the IAM binding's reasoning_engine field wants just {id}, paired
+  # with project/region above (confirmed against the provider's own import
+  # regex, three-segment form, in iam_vertex_ai_reasoning_engine.go).
+  reasoning_engine = regex(
+    "reasoningEngines/([^/]+)$",
+    google_vertex_ai_reasoning_engine.day_planner_agent.name
+  )[0]
+  role   = "roles/aiplatform.user"
+  member = google_service_account.backend.member
+}

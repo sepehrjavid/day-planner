@@ -21,6 +21,14 @@ os.environ.setdefault("KMS_KEY_NAME", "projects/p/locations/l/keyRings/r/cryptoK
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_ID", "abc.apps.googleusercontent.com")
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_SECRET", "shh")
 os.environ.setdefault("PUBLIC_BASE_URL", "http://localhost:8080")
+os.environ.setdefault(
+    "AGENT_ENGINE_NAME",
+    "projects/test-proj/locations/us-central1/reasoningEngines/1",
+)
+# Must be a region vertexai.init() actually recognizes — AgentClient's
+# constructor validates it eagerly (see app/services/agent_client.py), and
+# that constructor runs in every test that boots the app via the lifespan.
+os.environ.setdefault("AGENT_ENGINE_LOCATION", "us-central1")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -88,6 +96,13 @@ class FakeStore:
 
     async def update_password_hash(self, *, user_id, password_hash):
         self.users[user_id]["password_hash"] = password_hash
+
+    # --- agent session ---
+    async def get_agent_session_id(self, user_id):
+        return self.users.get(user_id, {}).get("agent_session_id")
+
+    async def set_agent_session_id(self, *, user_id, session_id):
+        self.users[user_id]["agent_session_id"] = session_id
 
     # --- sessions ---
     async def create_session(self, *, user_id, ttl_seconds):

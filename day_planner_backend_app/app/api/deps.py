@@ -22,10 +22,15 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from ..core.config import Settings, get_settings
 from ..db.store import Store
 from ..providers import OAuthProvider, get_provider
+from ..services.agent_client import AgentClient
 
 
 def get_store(request: Request) -> Store:
     return request.app.state.store
+
+
+def get_agent_client(request: Request) -> AgentClient:
+    return request.app.state.agent_client
 
 
 def get_provider_or_404(

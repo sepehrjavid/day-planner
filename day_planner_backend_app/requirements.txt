@@ -5,7 +5,9 @@
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-pydantic==2.10.4
+# >=2.11.1 for google-cloud-aiplatform[agent_engines] below; fastapi and
+# pydantic-settings both accept it too (>=1.7.4 and >=2.7.0 respectively).
+pydantic==2.11.4
 pydantic-settings==2.7.1
 email-validator==2.2.0
 httpx==0.28.1
@@ -17,4 +19,12 @@ argon2-cffi==23.1.0
 
 google-cloud-firestore==2.20.0
 google-cloud-kms==3.1.0
-google-auth==2.37.0
+
+# agent_engines only — this service invokes the deployed day_planner_agent,
+# it never runs ADK itself, so the [adk] extra day_planner_agent carries
+# would be dead weight here. Pulls in a google-auth floor of 2.47.0, which
+# is why that's bumped from the 2.37.0 this file pinned before — firestore
+# and kms above both accept anything >=2.14.1,<3.0.0dev, so 2.47.0 satisfies
+# all three.
+google-cloud-aiplatform[agent_engines]==1.163.0
+google-auth==2.47.0

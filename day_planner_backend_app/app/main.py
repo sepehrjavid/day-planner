@@ -22,6 +22,7 @@ from .api.router import router as api_router
 from .core.config import get_settings
 from .db.store import Store
 from .providers import supported_providers
+from .services.agent_client import AgentClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,6 +36,13 @@ async def lifespan(app: FastAPI):
     # blip must not take down the container before /healthz can answer.
     app.state.store = Store(
         project_id=settings.gcp_project_id, database=settings.firestore_database
+    )
+    # AgentClient defers its own network call the same way Store defers its
+    # Firestore client — see AgentClient._get_app.
+    app.state.agent_client = AgentClient(
+        project_id=settings.gcp_project_id,
+        location=settings.agent_engine_location,
+        reasoning_engine=settings.agent_engine_name,
     )
     logger.info("providers=%s", supported_providers(settings))
     yield
