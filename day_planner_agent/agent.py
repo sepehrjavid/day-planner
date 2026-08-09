@@ -1,17 +1,22 @@
 from datetime import datetime
 
 from google.adk.agents import Agent
+from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import load_memory
 from vertexai.agent_engines import AdkApp
 
 from .calendar_tool import add_calendar_event, get_calendar_events
 from .memory_tools import get_profile, save_memory, update_profile
 
-_llm_agent = Agent(
-    name="day_planner_agent",
-    model="gemini-2.5-flash",
-    description="Helps check what's on a user's connected Google Calendars for a given date range.",
-    instruction=(
+
+def _build_instruction(_: ReadonlyContext) -> str:
+    # A plain f-string here would bake in whatever date the process happened
+    # to import this module on — Agent Engine keeps this Agent instance alive
+    # and reuses it across requests for the deployment's whole lifetime, so
+    # "today" would silently go stale until the next redeploy. Using a
+    # callable (ADK's InstructionProvider) makes ADK re-resolve it on every
+    # turn instead.
+    return (
         f"You are a day planning assistant. Today is {datetime.now().strftime('%B %d, %Y')}. "
         "At the start of a conversation, call get_profile to recall the "
         "user's standing preferences. Treat it as ground truth; don't ask "
@@ -54,7 +59,14 @@ _llm_agent = Agent(
         "happened).\n"
         "Call the relevant tool as soon as the user states something worth "
         "keeping, and briefly confirm what you saved."
-    ),
+    )
+
+
+_llm_agent = Agent(
+    name="day_planner_agent",
+    model="gemini-2.5-flash",
+    description="Helps check what's on a user's connected Google Calendars for a given date range.",
+    instruction=_build_instruction,
     tools=[
         get_calendar_events,
         add_calendar_event,
