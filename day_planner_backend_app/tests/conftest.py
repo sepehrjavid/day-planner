@@ -98,11 +98,17 @@ class FakeStore:
         self.users[user_id]["password_hash"] = password_hash
 
     # --- agent session ---
-    async def get_agent_session_id(self, user_id):
-        return self.users.get(user_id, {}).get("agent_session_id")
+    async def get_agent_session(self, user_id):
+        user = self.users.get(user_id, {})
+        return user.get("agent_session_id"), user.get("agent_session_last_active_at")
 
-    async def set_agent_session_id(self, *, user_id, session_id):
+    async def set_agent_session(self, *, user_id, session_id):
         self.users[user_id]["agent_session_id"] = session_id
+        self.users[user_id]["agent_session_last_active_at"] = _now()
+
+    async def clear_agent_session(self, user_id):
+        self.users[user_id]["agent_session_id"] = None
+        self.users[user_id]["agent_session_last_active_at"] = None
 
     # --- sessions ---
     async def create_session(self, *, user_id, ttl_seconds):

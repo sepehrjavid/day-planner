@@ -119,8 +119,16 @@ resource "google_cloud_run_v2_service" "default" {
       # capable of invoking Agent Engine directly, which is what makes it safe
       # for this route to resolve user_id from the session token and trust it.
       env {
-        name  = "AGENT_ENGINE_NAME"
-        value = google_vertex_ai_reasoning_engine.day_planner_agent.name
+        name = "AGENT_ENGINE_NAME"
+        # .id, not .name: confirmed against an actual apply (see
+        # outputs.tf's agent_engine_name) that .name on this resource is
+        # just the bare short ID, while .id is the full
+        # "projects/{p}/locations/{l}/reasoningEngines/{id}" path — the
+        # reverse of google_cloud_run_v2_service. AgentClient's own
+        # vertexai.init() call would make the bare ID work too, but the
+        # full path is what Settings.agent_engine_name documents, so this
+        # stays consistent with that contract instead of relying on it.
+        value = google_vertex_ai_reasoning_engine.day_planner_agent.id
       }
       env {
         name  = "AGENT_ENGINE_LOCATION"

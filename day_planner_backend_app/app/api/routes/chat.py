@@ -1,4 +1,4 @@
-"""The one route that talks to the day planner agent.
+"""The routes that talk to the day planner agent.
 
 user_id comes from `current_user_id` (the session token) and nothing else —
 the same rule every other /me route follows, extended one hop further here
@@ -8,10 +8,21 @@ the entire trust boundary. A user_id in the request body, instead of the
 dependency below, would let any signed-in caller read or continue anyone
 else's conversation (and, through it, their calendar). See
 ../../services/agent_client.py for the same rule applied to session_id.
+
+Session lifecycle: one active Agent Engine session per user, rolled over
+after settings.agent_session_idle_timeout_seconds of inactivity (default 6h
+— see core/config.py for why), or on demand via /me/chat/reset. Either way
+the outgoing session is archived to Memory Bank before being dropped, so a
+rollover loses conversational continuity but not anything the agent decided
+was worth remembering. See AgentClient.archive_session.
 """
 
-from fastapi import APIRouter, Depends
+from datetime import timedelta
 
+from fastapi import APIRouter, Depends, status
+
+from ...core.config import Settings, get_settings
+from ...db.models import utcnow
 from ...db.store import Store
 from ...schemas.chat import ChatRequest, ChatResponse
 from ...services.agent_client import AgentClient
@@ -26,14 +37,41 @@ async def chat(
     user_id: str = Depends(current_user_id),
     store: Store = Depends(get_store),
     agent_client: AgentClient = Depends(get_agent_client),
+    settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
-    session_id = await store.get_agent_session_id(user_id)
+    session_id, last_active_at = await store.get_agent_session(user_id)
+
+    if session_id is not None and _is_idle(
+        last_active_at, settings.agent_session_idle_timeout_seconds
+    ):
+        await agent_client.archive_session(user_id=user_id, session_id=session_id)
+        session_id = None
 
     resolved_session_id, reply = await agent_client.send_message(
         user_id=user_id, session_id=session_id, message=body.message
     )
 
-    if resolved_session_id != session_id:
-        await store.set_agent_session_id(user_id=user_id, session_id=resolved_session_id)
+    await store.set_agent_session(user_id=user_id, session_id=resolved_session_id)
 
-    return ChatResponse(reply=reply)
+    return ChatResponse(reply=reply, new_session=resolved_session_id != session_id)
+
+
+@router.post("/chat/reset", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_chat(
+    user_id: str = Depends(current_user_id),
+    store: Store = Depends(get_store),
+    agent_client: AgentClient = Depends(get_agent_client),
+) -> None:
+    """Start fresh on demand — the manual counterpart to the idle rollover
+    above, for when a conversation has gone stale before the timeout would
+    have caught it (or the user just wants a clean slate right now)."""
+    session_id, _ = await store.get_agent_session(user_id)
+    if session_id is not None:
+        await agent_client.archive_session(user_id=user_id, session_id=session_id)
+    await store.clear_agent_session(user_id)
+
+
+def _is_idle(last_active_at, timeout_seconds: int) -> bool:
+    if last_active_at is None:
+        return False
+    return utcnow() - last_active_at > timedelta(seconds=timeout_seconds)

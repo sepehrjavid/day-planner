@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     # service, so kept as its own setting rather than reusing `region`.
     agent_engine_location: str
 
+    # How long a chat session can sit idle before /me/chat rolls it over to
+    # a fresh one (archiving the old one to Memory Bank first — see
+    # AgentClient.archive_session). 6h: long enough that picking a
+    # conversation back up an hour later still has context, short enough
+    # that "yesterday" never leaks into "today" for a day planner. Tune via
+    # AGENT_SESSION_IDLE_TIMEOUT_SECONDS without a redeploy of agent logic.
+    agent_session_idle_timeout_seconds: int = 60 * 60 * 6
+
     # --- Google OAuth client (type: Web application) ---
     google_oauth_client_id: str
     google_oauth_client_secret: str

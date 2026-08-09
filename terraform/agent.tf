@@ -410,15 +410,12 @@ resource "google_vertex_ai_reasoning_engine_iam_member" "backend_query" {
 
   project = var.project_id
   region  = google_vertex_ai_reasoning_engine.day_planner_agent.region
-  # Unlike google_cloud_run_v2_service.name (already short), this resource's
-  # own .name is the full "projects/{p}/locations/{l}/reasoningEngines/{id}"
-  # path — the IAM binding's reasoning_engine field wants just {id}, paired
-  # with project/region above (confirmed against the provider's own import
-  # regex, three-segment form, in iam_vertex_ai_reasoning_engine.go).
-  reasoning_engine = regex(
-    "reasoningEngines/([^/]+)$",
-    google_vertex_ai_reasoning_engine.day_planner_agent.name
-  )[0]
-  role   = "roles/aiplatform.user"
-  member = google_service_account.backend.member
+  # Confirmed against an actual apply (see outputs.tf's agent_engine_name):
+  # this resource's own .name is already just the bare {id}, not the full
+  # "projects/{p}/locations/{l}/reasoningEngines/{id}" path — .id is the
+  # full path, the reverse of what google_cloud_run_v2_service does. No
+  # extraction needed here, unlike an earlier version of this file assumed.
+  reasoning_engine = google_vertex_ai_reasoning_engine.day_planner_agent.name
+  role             = "roles/aiplatform.user"
+  member           = google_service_account.backend.member
 }

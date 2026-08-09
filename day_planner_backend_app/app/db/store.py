@@ -4,8 +4,10 @@ Collection layout:
 
   users/{user_id}                                the account: email, password
                                                  hash, default calendar account,
-                                                 agent_session_id (which Agent
-                                                 Engine session /me/chat resumes)
+                                                 agent_session_id + agent_session
+                                                 _last_active_at (which Agent
+                                                 Engine session /me/chat resumes,
+                                                 and whether it's gone idle)
 
   users/{user_id}/connected_accounts/{acct_id}   one per linked calendar
                                                  account. A user can have as
@@ -143,22 +145,45 @@ class Store:
     # ------------------------------------------------------------------
     # Agent Engine session
     #
-    # The mapping from a signed-in user to their Agent Engine session_id.
-    # This is what lets /me/chat never accept a session_id from the client:
-    # the client says "continue my chat" by presenting its session token,
-    # same as every other /me route, and the actual session_id is resolved
-    # here instead. See app/services/agent_client.py for why that matters.
+    # The mapping from a signed-in user to their Agent Engine session_id,
+    # plus when it was last used (so /me/chat can decide whether it's gone
+    # idle and should be rolled over). This is what lets /me/chat never
+    # accept a session_id from the client: the client says "continue my
+    # chat" by presenting its session token, same as every other /me route,
+    # and the actual session_id is resolved here instead. See
+    # app/services/agent_client.py for why that matters.
     # ------------------------------------------------------------------
 
-    async def get_agent_session_id(self, user_id: str) -> str | None:
+    async def get_agent_session(self, user_id: str) -> tuple[str | None, datetime | None]:
+        """Returns (session_id, last_active_at) — both None if there's no
+        session yet or the user doesn't exist."""
         snapshot = await self._db.collection(USERS).document(user_id).get()
         if not snapshot.exists:
-            return None
-        return (snapshot.to_dict() or {}).get("agent_session_id")
+            return None, None
+        data = snapshot.to_dict() or {}
+        return data.get("agent_session_id"), data.get("agent_session_last_active_at")
 
-    async def set_agent_session_id(self, *, user_id: str, session_id: str) -> None:
+    async def set_agent_session(self, *, user_id: str, session_id: str) -> None:
+        """Records session_id as current and touches its last-active time —
+        called on every message, not just when the session_id changes, since
+        the idle clock has to reset on activity."""
         await self._db.collection(USERS).document(user_id).set(
-            {"agent_session_id": session_id, "updated_at": utcnow()}, merge=True
+            {
+                "agent_session_id": session_id,
+                "agent_session_last_active_at": utcnow(),
+                "updated_at": utcnow(),
+            },
+            merge=True,
+        )
+
+    async def clear_agent_session(self, user_id: str) -> None:
+        await self._db.collection(USERS).document(user_id).set(
+            {
+                "agent_session_id": None,
+                "agent_session_last_active_at": None,
+                "updated_at": utcnow(),
+            },
+            merge=True,
         )
 
     # ------------------------------------------------------------------
