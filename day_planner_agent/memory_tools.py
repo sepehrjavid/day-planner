@@ -16,6 +16,11 @@ Two kinds of long-term memory:
   - Free-form facts that don't fit the profile — saved via save_memory,
     searched via ADK's built-in load_memory tool.
 
+A third kind of long-term state — the user's tracked habits (recurring,
+placeable goals like "180 min/week of exercise") — deliberately isn't here:
+see habit_tools.py, which stores them in day_planner_backend_internal for
+the same reason calendar identity lives there instead of Memory Bank.
+
 Write calls (generate/create) go straight to the Vertex AI SDK rather than
 through ADK's VertexAiMemoryBankService wrapper: that wrapper builds its
 request config through a key-introspection helper that, on the installed
@@ -58,11 +63,18 @@ async def update_profile(
     """Save or update the user's structured profile in long-term memory.
 
     Call this whenever the user states or corrects a standing
-    preference/constraint worth remembering across sessions (gym
-    duration/timing, sleep schedule, work hours, meal times, energy
-    patterns, etc), including a recurring goal with a flexible per-session
-    range (e.g. "180 minutes of exercise a week, sessions 30 to 60
-    minutes") — not for a single day's plan, which belongs on the
+    preference/constraint that has no target of its own — it only shapes
+    *when* or *how* things (including habits) get scheduled. Examples: "I
+    prefer not to have physical activities after 8pm" (a blackout window),
+    "I don't want two exercise sessions in the same day" (a cross-habit
+    scheduling rule), plus gym timing, sleep schedule, work hours, meal
+    times, energy patterns.
+
+    Do not use this for a recurring goal with its own frequency/duration
+    target that should become blocked time on the calendar (e.g. "90
+    minutes of gym a week") — that's a habit; call create_habit/
+    update_habit instead (habit_tools.py), even if it's phrased like a
+    preference. Also not for a single day's plan, which belongs on the
     calendar instead. Only pass the fields that changed — this merges into
     the existing profile rather than replacing it.
 

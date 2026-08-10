@@ -13,6 +13,7 @@ from .calendar_tool import (
     get_calendar_events,
     update_calendar_event,
 )
+from .habit_tools import create_habit, list_habits, update_habit
 from .memory_tools import get_profile, save_memory, update_profile
 
 # Session-state keys the preload callback below writes to and the
@@ -76,8 +77,7 @@ _llm_agent = Agent(
     description=(
         "Manages a user's connected Google Calendars — checking, creating, "
         "updating, and deleting events — and proactively schedules their "
-        "standing habit goals (e.g. weekly exercise targets) onto the calendar "
-        "using saved preferences."
+        "tracked habits (e.g. weekly exercise targets) onto the calendar."
     ),
     instruction=_build_instruction,
     before_agent_callback=_preload_profile,
@@ -90,6 +90,9 @@ _llm_agent = Agent(
         get_profile,
         update_profile,
         save_memory,
+        create_habit,
+        list_habits,
+        update_habit,
     ],
 )
 

@@ -246,3 +246,111 @@ def test_disconnect_unknown_account_is_404(client):
         "/internal/disconnect", json={"user_id": "u1", "account_id": "ghost"}
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Habits
+# ---------------------------------------------------------------------------
+
+
+def test_habits_require_internal_caller(anon_client):
+    assert (
+        anon_client.post(
+            "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+        ).status_code
+        == 401
+    )
+    assert anon_client.get("/internal/habits?user_id=u1").status_code == 401
+
+
+def test_create_habit_returns_a_stable_id(client):
+    response = client.post(
+        "/internal/habits",
+        json={"user_id": "u1", "label": "Gym", "goal": "180 min/week, sessions 30-60 min"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["label"] == "Gym"
+    assert body["status"] == "active"
+    assert body["habit_id"]
+
+
+def test_list_habits_empty_by_default(client):
+    body = client.get("/internal/habits?user_id=u1").json()
+    assert body == {"habits": []}
+
+
+def test_list_habits_returns_created(client):
+    client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+    )
+    client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Reading", "goal": "nightly"}
+    )
+    # A different user's habits must never show up in this list.
+    client.post(
+        "/internal/habits", json={"user_id": "u2", "label": "Meditation", "goal": "daily"}
+    )
+
+    habits = client.get("/internal/habits?user_id=u1").json()["habits"]
+    assert {h["label"] for h in habits} == {"Gym", "Reading"}
+
+
+def test_list_habits_filters_by_status(client):
+    created = client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+    ).json()
+    client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Reading", "goal": "nightly"}
+    )
+    client.post(
+        "/internal/habits/update",
+        json={"user_id": "u1", "habit_id": created["habit_id"], "status": "paused"},
+    )
+
+    active = client.get("/internal/habits?user_id=u1&status=active").json()["habits"]
+    paused = client.get("/internal/habits?user_id=u1&status=paused").json()["habits"]
+    assert [h["label"] for h in active] == ["Reading"]
+    assert [h["label"] for h in paused] == ["Gym"]
+
+
+def test_update_habit_changes_fields(client):
+    created = client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+    ).json()
+
+    response = client.post(
+        "/internal/habits/update",
+        json={
+            "user_id": "u1",
+            "habit_id": created["habit_id"],
+            "goal": "5x/week now",
+            "status": "active",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["goal"] == "5x/week now"
+    assert body["label"] == "Gym"  # untouched field survives a partial update
+
+
+def test_update_habit_unknown_is_404(client):
+    response = client.post(
+        "/internal/habits/update", json={"user_id": "u1", "habit_id": "ghost", "goal": "x"}
+    )
+    assert response.status_code == 404
+
+
+def test_update_habit_wrong_user_is_404(client):
+    """A habit_id from one user must not be updatable by naming a different
+    user_id — habits live under users/{user_id}/habits, so this is really
+    just confirming that scoping."""
+    created = client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+    ).json()
+
+    response = client.post(
+        "/internal/habits/update",
+        json={"user_id": "u2", "habit_id": created["habit_id"], "goal": "hijacked"},
+    )
+    assert response.status_code == 404

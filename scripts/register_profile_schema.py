@@ -27,9 +27,16 @@ class UserProfile(BaseModel):
     # for a preference, not for which account a user's data comes from.
     preferences: str = Field(
         description=(
-            "Free-text notes on the user's standing preferences and constraints "
-            "for day planning: gym duration/timing, sleep schedule, work hours, "
-            "meal times, energy patterns, etc."
+            "Free-text notes on the user's standing preferences and "
+            "constraints for day planning — things with no frequency/"
+            "duration target of their own, which only shape when or how "
+            "other things (including habits) get scheduled: blackout "
+            "windows (e.g. 'no physical activity after 8pm'), cross-habit "
+            "rules (e.g. 'never two exercise sessions the same day'), gym "
+            "timing, sleep schedule, work hours, meal times, energy "
+            "patterns, etc. Never a recurring goal with its own target "
+            "(e.g. '90 minutes of gym a week') — those are tracked as "
+            "habits in a separate store, not here."
         )
     )
 

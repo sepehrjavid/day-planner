@@ -29,10 +29,12 @@ from app import main  # noqa: E402
 from app.api.deps import require_internal_caller  # noqa: E402
 from app.services import crypto  # noqa: E402
 from app.db.models import (  # noqa: E402
+    HABIT_STATUS_ACTIVE,
     STATUS_ACTIVE,
     STATUS_NEEDS_REAUTH,
     Calendar,
     ConnectedAccount,
+    Habit,
     OAuthState,
     account_id_for,
 )
@@ -49,6 +51,7 @@ class FakeStore:
         self.users: dict[str, dict] = {}
         self.states: dict[str, OAuthState] = {}
         self.accounts: dict[str, dict[str, dict]] = {}
+        self.habits: dict[str, dict[str, dict]] = {}
         self._seq = 0
 
     def _next(self, prefix: str) -> str:
@@ -180,6 +183,41 @@ class FakeStore:
             self.users[user_id]["default_account_id"] = (
                 remaining[0] if remaining else None
             )
+
+    # --- habits ---
+    async def create_habit(self, *, user_id, label, goal):
+        habit_id = self._next("habit")
+        now = _now()
+        data = {
+            "label": label,
+            "goal": goal,
+            "status": HABIT_STATUS_ACTIVE,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.habits.setdefault(user_id, {})[habit_id] = data
+        return Habit.from_dict(habit_id, data)
+
+    async def list_habits(self, user_id, *, status=None):
+        items = self.habits.get(user_id, {})
+        return [
+            Habit.from_dict(habit_id, data)
+            for habit_id, data in items.items()
+            if status is None or data["status"] == status
+        ]
+
+    async def update_habit(self, *, user_id, habit_id, label=None, goal=None, status=None):
+        data = self.habits.get(user_id, {}).get(habit_id)
+        if data is None:
+            return None
+        if label is not None:
+            data["label"] = label
+        if goal is not None:
+            data["goal"] = goal
+        if status is not None:
+            data["status"] = status
+        data["updated_at"] = _now()
+        return Habit.from_dict(habit_id, data)
 
 
 @pytest.fixture

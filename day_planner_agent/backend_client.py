@@ -95,3 +95,46 @@ async def access_token(user_id: str, account_id: str) -> str | None:
         return None
     response.raise_for_status()
     return response.json()["access_token"]
+
+
+async def create_habit(user_id: str, *, label: str, goal: str) -> dict:
+    async with await _client() as client:
+        response = await client.post(
+            "/internal/habits", json={"user_id": user_id, "label": label, "goal": goal}
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+async def list_habits(user_id: str, *, status: str | None = None) -> list[dict]:
+    params: dict = {"user_id": user_id}
+    if status is not None:
+        params["status"] = status
+    async with await _client() as client:
+        response = await client.get("/internal/habits", params=params)
+    response.raise_for_status()
+    return response.json()["habits"]
+
+
+async def update_habit(
+    user_id: str,
+    habit_id: str,
+    *,
+    label: str | None = None,
+    goal: str | None = None,
+    status: str | None = None,
+) -> dict | None:
+    """Returns None if habit_id doesn't exist for this user (backend 404)."""
+    body: dict = {"user_id": user_id, "habit_id": habit_id}
+    if label is not None:
+        body["label"] = label
+    if goal is not None:
+        body["goal"] = goal
+    if status is not None:
+        body["status"] = status
+    async with await _client() as client:
+        response = await client.post("/internal/habits/update", json=body)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()

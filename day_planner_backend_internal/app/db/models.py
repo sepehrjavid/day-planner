@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 STATUS_ACTIVE = "active"
 STATUS_NEEDS_REAUTH = "needs_reauth"
 
+HABIT_STATUS_ACTIVE = "active"
+HABIT_STATUS_PAUSED = "paused"
+HABIT_STATUS_ARCHIVED = "archived"
+
 
 class EmailAlreadyRegistered(Exception):
     """Signup lost the race, or the address was already taken."""
@@ -119,4 +123,44 @@ class ConnectedAccount:
             encrypted_refresh_token=data.get("encrypted_refresh_token"),
             kms_key_name=data.get("kms_key_name"),
             last_error=data.get("last_error"),
+        )
+
+
+@dataclass(frozen=True)
+class Habit:
+    """A user's recurring, schedulable goal — "180 min/week of exercise,
+    sessions 30-60 min", "read 20-40 min most nights".
+
+    Deliberately not part of the Memory Bank profile (see
+    ../../docs/feature-ideas.md item 2): that store is LLM-written and
+    semantically merged, which gives no stable id to tag a calendar event
+    with and no guarantee exact wording survives a regeneration. Habits
+    need a plain, addressable record instead — same reasoning that already
+    kept calendar identity out of Memory Bank (../../docs/oauth-design.md
+    §7).
+
+    `goal` is kept as free text rather than structured frequency/duration
+    fields on purpose: the placement logic in the agent's instructions
+    already reasons over natural language, and locking down a numeric
+    shape before real usage data exists risks fields that don't fit every
+    habit (a "3x/week" habit and a "most nights" habit don't share an
+    obvious shape).
+    """
+
+    habit_id: str
+    label: str
+    goal: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    @staticmethod
+    def from_dict(habit_id: str, data: dict) -> "Habit":
+        return Habit(
+            habit_id=habit_id,
+            label=data["label"],
+            goal=data["goal"],
+            status=data.get("status", HABIT_STATUS_ACTIVE),
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
         )

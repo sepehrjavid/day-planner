@@ -22,6 +22,12 @@ from ...schemas.calendars import (
     ConnectLinkResponse,
     DisconnectRequest,
 )
+from ...schemas.habits import (
+    CreateHabitRequest,
+    HabitOut,
+    HabitsResponse,
+    UpdateHabitRequest,
+)
 from ...services import connections
 from ..deps import (
     get_store,
@@ -156,3 +162,52 @@ async def disconnect(
     if not removed:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return {"status": "disconnected", "account_id": body.account_id}
+
+
+def _to_habit_out(habit) -> HabitOut:
+    return HabitOut(
+        habit_id=habit.habit_id,
+        label=habit.label,
+        goal=habit.goal,
+        status=habit.status,
+        created_at=habit.created_at,
+        updated_at=habit.updated_at,
+    )
+
+
+@router.post("/habits", response_model=HabitOut)
+async def create_habit(body: CreateHabitRequest, store: Store = Depends(get_store)):
+    """Track a new recurring goal for a user."""
+    habit = await store.create_habit(user_id=body.user_id, label=body.label, goal=body.goal)
+    return _to_habit_out(habit)
+
+
+@router.get("/habits", response_model=HabitsResponse)
+async def list_habits(
+    user_id: str, status: str | None = None, store: Store = Depends(get_store)
+):
+    """Every tracked habit for a user, optionally filtered to one status.
+
+    Filtering (and any "active by default" policy) is the agent tool's
+    call, not this route's — this just passes the filter through as given.
+    """
+    habits = await store.list_habits(user_id, status=status)
+    return HabitsResponse(habits=[_to_habit_out(h) for h in habits])
+
+
+@router.post("/habits/update", response_model=HabitOut)
+async def update_habit(body: UpdateHabitRequest, store: Store = Depends(get_store)):
+    """Partial update of a tracked habit, e.g. to change its goal or retire
+    it (status="paused"/"archived") — never a hard delete, so anything that
+    already referenced this habit_id (a tagged calendar event, a plan log
+    entry) still resolves."""
+    habit = await store.update_habit(
+        user_id=body.user_id,
+        habit_id=body.habit_id,
+        label=body.label,
+        goal=body.goal,
+        status=body.status,
+    )
+    if habit is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return _to_habit_out(habit)

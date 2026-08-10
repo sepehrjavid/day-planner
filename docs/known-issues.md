@@ -48,3 +48,35 @@ whole fleet, and nothing would surface it).
 None of the above were implemented in the reverted version. Whoever picks
 this back up should decide how much of this is worth the complexity before
 re-shipping it.
+
+## `vertexai.Client` is deprecated in favor of `agentplatform.Client`
+
+**Where it lives**: `day_planner_agent/memory_tools.py` (`update_profile`'s
+and `save_memory`'s `vertexai.Client(...).aio` calls) and
+`scripts/register_profile_schema.py` (`vertexai.Client(...)` for the
+one-time Memory Bank schema registration).
+
+**The problem**: both call sites construct a `vertexai.Client` directly
+rather than going through ADK's `VertexAiMemoryBankService` wrapper,
+specifically to work around that wrapper silently dropping
+`wait_for_completion` (see `memory_tools.py`'s module docstring). Running
+`scripts/register_profile_schema.py` against the live `sepi-dev-planner`
+agent engine on 2026-08-10 surfaced:
+
+```
+FutureWarning: The vertexai.Client class is deprecated. Please use agentplatform.Client instead.
+```
+
+Nothing is broken yet — schema registration and profile/memory writes both
+still work — this is Google's own SDK signaling the class is on a path to
+removal, not a current failure.
+
+**What to do about it**: migrate `vertexai.Client(...)` to
+`agentplatform.Client(...)` in both files once the replacement's API
+surface is confirmed to cover the same calls
+(`agent_engines.memories.generate()`/`.create()`, and
+`agent_engines.update()` with `structured_memory_configs` for the script).
+Before assuming it's a drop-in rename, check whether `agentplatform.Client`
+actually honors `wait_for_completion` — that bug is the entire reason these
+two call sites bypass the ADK wrapper in the first place, so migrating to a
+client with the same bug would just reintroduce it under a new name.
