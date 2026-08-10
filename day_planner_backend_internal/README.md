@@ -16,7 +16,7 @@ launch or not.** Unlike the app service (gated by a single
 `var.publicly_exposed` flag), there's no toggle here. `/internal/*` mints
 tokens capable of reading and writing a user's calendar; it's meant for the
 agent's service account and nothing else. See
-[../oauth-design.md](../oauth-design.md) for the full reasoning, including
+[../docs/oauth-design.md](../docs/oauth-design.md) for the full reasoning, including
 why IAM Conditions can't achieve this on a single shared service (they can't
 be combined with `allUsers` at all).
 

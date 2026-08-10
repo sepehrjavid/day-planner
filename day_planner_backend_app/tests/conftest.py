@@ -41,8 +41,10 @@ from app.db.models import (  # noqa: E402
     ConnectedAccount,
     EmailAlreadyRegistered,
     OAuthState,
+    QuotaState,
     ThrottleState,
     account_id_for,
+    next_utc_midnight,
     normalize_email,
 )
 
@@ -109,6 +111,29 @@ class FakeStore:
     async def clear_agent_session(self, user_id):
         self.users[user_id]["agent_session_id"] = None
         self.users[user_id]["agent_session_last_active_at"] = None
+
+    # --- chat quota ---
+    async def check_and_consume_quota(self, user_id, *, daily_limit):
+        now = _now()
+        today = now.date().isoformat()
+        reset_at = next_utc_midnight(now)
+        user = self.users[user_id]
+        count = user.get("quota_count", 0) if user.get("quota_date") == today else 0
+
+        if count >= daily_limit:
+            return QuotaState(
+                allowed=False, limit=daily_limit, remaining=0, reset_at=reset_at
+            )
+
+        count += 1
+        user["quota_date"] = today
+        user["quota_count"] = count
+        return QuotaState(
+            allowed=True,
+            limit=daily_limit,
+            remaining=daily_limit - count,
+            reset_at=reset_at,
+        )
 
     # --- sessions ---
     async def create_session(self, *, user_id, ttl_seconds):

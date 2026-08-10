@@ -144,6 +144,6 @@ variable "state_ttl_seconds" {
 
 variable "max_instances" {
   type        = number
-  description = "Bounded per deployment-gcp.md's cost-control note."
+  description = "Bounded per docs/deployment-gcp.md's cost-control note."
   default     = 2
 }

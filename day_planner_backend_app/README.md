@@ -8,7 +8,7 @@ be a single `day_planner_backend` codebase. The other is
 [../day_planner_backend_internal](../day_planner_backend_internal) — the
 agent-facing `/internal/*` API. They share no code, no Dockerfile, and no
 Python package; each is a standalone service with its own `requirements.txt`.
-See [../oauth-design.md](../oauth-design.md) for why they're split rather
+See [../docs/oauth-design.md](../docs/oauth-design.md) for why they're split rather
 than one process with a routing flag: `/internal/*` mints tokens capable of
 reading/writing a user's calendar and must never be reachable by an
 anonymous browser, at any point — Cloud Run IAM can enforce that only if it's

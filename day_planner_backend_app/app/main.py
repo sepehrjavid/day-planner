@@ -5,7 +5,7 @@ browser redirect. Agent Engine is invoke-only and has no public HTTP surface,
 so consent and code exchange happen here; credential storage and everything
 machine-to-machine (/internal/*) lives in the sibling
 day_planner_backend_internal service — a fully separate deployable, not a
-runtime mode of this one. See ../oauth-design.md for why they're split.
+runtime mode of this one. See ../docs/oauth-design.md for why they're split.
 
 This service's own public exposure is gated by var.publicly_exposed in
 terraform/cloud_run.tf — closed during the test phase, one flag flip to open

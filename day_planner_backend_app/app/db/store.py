@@ -7,7 +7,10 @@ Collection layout:
                                                  agent_session_id + agent_session
                                                  _last_active_at (which Agent
                                                  Engine session /me/chat resumes,
-                                                 and whether it's gone idle)
+                                                 and whether it's gone idle),
+                                                 quota_date + quota_count (the
+                                                 daily /me/chat message quota —
+                                                 see check_and_consume_quota)
 
   users/{user_id}/connected_accounts/{acct_id}   one per linked calendar
                                                  account. A user can have as
@@ -48,9 +51,11 @@ from .models import (
     ConnectedAccount,
     EmailAlreadyRegistered,
     OAuthState,
+    QuotaState,
     ThrottleState,
     account_id_for,
     hash_session_token,
+    next_utc_midnight,
     normalize_email,
     utcnow,
 )
@@ -185,6 +190,57 @@ class Store:
             },
             merge=True,
         )
+
+    # ------------------------------------------------------------------
+    # Chat message quota
+    #
+    # One global daily limit per user for now (settings.chat_daily_quota) —
+    # not yet tier-aware. See docs/pricing-ideas.md for where this is headed
+    # (per-tier limits, pay-as-you-go overage) once there's billing to back
+    # it.
+    # ------------------------------------------------------------------
+
+    async def check_and_consume_quota(
+        self, user_id: str, *, daily_limit: int
+    ) -> QuotaState:
+        """Atomically check the caller's remaining daily messages and, if any
+        are left, consume one. The check and the increment happen in the same
+        transaction so two requests racing on the last unit can't both pass.
+
+        The window is the UTC calendar day: a stored quota_date that doesn't
+        match today means the count is stale and starts over, rather than
+        needing a separate cleanup job to zero it out.
+        """
+        ref = self._db.collection(USERS).document(user_id)
+        now = utcnow()
+        today = now.date().isoformat()
+        reset_at = next_utc_midnight(now)
+
+        @firestore.async_transactional
+        async def _consume(transaction) -> QuotaState:
+            snapshot = await ref.get(transaction=transaction)
+            data = snapshot.to_dict() or {}
+            count = data.get("quota_count", 0) if data.get("quota_date") == today else 0
+
+            if count >= daily_limit:
+                return QuotaState(
+                    allowed=False, limit=daily_limit, remaining=0, reset_at=reset_at
+                )
+
+            count += 1
+            transaction.set(
+                ref,
+                {"quota_date": today, "quota_count": count, "updated_at": now},
+                merge=True,
+            )
+            return QuotaState(
+                allowed=True,
+                limit=daily_limit,
+                remaining=daily_limit - count,
+                reset_at=reset_at,
+            )
+
+        return await _consume(self._db.transaction())
 
     # ------------------------------------------------------------------
     # Sessions

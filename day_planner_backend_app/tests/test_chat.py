@@ -180,3 +180,53 @@ def test_reset_with_no_session_is_a_noop(anon_client, user, agent_client):
 def test_reset_requires_auth(anon_client, agent_client):
     response = anon_client.post("/me/chat/reset")
     assert response.status_code == 401
+
+
+def test_quota_exceeded_returns_429_without_calling_agent(
+    anon_client, user, agent_client, store, monkeypatch
+):
+    from app import main
+
+    monkeypatch.setattr(main.get_settings(), "chat_daily_quota", 2)
+    _, headers = user
+
+    first = anon_client.post("/me/chat", json={"message": "1"}, headers=headers)
+    second = anon_client.post("/me/chat", json={"message": "2"}, headers=headers)
+    third = anon_client.post("/me/chat", json={"message": "3"}, headers=headers)
+
+    assert first.status_code == second.status_code == 200
+    assert third.status_code == 429
+    assert "Retry-After" in third.headers
+    # The over-quota request never reached the agent.
+    assert len(agent_client.calls) == 2
+
+
+def test_quota_is_scoped_per_user(anon_client, agent_client, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main.get_settings(), "chat_daily_quota", 1)
+
+    def signup(email):
+        response = anon_client.post(
+            "/auth/signup", json={"email": email, "password": "correct-horse-battery"}
+        )
+        body = response.json()
+        return {"Authorization": f"Bearer {body['access_token']}"}
+
+    alice_headers = signup("alice-quota@example.com")
+    bob_headers = signup("bob-quota@example.com")
+
+    alice_first = anon_client.post(
+        "/me/chat", json={"message": "hi"}, headers=alice_headers
+    )
+    alice_second = anon_client.post(
+        "/me/chat", json={"message": "hi again"}, headers=alice_headers
+    )
+    bob_first = anon_client.post(
+        "/me/chat", json={"message": "hi"}, headers=bob_headers
+    )
+
+    assert alice_first.status_code == 200
+    assert alice_second.status_code == 429
+    # Bob's own quota is untouched by Alice using hers up.
+    assert bob_first.status_code == 200

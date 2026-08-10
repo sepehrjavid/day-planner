@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 class UserProfile(BaseModel):
     # No calendar_id/calendar_type here: calendar connections are owned by
-    # day_planner_backend_internal now (see ../oauth-design.md §7), not
+    # day_planner_backend_internal now (see ../docs/oauth-design.md §7), not
     # Memory Bank. Storing them here would mean the model could paraphrase
     # or drop an identity-adjacent field via generative extraction — fine
     # for a preference, not for which account a user's data comes from.

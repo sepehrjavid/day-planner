@@ -4,7 +4,7 @@ Mints per-account access tokens, connect links, and calendar listings on
 behalf of the day-planner agent. This is not a mode of the app-facing
 service (day_planner_backend_app) — it's a fully separate deployable with
 its own image and its own trimmed dependency set (no argon2-cffi: this
-service never hashes a password). See ../oauth-design.md for why: IAM
+service never hashes a password). See ../docs/oauth-design.md for why: IAM
 Conditions can't be combined with allUsers, so the only way to guarantee
 /internal/* is never reachable by an anonymous browser is for it to live on
 a service that is never granted allUsers, full stop — not a route behind a

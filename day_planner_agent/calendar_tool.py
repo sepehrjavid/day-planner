@@ -2,13 +2,13 @@
 
 Fetches events across every calendar the user has connected via
 day_planner_backend_internal — that service owns OAuth token storage,
-refresh, and revocation entirely (see ../oauth-design.md). Nothing here ever
+refresh, and revocation entirely (see ../docs/oauth-design.md). Nothing here ever
 handles a Google OAuth credential beyond the ~1-hour access token minted
 per call, and nothing here is persisted.
 
 user_id always comes from tool_context.session.user_id, which ADK sets from
 the invocation — never from a model-supplied argument. That's the whole
-tenant boundary (../oauth-design.md §3): a prompt injection in a calendar
+tenant boundary (../docs/oauth-design.md §3): a prompt injection in a calendar
 event title cannot make this tool read someone else's schedule, because the
 model never gets a chance to say whose schedule to read.
 """

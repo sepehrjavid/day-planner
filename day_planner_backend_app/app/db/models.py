@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 STATUS_ACTIVE = "active"
 STATUS_NEEDS_REAUTH = "needs_reauth"
@@ -20,6 +20,12 @@ class EmailAlreadyRegistered(Exception):
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def next_utc_midnight(now: datetime) -> datetime:
+    """Start of the next UTC calendar day — when a daily quota resets."""
+    start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_of_today + timedelta(days=1)
 
 
 def normalize_email(email: str) -> str:
@@ -60,6 +66,22 @@ class OAuthState:
 class ThrottleState:
     locked: bool
     retry_after_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class QuotaState:
+    """Result of a daily message-quota check, made atomically with the
+    consuming increment so two concurrent requests can't both slip through
+    on the last unit — see Store.check_and_consume_quota."""
+
+    allowed: bool
+    limit: int
+    remaining: int
+    reset_at: datetime
+
+    @property
+    def retry_after_seconds(self) -> int:
+        return max(0, int((self.reset_at - utcnow()).total_seconds()))
 
 
 @dataclass(frozen=True)

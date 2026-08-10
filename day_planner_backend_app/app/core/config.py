@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     login_max_attempts: int = 8
     login_lockout_seconds: int = 900
 
+    # Messages /me/chat will forward to the agent per user per UTC day. One
+    # flat limit for everyone for now — no tiers or billing yet, see
+    # docs/pricing-ideas.md for where this is headed. 50 is a generous chat
+    # allowance for a single person's day planning, cheap enough to eat as a
+    # free tier while still bounding the worst case (a stuck client retry
+    # loop, or a compromised session) on a per-request-billed backend.
+    chat_daily_quota: int = 2
+
     def redirect_uri(self, provider: str) -> str:
         return f"{self.public_base_url.rstrip('/')}/auth/{provider}/callback"
 

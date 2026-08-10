@@ -12,7 +12,7 @@ Two kinds of long-term memory:
     part of this profile — it lives in day_planner_backend_internal
     instead, since Memory Bank is LLM-written and semantically searched,
     which is the wrong access model for anything credential-adjacent (see
-    ../oauth-design.md §7).
+    ../docs/oauth-design.md §7).
   - Free-form facts that don't fit the profile — saved via save_memory,
     searched via ADK's built-in load_memory tool.
 

@@ -15,11 +15,15 @@ after settings.agent_session_idle_timeout_seconds of inactivity (default 6h
 the outgoing session is archived to Memory Bank before being dropped, so a
 rollover loses conversational continuity but not anything the agent decided
 was worth remembering. See AgentClient.archive_session.
+
+Quota: every message first spends one of settings.chat_daily_quota for the
+day, checked and consumed atomically in Store.check_and_consume_quota. A
+caller past their limit gets a 429 before the agent is ever touched.
 """
 
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from ...core.config import Settings, get_settings
 from ...db.models import utcnow
@@ -39,6 +43,18 @@ async def chat(
     agent_client: AgentClient = Depends(get_agent_client),
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
+    # Checked (and consumed) before touching the agent, so a caller over
+    # quota never costs a model call.
+    quota = await store.check_and_consume_quota(
+        user_id, daily_limit=settings.chat_daily_quota
+    )
+    if not quota.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="daily message quota exceeded",
+            headers={"Retry-After": str(quota.retry_after_seconds)},
+        )
+
     session_id, last_active_at = await store.get_agent_session(user_id)
 
     if session_id is not None and _is_idle(
