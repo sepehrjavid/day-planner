@@ -19,3 +19,4 @@ day_planner_backend_internal/.env
 .adk/
 */.adk/day_planner_agent.tar.gz
 day_planner_agent.tar.gz
+*-providers.tf
