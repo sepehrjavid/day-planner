@@ -93,8 +93,39 @@ async def test_update_habit_success(tool_context, monkeypatch):
     assert seen["args"] == (
         "user-1",
         "h1",
-        {"label": None, "goal": None, "status": "archived"},
+        {"label": None, "goal": None, "status": "archived", "allowed_zones": None},
     )
+
+
+async def test_update_habit_sets_allowed_zones(tool_context, monkeypatch):
+    seen = {}
+
+    async def update_habit(user_id, habit_id, **kwargs):
+        seen["args"] = (user_id, habit_id, kwargs)
+        return {"habit_id": habit_id, "allowed_zones": kwargs.get("allowed_zones")}
+
+    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+
+    result = await habit_tools.update_habit(tool_context, "h1", allowed_zones=["Work"])
+    assert result["habit"]["allowed_zones"] == ["Work"]
+    assert seen["args"][2]["allowed_zones"] == ["Work"]
+
+
+async def test_update_habit_clears_allowed_zones_with_empty_list(tool_context, monkeypatch):
+    """allowed_zones=[] is a meaningful "clear it" request, not the same
+    as "not provided" — a naive truthiness check on this list would
+    wrongly reject the call as having no fields to update."""
+    seen = {}
+
+    async def update_habit(user_id, habit_id, **kwargs):
+        seen["args"] = (user_id, habit_id, kwargs)
+        return {"habit_id": habit_id, "allowed_zones": []}
+
+    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+
+    result = await habit_tools.update_habit(tool_context, "h1", allowed_zones=[])
+    assert result["status"] == "success"
+    assert seen["args"][2]["allowed_zones"] == []
 
 
 async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):

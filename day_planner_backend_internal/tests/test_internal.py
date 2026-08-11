@@ -341,6 +341,26 @@ def test_update_habit_unknown_is_404(client):
     assert response.status_code == 404
 
 
+def test_create_habit_defaults_allowed_zones_to_empty(client):
+    response = client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+    )
+    assert response.json()["allowed_zones"] == []
+
+
+def test_update_habit_sets_allowed_zones(client):
+    created = client.post(
+        "/internal/habits", json={"user_id": "u1", "label": "Gym", "goal": "3x/week"}
+    ).json()
+
+    response = client.post(
+        "/internal/habits/update",
+        json={"user_id": "u1", "habit_id": created["habit_id"], "allowed_zones": ["Work"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["allowed_zones"] == ["Work"]
+
+
 def test_update_habit_wrong_user_is_404(client):
     """A habit_id from one user must not be updatable by naming a different
     user_id — habits live under users/{user_id}/habits, so this is really
@@ -445,3 +465,237 @@ def test_list_habit_sessions_empty_by_default(client):
         "?user_id=u1&planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z"
     ).json()
     assert body == {"sessions": []}
+
+
+# ---------------------------------------------------------------------------
+# Zones
+# ---------------------------------------------------------------------------
+
+
+def test_zones_require_internal_caller(anon_client):
+    assert (
+        anon_client.post(
+            "/internal/zones",
+            json={
+                "user_id": "u1",
+                "label": "Work",
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "days_of_week": ["mon"],
+            },
+        ).status_code
+        == 401
+    )
+    assert anon_client.get("/internal/zones?user_id=u1").status_code == 401
+
+
+def test_create_zone_returns_a_stable_id(client):
+    response = client.post(
+        "/internal/zones",
+        json={
+            "user_id": "u1",
+            "label": "Work",
+            "start_time": "09:00",
+            "end_time": "17:00",
+            "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["label"] == "Work"
+    assert body["days_of_week"] == ["mon", "tue", "wed", "thu", "fri"]
+    assert body["zone_id"]
+
+
+def test_create_zone_rejects_malformed_time(client):
+    response = client.post(
+        "/internal/zones",
+        json={
+            "user_id": "u1",
+            "label": "Work",
+            "start_time": "9am",
+            "end_time": "17:00",
+            "days_of_week": ["mon"],
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_list_zones_empty_by_default(client):
+    assert client.get("/internal/zones?user_id=u1").json() == {"zones": []}
+
+
+def test_list_zones_returns_created(client):
+    client.post(
+        "/internal/zones",
+        json={
+            "user_id": "u1",
+            "label": "Work",
+            "start_time": "09:00",
+            "end_time": "17:00",
+            "days_of_week": ["mon"],
+        },
+    )
+    # A different user's zones must never show up in this list.
+    client.post(
+        "/internal/zones",
+        json={
+            "user_id": "u2",
+            "label": "Commute",
+            "start_time": "08:00",
+            "end_time": "09:00",
+            "days_of_week": ["mon"],
+        },
+    )
+
+    zones = client.get("/internal/zones?user_id=u1").json()["zones"]
+    assert {z["label"] for z in zones} == {"Work"}
+
+
+def test_update_zone_changes_fields(client):
+    created = client.post(
+        "/internal/zones",
+        json={
+            "user_id": "u1",
+            "label": "Work",
+            "start_time": "09:00",
+            "end_time": "17:00",
+            "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
+        },
+    ).json()
+
+    response = client.post(
+        "/internal/zones/update",
+        json={"user_id": "u1", "zone_id": created["zone_id"], "end_time": "18:00"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["end_time"] == "18:00"
+    assert body["start_time"] == "09:00"  # untouched field survives a partial update
+
+
+def test_update_zone_unknown_is_404(client):
+    response = client.post(
+        "/internal/zones/update", json={"user_id": "u1", "zone_id": "ghost", "end_time": "18:00"}
+    )
+    assert response.status_code == 404
+
+
+def test_update_zone_wrong_user_is_404(client):
+    created = client.post(
+        "/internal/zones",
+        json={
+            "user_id": "u1",
+            "label": "Work",
+            "start_time": "09:00",
+            "end_time": "17:00",
+            "days_of_week": ["mon"],
+        },
+    ).json()
+
+    response = client.post(
+        "/internal/zones/update",
+        json={"user_id": "u2", "zone_id": created["zone_id"], "end_time": "18:00"},
+    )
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Sleep schedule
+# ---------------------------------------------------------------------------
+
+
+def test_sleep_schedule_requires_internal_caller(anon_client):
+    assert (
+        anon_client.post("/internal/sleep-schedule", json={"user_id": "u1"}).status_code == 401
+    )
+    assert anon_client.get("/internal/sleep-schedule?user_id=u1").status_code == 401
+
+
+def test_get_sleep_schedule_reports_not_configured(client):
+    body = client.get("/internal/sleep-schedule?user_id=u1").json()
+    assert body == {"exists": False, "schedule": None}
+
+
+def test_set_sleep_schedule_creates(client):
+    response = client.post(
+        "/internal/sleep-schedule",
+        json={
+            "user_id": "u1",
+            "sleep_time": "23:00",
+            "wake_time": "07:00",
+            "cool_down_minutes": 30,
+            "wake_up_buffer_minutes": 15,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sleep_time"] == "23:00"
+    assert body["wake_time"] == "07:00"
+    assert body["day_overrides"] == {}
+
+
+def test_set_sleep_schedule_partial_update_preserves_other_fields(client):
+    client.post(
+        "/internal/sleep-schedule",
+        json={
+            "user_id": "u1",
+            "sleep_time": "23:00",
+            "wake_time": "07:00",
+            "cool_down_minutes": 30,
+            "wake_up_buffer_minutes": 15,
+        },
+    )
+
+    response = client.post(
+        "/internal/sleep-schedule", json={"user_id": "u1", "cool_down_minutes": 45}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cool_down_minutes"] == 45
+    assert body["sleep_time"] == "23:00"  # untouched field survives a partial update
+
+
+def test_set_sleep_schedule_day_overrides_round_trip(client):
+    response = client.post(
+        "/internal/sleep-schedule",
+        json={
+            "user_id": "u1",
+            "sleep_time": "23:00",
+            "wake_time": "07:00",
+            "cool_down_minutes": 30,
+            "wake_up_buffer_minutes": 15,
+            "day_overrides": {"sun": {"wake_time": "09:00"}},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["day_overrides"] == {"sun": {"sleep_time": None, "wake_time": "09:00"}}
+
+    fetched = client.get("/internal/sleep-schedule?user_id=u1").json()
+    assert fetched["exists"] is True
+    assert fetched["schedule"]["day_overrides"] == {
+        "sun": {"sleep_time": None, "wake_time": "09:00"}
+    }
+
+
+def test_set_sleep_schedule_day_overrides_replaces_wholesale(client):
+    """day_overrides isn't a per-day merge — passing a new map drops
+    whatever wasn't included, matching the documented contract on
+    SetSleepScheduleRequest.day_overrides."""
+    client.post(
+        "/internal/sleep-schedule",
+        json={
+            "user_id": "u1",
+            "sleep_time": "23:00",
+            "wake_time": "07:00",
+            "cool_down_minutes": 30,
+            "wake_up_buffer_minutes": 15,
+            "day_overrides": {"sun": {"wake_time": "09:00"}, "sat": {"wake_time": "10:00"}},
+        },
+    )
+
+    response = client.post(
+        "/internal/sleep-schedule",
+        json={"user_id": "u1", "day_overrides": {"sun": {"wake_time": "09:30"}}},
+    )
+    assert response.json()["day_overrides"] == {"sun": {"sleep_time": None, "wake_time": "09:30"}}

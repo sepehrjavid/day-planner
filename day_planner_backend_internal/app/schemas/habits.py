@@ -32,6 +32,13 @@ class UpdateHabitRequest(InternalUserRequest):
     label: str | None = Field(default=None, min_length=1, max_length=200)
     goal: str | None = Field(default=None, min_length=1, max_length=2000)
     status: HabitStatus | None = None
+    allowed_zones: list[str] | None = None
+    """Zone labels this habit may be placed in, in addition to any
+    unzoned (open) time — see ../schemas/zones.py. Replaces the stored
+    list wholesale when provided, same as day_overrides on
+    SetSleepScheduleRequest; omit to leave it untouched, pass [] to clear
+    it. Not on CreateHabitRequest — a habit starts with no zone
+    exceptions and gains them, if any, through an explicit update."""
 
 
 class HabitOut(BaseModel):
@@ -41,6 +48,7 @@ class HabitOut(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    allowed_zones: list[str] = Field(default_factory=list)
 
 
 class HabitsResponse(BaseModel):

@@ -35,6 +35,17 @@ from ...schemas.habits import (
     HabitsResponse,
     UpdateHabitRequest,
 )
+from ...schemas.sleep_schedule import (
+    SetSleepScheduleRequest,
+    SleepScheduleOut,
+    SleepScheduleResponse,
+)
+from ...schemas.zones import (
+    CreateZoneRequest,
+    UpdateZoneRequest,
+    ZoneOut,
+    ZonesResponse,
+)
 from ...services import connections
 from ..deps import (
     get_store,
@@ -179,6 +190,7 @@ def _to_habit_out(habit) -> HabitOut:
         status=habit.status,
         created_at=habit.created_at,
         updated_at=habit.updated_at,
+        allowed_zones=habit.allowed_zones,
     )
 
 
@@ -214,6 +226,7 @@ async def update_habit(body: UpdateHabitRequest, store: Store = Depends(get_stor
         label=body.label,
         goal=body.goal,
         status=body.status,
+        allowed_zones=body.allowed_zones,
     )
     if habit is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
@@ -267,3 +280,102 @@ async def list_habit_sessions(
         user_id, planned_from=planned_from, planned_to=planned_to
     )
     return HabitSessionsResponse(sessions=[_to_habit_session_out(s) for s in sessions])
+
+
+def _to_zone_out(zone) -> ZoneOut:
+    return ZoneOut(
+        zone_id=zone.zone_id,
+        label=zone.label,
+        start_time=zone.start_time,
+        end_time=zone.end_time,
+        days_of_week=zone.days_of_week,
+        created_at=zone.created_at,
+        updated_at=zone.updated_at,
+    )
+
+
+@router.post("/zones", response_model=ZoneOut)
+async def create_zone(body: CreateZoneRequest, store: Store = Depends(get_store)):
+    """Track a new named scheduling restriction for a user (work hours,
+    commute, ...). A habit may only be placed inside it if the habit's
+    own allowed_zones names this zone's label — see schemas/habits.py."""
+    zone = await store.create_zone(
+        user_id=body.user_id,
+        label=body.label,
+        start_time=body.start_time,
+        end_time=body.end_time,
+        days_of_week=body.days_of_week,
+    )
+    return _to_zone_out(zone)
+
+
+@router.get("/zones", response_model=ZonesResponse)
+async def list_zones(user_id: str, store: Store = Depends(get_store)):
+    """Every zone for a user. No rows at all means no restriction of
+    this kind exists for them — there's nothing else to check for."""
+    zones = await store.list_zones(user_id)
+    return ZonesResponse(zones=[_to_zone_out(z) for z in zones])
+
+
+@router.post("/zones/update", response_model=ZoneOut)
+async def update_zone(body: UpdateZoneRequest, store: Store = Depends(get_store)):
+    """Partial update of an existing zone."""
+    zone = await store.update_zone(
+        user_id=body.user_id,
+        zone_id=body.zone_id,
+        label=body.label,
+        start_time=body.start_time,
+        end_time=body.end_time,
+        days_of_week=body.days_of_week,
+    )
+    if zone is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return _to_zone_out(zone)
+
+
+def _to_sleep_schedule_out(schedule) -> SleepScheduleOut:
+    return SleepScheduleOut(
+        sleep_time=schedule.sleep_time,
+        wake_time=schedule.wake_time,
+        day_overrides=schedule.day_overrides,
+        cool_down_minutes=schedule.cool_down_minutes,
+        wake_up_buffer_minutes=schedule.wake_up_buffer_minutes,
+        created_at=schedule.created_at,
+        updated_at=schedule.updated_at,
+    )
+
+
+@router.get("/sleep-schedule", response_model=SleepScheduleResponse)
+async def get_sleep_schedule(user_id: str, store: Store = Depends(get_store)):
+    """The user's sleep schedule, if they've ever set one. exists=False
+    (not a 404) when they haven't — this is a singleton with no id to
+    get wrong, so "not configured yet" is a normal response, not an
+    error."""
+    schedule = await store.get_sleep_schedule(user_id)
+    if schedule is None:
+        return SleepScheduleResponse(exists=False)
+    return SleepScheduleResponse(exists=True, schedule=_to_sleep_schedule_out(schedule))
+
+
+@router.post("/sleep-schedule", response_model=SleepScheduleOut)
+async def set_sleep_schedule(
+    body: SetSleepScheduleRequest, store: Store = Depends(get_store)
+):
+    """Create-or-update the user's sleep schedule. Partial like
+    /habits/update, except there's no habit_id-style "must already
+    exist" check — the first call for a user creates it."""
+    day_overrides = None
+    if body.day_overrides is not None:
+        day_overrides = {
+            day: override.model_dump(exclude_none=True)
+            for day, override in body.day_overrides.items()
+        }
+    schedule = await store.set_sleep_schedule(
+        user_id=body.user_id,
+        sleep_time=body.sleep_time,
+        wake_time=body.wake_time,
+        cool_down_minutes=body.cool_down_minutes,
+        wake_up_buffer_minutes=body.wake_up_buffer_minutes,
+        day_overrides=day_overrides,
+    )
+    return _to_sleep_schedule_out(schedule)

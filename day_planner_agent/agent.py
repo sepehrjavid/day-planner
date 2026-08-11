@@ -15,12 +15,22 @@ from .calendar_tool import (
 )
 from .habit_tools import create_habit, list_habits, review_habit_week, update_habit
 from .memory_tools import get_profile, save_memory, update_profile
+from .zone_tools import (
+    create_zone,
+    get_sleep_schedule,
+    list_zones,
+    set_sleep_schedule,
+    update_zone,
+)
 
-# Session-state keys the preload callback below writes to and the
+# Session-state keys the preload callbacks below write to and the
 # instruction reads from. Prefixed so they don't collide with anything a
 # tool call might stash in state.
 _PROFILE_PRELOADED_KEY = "day_planner:profile_preloaded"
 _PRELOADED_PROFILE_KEY = "day_planner:preloaded_profile"
+_ZONES_PRELOADED_KEY = "day_planner:zones_preloaded"
+_PRELOADED_ZONES_KEY = "day_planner:preloaded_zones"
+_PRELOADED_SLEEP_SCHEDULE_KEY = "day_planner:preloaded_sleep_schedule"
 
 # The system prompt is long-form prose, not code — kept in its own file so
 # it reads and diffs like the rest of the agent's copy, instead of being
@@ -51,6 +61,27 @@ async def _preload_profile(callback_context: CallbackContext) -> None:
         callback_context.state[_PRELOADED_PROFILE_KEY] = result["profile"]
 
 
+async def _preload_zones(callback_context: CallbackContext) -> None:
+    """Fetches the user's zones and sleep schedule once per session, the
+    same way _preload_profile does for the profile above and for the same
+    reason: zones are low-cardinality and change rarely (docs/todo.md
+    §1), so an unconditional fetch here is cheap, and it means placement
+    doesn't depend on the model remembering to call list_zones/
+    get_sleep_schedule itself before ever placing a session.
+    """
+    if callback_context.state.get(_ZONES_PRELOADED_KEY):
+        return
+    callback_context.state[_ZONES_PRELOADED_KEY] = True
+
+    zones_result = await list_zones(callback_context)
+    if zones_result.get("status") == "success" and zones_result.get("zones"):
+        callback_context.state[_PRELOADED_ZONES_KEY] = zones_result["zones"]
+
+    sleep_result = await get_sleep_schedule(callback_context)
+    if sleep_result.get("status") == "success" and sleep_result.get("exists"):
+        callback_context.state[_PRELOADED_SLEEP_SCHEDULE_KEY] = sleep_result["schedule"]
+
+
 def _build_instruction(ctx: ReadonlyContext) -> str:
     # A plain f-string here would bake in whatever date the process happened
     # to import this module on — Agent Engine keeps this Agent instance alive
@@ -65,9 +96,25 @@ def _build_instruction(ctx: ReadonlyContext) -> str:
         if preloaded_profile
         else "No standing preferences are on file for this user yet.\n\n"
     )
+
+    preloaded_zones = ctx.state.get(_PRELOADED_ZONES_KEY)
+    preloaded_sleep_schedule = ctx.state.get(_PRELOADED_SLEEP_SCHEDULE_KEY)
+    if preloaded_zones or preloaded_sleep_schedule:
+        zones_section = (
+            f"The user's standing day zones, already loaded for this session: "
+            f"{preloaded_zones or []}\n"
+            f"Their sleep schedule, already loaded for this session: "
+            f"{preloaded_sleep_schedule or 'not set'}\n\n"
+        )
+    else:
+        zones_section = (
+            "No day zones or sleep schedule are on file for this user yet.\n\n"
+        )
+
     return _INSTRUCTION_TEMPLATE.format(
         today=datetime.now().strftime("%B %d, %Y"),
         profile_section=profile_section,
+        zones_section=zones_section,
     )
 
 
@@ -77,11 +124,13 @@ _llm_agent = Agent(
     description=(
         "Manages a user's connected Google Calendars — checking, creating, "
         "updating, and deleting events — proactively schedules their "
-        "tracked habits (e.g. weekly exercise targets) onto the calendar, "
-        "and reviews how well past habit sessions actually held up."
+        "tracked habits (e.g. weekly exercise targets) onto the calendar "
+        "around their day zones (work hours, sleep, and any other "
+        "standing restriction), and reviews how well past habit sessions "
+        "actually held up."
     ),
     instruction=_build_instruction,
-    before_agent_callback=_preload_profile,
+    before_agent_callback=[_preload_profile, _preload_zones],
     tools=[
         get_calendar_events,
         add_calendar_event,
@@ -95,6 +144,11 @@ _llm_agent = Agent(
         list_habits,
         update_habit,
         review_habit_week,
+        create_zone,
+        list_zones,
+        update_zone,
+        set_sleep_schedule,
+        get_sleep_schedule,
     ],
 )
 
