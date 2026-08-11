@@ -16,6 +16,7 @@ model never gets a chance to say whose schedule to read.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from google.adk.tools import ToolContext
@@ -24,6 +25,14 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from . import backend_client
+
+logger = logging.getLogger(__name__)
+
+# Extended-property keys used to tag a Google Calendar event as one the
+# agent placed for a habit (see add_calendar_event's habit_id param and
+# docs/feature-ideas.md item 2). Private extended properties are only ever
+# visible to the app that set them, never to the user in the Calendar UI.
+_HABIT_ID_PROPERTY = "day_planner_habit_id"
 
 
 async def get_calendar_events(
@@ -100,6 +109,7 @@ async def add_calendar_event(
     end_time: str,
     calendar_summary: str | None = None,
     location: str | None = None,
+    habit_id: str | None = None,
 ) -> dict:
     """Create an event on one of the user's connected calendars.
 
@@ -117,6 +127,14 @@ async def add_calendar_event(
             display name (e.g. "Work"). Omit to use the user's primary
             calendar.
         location: Optional free-text location.
+        habit_id: Pass this when — and only when — this event is a session
+            you're placing for a tracked habit (see instruction.md's habit
+            placement guidance and habit_tools.py's create_habit/
+            list_habits). It tags the event so review_habit_week can find
+            it later and logs the plan; never set it for a plain
+            user-stated appointment. The logging is best-effort — a
+            failure here does not fail event creation, so don't retry or
+            report an error to the user over it.
 
     Returns:
         A dict with "status". On "success", "event" has the created event's
@@ -200,9 +218,13 @@ async def add_calendar_event(
             end_time,
             location,
             entry.get("timeZone"),
+            extended_properties={_HABIT_ID_PROPERTY: habit_id} if habit_id else None,
         )
     except HttpError as exc:
         return {"status": "error", "error_message": str(exc)}
+
+    if habit_id:
+        await _log_habit_session(user_id, habit_id, event)
 
     return {"status": "success", "event": event}
 
@@ -292,7 +314,7 @@ async def update_calendar_event(
         }
 
     try:
-        event = await _patch_google_event(
+        event, tagged_habit_id = await _patch_google_event(
             token,
             calendar_id,
             event_id,
@@ -309,6 +331,12 @@ async def update_calendar_event(
                 "message": f"No event {event_id!r} on that calendar.",
             }
         return {"status": "error", "error_message": str(exc)}
+
+    # Only re-log the plan if the time actually moved — a summary/location
+    # edit on a habit-tagged event doesn't change when it's happening, so
+    # there's nothing for review_habit_week's comparison to need updated.
+    if tagged_habit_id and (start_time is not None or end_time is not None):
+        await _log_habit_session(user_id, tagged_habit_id, event)
 
     return {"status": "success", "event": event}
 
@@ -445,6 +473,41 @@ async def _fetch_calendar_list_entry(access_token: str, calendar_id: str) -> dic
     return await asyncio.to_thread(_get)
 
 
+def _trim_google_event(item: dict, calendar_id: str) -> dict:
+    start = item.get("start", {})
+    end = item.get("end", {})
+    return {
+        "event_id": item.get("id"),
+        "calendar_id": calendar_id,
+        "title": item.get("summary"),
+        "start_time": start.get("dateTime", start.get("date")),
+        "end_time": end.get("dateTime", end.get("date")),
+        "html_link": item.get("htmlLink"),
+    }
+
+
+async def _log_habit_session(user_id: str, habit_id: str, event: dict) -> None:
+    """Best-effort: logging the plan must never fail event creation/
+    rescheduling itself — a missed log entry just means one session is
+    invisible to a future review_habit_week, not a broken calendar."""
+    try:
+        await backend_client.upsert_habit_session(
+            user_id,
+            habit_id=habit_id,
+            event_id=event["event_id"],
+            calendar_id=event["calendar_id"],
+            planned_start=event["start_time"],
+            planned_end=event["end_time"],
+        )
+    except Exception:
+        logger.warning(
+            "Failed to log habit session for habit_id=%s event_id=%s",
+            habit_id,
+            event.get("event_id"),
+            exc_info=True,
+        )
+
+
 async def _insert_google_event(
     access_token: str,
     calendar_id: str,
@@ -453,6 +516,7 @@ async def _insert_google_event(
     end_time: str,
     location: str | None,
     calendar_timezone: str | None,
+    extended_properties: dict | None = None,
 ) -> dict:
     def _insert() -> dict:
         creds = Credentials(token=access_token)
@@ -464,17 +528,10 @@ async def _insert_google_event(
         }
         if location:
             body["location"] = location
+        if extended_properties:
+            body["extendedProperties"] = {"private": extended_properties}
         item = service.events().insert(calendarId=calendar_id, body=body).execute()
-        start = item.get("start", {})
-        end = item.get("end", {})
-        return {
-            "event_id": item.get("id"),
-            "calendar_id": calendar_id,
-            "title": item.get("summary"),
-            "start_time": start.get("dateTime", start.get("date")),
-            "end_time": end.get("dateTime", end.get("date")),
-            "html_link": item.get("htmlLink"),
-        }
+        return _trim_google_event(item, calendar_id)
 
     # googleapiclient is synchronous; keep it off the event loop like every
     # other blocking call in this codebase.
@@ -490,7 +547,11 @@ async def _patch_google_event(
     end_time: str | None,
     location: str | None,
     calendar_timezone: str | None,
-) -> dict:
+) -> tuple[dict, str | None]:
+    """Returns (trimmed event, tagged habit_id or None) — the tag comes
+    back on every patch response regardless of what changed, since a
+    partial patch still returns the full event resource."""
+
     def _patch() -> dict:
         creds = Credentials(token=access_token)
         service = build("calendar", "v3", credentials=creds)
@@ -503,25 +564,19 @@ async def _patch_google_event(
             body["end"] = _time_field(end_time, calendar_timezone)
         if location is not None:
             body["location"] = location
-        item = (
+        return (
             service.events()
             .patch(calendarId=calendar_id, eventId=event_id, body=body)
             .execute()
         )
-        start = item.get("start", {})
-        end = item.get("end", {})
-        return {
-            "event_id": item.get("id"),
-            "calendar_id": calendar_id,
-            "title": item.get("summary"),
-            "start_time": start.get("dateTime", start.get("date")),
-            "end_time": end.get("dateTime", end.get("date")),
-            "html_link": item.get("htmlLink"),
-        }
 
     # googleapiclient is synchronous; keep it off the event loop like every
     # other blocking call in this codebase.
-    return await asyncio.to_thread(_patch)
+    item = await asyncio.to_thread(_patch)
+    habit_id = (item.get("extendedProperties") or {}).get("private", {}).get(
+        _HABIT_ID_PROPERTY
+    )
+    return _trim_google_event(item, calendar_id), habit_id
 
 
 async def _delete_google_event(access_token: str, calendar_id: str, event_id: str) -> None:

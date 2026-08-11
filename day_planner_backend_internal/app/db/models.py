@@ -164,3 +164,57 @@ class Habit:
             created_at=data["created_at"],
             updated_at=data["updated_at"],
         )
+
+
+def habit_session_id_for(calendar_id: str, event_id: str) -> str:
+    """Deterministic document ID for a planned habit session, keyed on
+    (calendar_id, event_id) rather than a random one.
+
+    This is what makes create_calendar_event tagging a session and
+    update_calendar_event later re-tagging it (after the agent moves the
+    event) an idempotent upsert on the same document, instead of two
+    different writers needing to coordinate a lookup first — the same
+    reasoning as account_id_for above.
+    """
+    return f"{calendar_id}__{event_id}"
+
+
+@dataclass(frozen=True)
+class HabitSession:
+    """A single planned occurrence of a habit — the record
+    review_habit_week diffs against actual calendar state later.
+
+    Deliberately keyed on the *calendar event*, not a random id (see
+    habit_session_id_for) — the whole point of this record is to survive
+    even if that event is later deleted, so review_habit_week has
+    something to compare against ("gone") when a plain get_calendar_events
+    call would come back empty.
+
+    planned_start/planned_end are stored as real datetimes (Firestore
+    Timestamps), not the raw strings Google's API returns, specifically so
+    list_habit_sessions can run a native chronological range query rather
+    than a string-lexicographic one — two events in different UTC offsets
+    don't sort the same way as strings that they do as instants.
+    """
+
+    session_id: str
+    habit_id: str
+    event_id: str
+    calendar_id: str
+    planned_start: datetime
+    planned_end: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    @staticmethod
+    def from_dict(session_id: str, data: dict) -> "HabitSession":
+        return HabitSession(
+            session_id=session_id,
+            habit_id=data["habit_id"],
+            event_id=data["event_id"],
+            calendar_id=data["calendar_id"],
+            planned_start=data["planned_start"],
+            planned_end=data["planned_end"],
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+        )

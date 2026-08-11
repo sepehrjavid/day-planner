@@ -8,7 +8,7 @@ day_planner_backend_internal's own test suite already covers
 /internal/habits* directly.
 """
 
-from day_planner_agent import backend_client, habit_tools
+from day_planner_agent import backend_client, calendar_tool, habit_tools
 
 
 async def test_create_habit_passes_through(tool_context, monkeypatch):
@@ -114,3 +114,143 @@ async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
 
     for fn in (habit_tools.create_habit, habit_tools.list_habits, habit_tools.update_habit):
         assert "user_id" not in fn.__code__.co_varnames[: fn.__code__.co_argcount]
+
+
+# ---------------------------------------------------------------------------
+# review_habit_week
+# ---------------------------------------------------------------------------
+
+
+async def test_review_habit_week_no_sessions_short_circuits(tool_context, monkeypatch):
+    """No point calling get_calendar_events at all if nothing was ever
+    planned in this window — and the empty-list result must be
+    distinguishable from "everything was kept", so callers don't conflate
+    the two when summarizing."""
+
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        return []
+
+    async def get_calendar_events(*args, **kwargs):
+        raise AssertionError("should not be called when there are no sessions")
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    assert result == {"status": "success", "sessions": []}
+
+
+async def test_review_habit_week_bubbles_needs_auth(tool_context, monkeypatch):
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        return [
+            {
+                "habit_id": "h1",
+                "event_id": "e1",
+                "calendar_id": "me@gmail.com",
+                "planned_start": "2026-08-04T07:00:00-07:00",
+                "planned_end": "2026-08-04T07:30:00-07:00",
+            }
+        ]
+
+    async def get_calendar_events(tool_context, date_from, date_to):
+        return {"status": "needs_auth", "connect_url": "https://connect.example/start"}
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    assert result == {"status": "needs_auth", "connect_url": "https://connect.example/start"}
+
+
+async def test_review_habit_week_buckets_outcomes_and_names_the_cause(tool_context, monkeypatch):
+    sessions = [
+        {  # still there, same time -> kept
+            "habit_id": "h1",
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T07:00:00-07:00",
+            "planned_end": "2026-08-04T07:30:00-07:00",
+        },
+        {  # still there, different time -> moved, nothing else in its old slot
+            "habit_id": "h1",
+            "event_id": "e2",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-05T07:00:00-07:00",
+            "planned_end": "2026-08-05T07:30:00-07:00",
+        },
+        {  # deleted -> gone, something else now sits in its old slot
+            "habit_id": "h2",
+            "event_id": "e3",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-06T07:00:00-07:00",
+            "planned_end": "2026-08-06T07:30:00-07:00",
+        },
+        {  # habit was archived/renamed away since — label falls back to id
+            "habit_id": "h-unknown",
+            "event_id": "e4",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-07T07:00:00-07:00",
+            "planned_end": "2026-08-07T07:30:00-07:00",
+        },
+    ]
+
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        return sessions
+
+    calendar_state = {
+        "status": "success",
+        "events": [
+            {
+                "event_id": "e1",
+                "calendar_id": "me@gmail.com",
+                "title": "Gym",
+                "start_time": "2026-08-04T07:00:00-07:00",
+                "end_time": "2026-08-04T07:30:00-07:00",
+            },
+            {
+                "event_id": "e2",
+                "calendar_id": "me@gmail.com",
+                "title": "Gym",
+                "start_time": "2026-08-05T18:00:00-07:00",
+                "end_time": "2026-08-05T18:30:00-07:00",
+            },
+            {
+                "event_id": "standup",
+                "calendar_id": "me@gmail.com",
+                "title": "Standup ran long",
+                "start_time": "2026-08-06T07:00:00-07:00",
+                "end_time": "2026-08-06T08:00:00-07:00",
+            },
+            # e4 also gone, and nothing occupies its old slot -> bumped_by None
+        ],
+    }
+
+    async def get_calendar_events(tool_context, date_from, date_to):
+        return calendar_state
+
+    async def list_habits(user_id, *, status=None):
+        assert status is None  # review must see every habit, not just active ones
+        return [{"habit_id": "h1", "label": "Gym"}, {"habit_id": "h2", "label": "Tennis"}]
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    assert result["status"] == "success"
+    by_event = {s["event_id"]: s for s in result["sessions"]}
+
+    assert by_event["e1"]["outcome"] == "kept"
+    assert "bumped_by" not in by_event["e1"]
+    assert by_event["e1"]["habit_label"] == "Gym"
+
+    assert by_event["e2"]["outcome"] == "moved"
+    assert by_event["e2"]["bumped_by"] is None
+
+    assert by_event["e3"]["outcome"] == "gone"
+    assert by_event["e3"]["bumped_by"] == "Standup ran long"
+    assert by_event["e3"]["habit_label"] == "Tennis"
+
+    assert by_event["e4"]["outcome"] == "gone"
+    assert by_event["e4"]["bumped_by"] is None
+    assert by_event["e4"]["habit_label"] == "h-unknown"

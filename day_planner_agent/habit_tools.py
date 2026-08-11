@@ -20,9 +20,12 @@ every other tool in this codebase — never a model-supplied argument.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from google.adk.tools import ToolContext
 
 from . import backend_client
+from . import calendar_tool
 
 
 async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict:
@@ -122,3 +125,122 @@ async def update_habit(
     if updated is None:
         return {"status": "not_found", "message": f"No habit {habit_id!r}."}
     return {"status": "success", "habit": updated}
+
+
+async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: str) -> dict:
+    """Compare the habit sessions the agent planned for a period against
+    what actually happened on the calendar — the "why do I keep missing
+    gym on Thursdays" feature. Only covers sessions add_calendar_event or
+    update_calendar_event tagged with a habit_id; a user-created event with
+    no habit tag never shows up here.
+
+    Call this when the user asks how their week/habits went, whether
+    they're keeping up with something, or why a habit keeps failing —
+    never guess at an answer to that kind of question from memory, this is
+    the tool that actually knows. It's also worth calling proactively
+    before placing next period's sessions for a habit that had a rough
+    prior period, so the new plan can route around whatever kept bumping
+    it (see instruction.md's guidance on using this alongside the user's
+    stated preferences to judge what the pattern actually means).
+
+    Args:
+        date_from: Start date, inclusive, "YYYY-MM-DD" — same contract as
+            get_calendar_events.
+        date_to: End date, exclusive, "YYYY-MM-DD".
+
+    Returns:
+        A dict with "status". On "success", "sessions" is a list of
+        planned habit sessions in the period, each with "habit_id",
+        "habit_label", "planned_start", "planned_end", "event_id",
+        "calendar_id", and "outcome" — "kept" (still there, unchanged),
+        "moved" (still there, different time — could be a deliberate
+        reschedule or a conflict, "bumped_by" is the best signal for
+        which), or "gone" (deleted). Anything not "kept" also carries
+        "bumped_by": the title of whatever else now occupies that original
+        slot, or null if nothing does (the session was likely just
+        dropped, not displaced). Empty "sessions" means no habit session
+        was planned in this period at all — distinct from every one of
+        them being kept, so don't conflate the two when summarizing. On
+        "needs_auth"/"error", handle identically to get_calendar_events.
+    """
+    user_id = tool_context.session.user_id
+
+    sessions = await backend_client.list_habit_sessions(
+        user_id, planned_from=f"{date_from}T00:00:00Z", planned_to=f"{date_to}T00:00:00Z"
+    )
+    if not sessions:
+        return {"status": "success", "sessions": []}
+
+    calendar_state = await calendar_tool.get_calendar_events(tool_context, date_from, date_to)
+    if calendar_state["status"] != "success":
+        return calendar_state
+
+    events = calendar_state["events"]
+    events_by_key = {(e["calendar_id"], e["event_id"]): e for e in events}
+
+    habits = await backend_client.list_habits(user_id, status=None)
+    habit_labels = {h["habit_id"]: h["label"] for h in habits}
+
+    results = []
+    for session in sessions:
+        current = events_by_key.get((session["calendar_id"], session["event_id"]))
+
+        if current is None:
+            outcome = "gone"
+        elif _same_instant(current["start_time"], session["planned_start"]):
+            outcome = "kept"
+        else:
+            outcome = "moved"
+
+        entry = {
+            "habit_id": session["habit_id"],
+            "habit_label": habit_labels.get(session["habit_id"], session["habit_id"]),
+            "event_id": session["event_id"],
+            "calendar_id": session["calendar_id"],
+            "planned_start": session["planned_start"],
+            "planned_end": session["planned_end"],
+            "outcome": outcome,
+        }
+        if outcome != "kept":
+            entry["bumped_by"] = _find_conflict(events, session)
+        results.append(entry)
+
+    return {"status": "success", "sessions": results}
+
+
+def _same_instant(a: str, b: str) -> bool:
+    """Compares two Calendar API time strings as actual instants, not
+    text — "2026-08-04T20:00:00-07:00" and its UTC-normalized equivalent
+    must compare equal even though they're different strings."""
+    try:
+        return datetime.fromisoformat(a) == datetime.fromisoformat(b)
+    except (ValueError, TypeError):
+        return a == b
+
+
+def _find_conflict(events: list[dict], session: dict) -> str | None:
+    """The title of whatever now overlaps a session's originally-planned
+    slot on the same calendar, excluding the session's own event — the
+    best available signal for *why* a session moved or disappeared."""
+    try:
+        planned_start = datetime.fromisoformat(session["planned_start"])
+        planned_end = datetime.fromisoformat(session["planned_end"])
+    except (ValueError, TypeError):
+        return None
+
+    for event in events:
+        if (
+            event["calendar_id"] != session["calendar_id"]
+            or event["event_id"] == session["event_id"]
+        ):
+            continue
+        try:
+            overlaps = (
+                datetime.fromisoformat(event["start_time"]) < planned_end
+                and datetime.fromisoformat(event["end_time"]) > planned_start
+            )
+        except (ValueError, TypeError):
+            continue
+        if overlaps:
+            return event["title"]
+    return None

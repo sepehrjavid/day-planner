@@ -138,3 +138,40 @@ async def update_habit(
         return None
     response.raise_for_status()
     return response.json()
+
+
+async def upsert_habit_session(
+    user_id: str,
+    *,
+    habit_id: str,
+    event_id: str,
+    calendar_id: str,
+    planned_start: str,
+    planned_end: str,
+) -> dict:
+    async with await _client() as client:
+        response = await client.post(
+            "/internal/habit-sessions",
+            json={
+                "user_id": user_id,
+                "habit_id": habit_id,
+                "event_id": event_id,
+                "calendar_id": calendar_id,
+                "planned_start": planned_start,
+                "planned_end": planned_end,
+            },
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+async def list_habit_sessions(
+    user_id: str, *, planned_from: str, planned_to: str
+) -> list[dict]:
+    async with await _client() as client:
+        response = await client.get(
+            "/internal/habit-sessions",
+            params={"user_id": user_id, "planned_from": planned_from, "planned_to": planned_to},
+        )
+    response.raise_for_status()
+    return response.json()["sessions"]

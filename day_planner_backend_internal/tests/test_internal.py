@@ -354,3 +354,94 @@ def test_update_habit_wrong_user_is_404(client):
         json={"user_id": "u2", "habit_id": created["habit_id"], "goal": "hijacked"},
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Habit sessions
+# ---------------------------------------------------------------------------
+
+
+def _upsert_session(client, **overrides):
+    body = {
+        "user_id": "u1",
+        "habit_id": "h1",
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "planned_start": "2026-08-04T07:00:00-07:00",
+        "planned_end": "2026-08-04T07:30:00-07:00",
+    }
+    body.update(overrides)
+    return client.post("/internal/habit-sessions", json=body)
+
+
+def test_habit_sessions_require_internal_caller(anon_client):
+    assert (
+        anon_client.post(
+            "/internal/habit-sessions",
+            json={
+                "user_id": "u1",
+                "habit_id": "h1",
+                "event_id": "e1",
+                "calendar_id": "me@gmail.com",
+                "planned_start": "2026-08-04T07:00:00Z",
+                "planned_end": "2026-08-04T07:30:00Z",
+            },
+        ).status_code
+        == 401
+    )
+    assert (
+        anon_client.get(
+            "/internal/habit-sessions"
+            "?user_id=u1&planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z"
+        ).status_code
+        == 401
+    )
+
+
+def test_upsert_habit_session_creates(client):
+    response = _upsert_session(client)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["habit_id"] == "h1"
+    assert body["event_id"] == "e1"
+    assert body["session_id"]
+
+
+def test_upsert_habit_session_same_event_updates_in_place(client):
+    """A reschedule (update_calendar_event moving a tagged event) must
+    update the existing plan, not create a second record for the same
+    event — otherwise review_habit_week would see two conflicting plans
+    for one actual event."""
+    first = _upsert_session(client).json()
+
+    second = _upsert_session(
+        client,
+        planned_start="2026-08-04T18:00:00-07:00",
+        planned_end="2026-08-04T18:30:00-07:00",
+    ).json()
+
+    assert second["session_id"] == first["session_id"]
+    assert second["planned_start"] == "2026-08-04T18:00:00-07:00"
+    assert second["created_at"] == first["created_at"]  # preserved, not reset
+
+
+def test_list_habit_sessions_filters_by_planned_start_range(client):
+    _upsert_session(client, event_id="e-in-range", planned_start="2026-08-04T07:00:00-07:00")
+    _upsert_session(client, event_id="e-before", planned_start="2026-07-20T07:00:00-07:00")
+    _upsert_session(client, event_id="e-after", planned_start="2026-09-01T07:00:00-07:00")
+    # A different user's session must never show up in this list.
+    _upsert_session(client, user_id="u2", event_id="e-other-user")
+
+    body = client.get(
+        "/internal/habit-sessions"
+        "?user_id=u1&planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z"
+    ).json()
+    assert [s["event_id"] for s in body["sessions"]] == ["e-in-range"]
+
+
+def test_list_habit_sessions_empty_by_default(client):
+    body = client.get(
+        "/internal/habit-sessions"
+        "?user_id=u1&planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z"
+    ).json()
+    assert body == {"sessions": []}

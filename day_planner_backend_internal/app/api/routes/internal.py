@@ -8,6 +8,8 @@ produced. A model-supplied user_id here means a prompt injection in a calendar
 event title can read someone else's schedule.
 """
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ...core.config import Settings, get_settings
@@ -21,6 +23,11 @@ from ...schemas.calendars import (
     ConnectLinkRequest,
     ConnectLinkResponse,
     DisconnectRequest,
+)
+from ...schemas.habit_sessions import (
+    HabitSessionOut,
+    HabitSessionsResponse,
+    UpsertHabitSessionRequest,
 )
 from ...schemas.habits import (
     CreateHabitRequest,
@@ -211,3 +218,52 @@ async def update_habit(body: UpdateHabitRequest, store: Store = Depends(get_stor
     if habit is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return _to_habit_out(habit)
+
+
+def _to_habit_session_out(session) -> HabitSessionOut:
+    return HabitSessionOut(
+        session_id=session.session_id,
+        habit_id=session.habit_id,
+        event_id=session.event_id,
+        calendar_id=session.calendar_id,
+        planned_start=session.planned_start,
+        planned_end=session.planned_end,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+@router.post("/habit-sessions", response_model=HabitSessionOut)
+async def upsert_habit_session(
+    body: UpsertHabitSessionRequest, store: Store = Depends(get_store)
+):
+    """Log (or, for an event already logged, update) the plan for one
+    calendar event created for a habit. Called by add_calendar_event on
+    creation and by update_calendar_event when it moves an already-tagged
+    event — see calendar_tool.py."""
+    session = await store.upsert_habit_session(
+        user_id=body.user_id,
+        habit_id=body.habit_id,
+        event_id=body.event_id,
+        calendar_id=body.calendar_id,
+        planned_start=body.planned_start,
+        planned_end=body.planned_end,
+    )
+    return _to_habit_session_out(session)
+
+
+@router.get("/habit-sessions", response_model=HabitSessionsResponse)
+async def list_habit_sessions(
+    user_id: str,
+    planned_from: datetime,
+    planned_to: datetime,
+    store: Store = Depends(get_store),
+):
+    """Every session planned to start in [planned_from, planned_to) —
+    review_habit_week's input. Sessions whose event was later deleted are
+    still returned; that's the entire point of this record surviving
+    independently of the calendar event it describes."""
+    sessions = await store.list_habit_sessions(
+        user_id, planned_from=planned_from, planned_to=planned_to
+    )
+    return HabitSessionsResponse(sessions=[_to_habit_session_out(s) for s in sessions])

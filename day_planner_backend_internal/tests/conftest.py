@@ -35,8 +35,10 @@ from app.db.models import (  # noqa: E402
     Calendar,
     ConnectedAccount,
     Habit,
+    HabitSession,
     OAuthState,
     account_id_for,
+    habit_session_id_for,
 )
 
 
@@ -52,6 +54,7 @@ class FakeStore:
         self.states: dict[str, OAuthState] = {}
         self.accounts: dict[str, dict[str, dict]] = {}
         self.habits: dict[str, dict[str, dict]] = {}
+        self.habit_sessions: dict[str, dict[str, dict]] = {}
         self._seq = 0
 
     def _next(self, prefix: str) -> str:
@@ -218,6 +221,33 @@ class FakeStore:
             data["status"] = status
         data["updated_at"] = _now()
         return Habit.from_dict(habit_id, data)
+
+    # --- habit sessions ---
+    async def upsert_habit_session(
+        self, *, user_id, habit_id, event_id, calendar_id, planned_start, planned_end
+    ):
+        session_id = habit_session_id_for(calendar_id, event_id)
+        bucket = self.habit_sessions.setdefault(user_id, {})
+        existing = bucket.get(session_id)
+        now = _now()
+        data = {
+            "habit_id": habit_id,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+            "planned_start": planned_start,
+            "planned_end": planned_end,
+            "created_at": existing["created_at"] if existing else now,
+            "updated_at": now,
+        }
+        bucket[session_id] = data
+        return HabitSession.from_dict(session_id, data)
+
+    async def list_habit_sessions(self, user_id, *, planned_from, planned_to):
+        return [
+            HabitSession.from_dict(session_id, data)
+            for session_id, data in self.habit_sessions.get(user_id, {}).items()
+            if planned_from <= data["planned_start"] < planned_to
+        ]
 
 
 @pytest.fixture

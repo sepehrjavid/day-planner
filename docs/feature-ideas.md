@@ -1,7 +1,8 @@
 # Feature ideas — differentiation roadmap
 
-Nothing below is built — this is a menu of candidate features, not a plan
-with dates. Each one came out of a review of [day-planner-agent-spec.md](day-planner-agent-spec.md)
+This started as a menu of candidate features, not a plan with dates — items
+without a **Status: Built** line are still just that, a proposal. Each one
+came out of a review of [day-planner-agent-spec.md](day-planner-agent-spec.md)
 (the aspirational product roadmap) against what's actually shipped today: a
 Google Calendar agent (multi-account get/add/update/delete events), a
 structured preference profile + free-form memory via Vertex AI Memory Bank,
@@ -64,48 +65,60 @@ preference stored; what's the actual warning threshold.
 
 ## 2. Weekly behavioral review
 
-**Problem**: The agent has no memory of *outcomes* — only of preferences and
-events. If a habit block gets deleted, moved, or silently skipped, nothing
-captures that or asks why. The agent can place a "workout, 7am" block
-perfectly and have no idea a week later that it got wiped by a recurring
-7am standup, so it'll happily schedule the same losing pattern again next
-week. This is the specific capability the spec's positioning is actually
-built on (§4.3.1, "you miss gym on Thursdays because meetings run late") —
-it's the one thing neither a calendar app (no habit concept) nor a habit
-app (no calendar visibility) can do alone, because it requires seeing both
-at once over time.
+**Status**: Built. `review_habit_week` in
+[habit_tools.py](../day_planner_agent/habit_tools.py) compares habit
+sessions the agent planned against what actually survived on the calendar,
+and names what bumped anything that didn't. On-demand only — see "Deferred"
+below for the one piece that didn't ship.
 
-**What exists to build on**: `update_profile`/`save_memory`/`load_memory`
-in [memory_tools.py](../day_planner_agent/memory_tools.py) already provide
-somewhere to store this kind of insight, and `get_calendar_events` gives
-the raw history to mine.
+**Original problem** (kept for context): the agent had no memory of
+*outcomes* — only of preferences and events. If a habit block got deleted,
+moved, or silently skipped, nothing captured that or asked why, so the same
+losing pattern would get scheduled again next week with no one the wiser.
+This is the specific capability the spec's positioning is actually built on
+(§4.3.1, "you miss gym on Thursdays because meetings run late") — the one
+thing neither a calendar app nor a habit app can do alone, since it
+requires seeing both at once over time.
 
-**What's new, and the open design problem**: two things don't exist yet and
-need to be designed together. First, a way to tell "planned habit block"
-apart from a regular event, so the agent can check later whether it
-survived. Second — the harder part — there's currently no persisted
-snapshot of what the agent *planned* to compare against what actually
-happened later; `get_calendar_events` only shows current state, not
-history. That comparison needs either a stored planned-state record
-(where? Memory Bank via `save_memory`, or a new store on the backend side)
-or some other way to reconstruct what changed.
+**How it was solved**: the blocking design problem was that
+`get_calendar_events` only shows current state, not history — a deleted
+event leaves nothing to diff against. Two pieces fixed that: `add_calendar_event`'s
+`habit_id` param tags the Google Calendar event itself
+(`extendedProperties.private`, `calendar_tool.py`) so it's identifiable
+later, and a separate plan-log record — `day_planner_backend_internal`'s
+`habit_sessions` collection (`POST`/`GET /internal/habit-sessions`) — is
+written alongside it and *outlives* the calendar event on purpose, so
+`review_habit_week` still has something to compare against even after the
+event is gone. `update_calendar_event` keeps that log's planned time in
+sync when the agent itself reschedules a tagged session, so a deliberate
+replan doesn't read as a loss later.
 
-**Starter prompt for the design chat**:
-> I want to design a weekly behavioral review feature for my day-planner
-> agent (ADK-based, Gemini, tools in `day_planner_agent/calendar_tool.py`
-> and `memory_tools.py`, backend split across
-> `day_planner_backend_app`/`day_planner_backend_internal`). The goal:
-> compare habit blocks the agent planned against what actually survived on
-> the calendar a week later, and surface a pattern like "you missed gym 3x
-> this week, always after 5pm meetings ran long." The hard problem is that
-> `get_calendar_events` only shows current state — there's no persisted
-> record of what was planned to diff against later. Help me design: (1)
-> how to tag/track agent-created habit events distinctly from regular
-> events, (2) where and how to persist "planned state" so it survives to
-> compare against "actual state" a week later, (3) what the pattern-
-> detection logic looks like (same day-of-week trigger vs. one-off), and
-> (4) when this review runs (weekly cron via the backend? on-demand when
-> asked?). See `docs/feature-ideas.md` §2 for the full problem statement.
+**Deferred: a proactive/cron trigger**
+
+`review_habit_week` only runs when asked — nobody gets a review unless they
+ask "how did this week go?". A proactive version (fired automatically, e.g.
+every Monday morning, with no user in the loop) is real future work, not
+built. This was deliberate: validating the comparison logic itself (is
+`bumped_by` actually useful, do outcomes get bucketed sensibly) was worth
+doing before spending effort on delivery infrastructure for it.
+
+**Starter prompt for that follow-up design chat**:
+> I want to add a proactive trigger for my day-planner agent's
+> `review_habit_week` tool (`day_planner_agent/habit_tools.py`) — right now
+> it only runs when the user asks about their week. I want it to fire on
+> its own, e.g. weekly per user, likely via Cloud Scheduler (already used
+> elsewhere in this project's GCP deployment — see `docs/deployment-gcp.md`)
+> hitting a new lightweight endpoint that invokes the agent with a
+> synthetic "review last week" prompt, similar to how `/me/chat`
+> (`day_planner_backend_app`) invokes it today but without a live user
+> waiting on the response. Help me design: (1) how the agent's reply
+> reaches the user with nobody watching the chat in real time (push
+> notification? email digest? queued as the opening message next time they
+> open a session?), (2) how to avoid "reviewing" a week where the user had
+> zero planned habit sessions (silence isn't a review — see
+> `review_habit_week`'s own empty-sessions-vs-everything-kept distinction),
+> and (3) whether this should be opt-in per user or on by default. See
+> `docs/feature-ideas.md` §2 for the full history of this feature.
 
 ---
 

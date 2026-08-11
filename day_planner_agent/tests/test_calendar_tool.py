@@ -862,3 +862,226 @@ async def test_update_calendar_event_partial_update_only_sends_changed_fields(
     assert patch_call["body"] == {
         "start": {"dateTime": "2026-08-04T21:00:00", "timeZone": "America/Los_Angeles"}
     }
+
+
+# ---------------------------------------------------------------------------
+# Habit tagging + plan logging (add_calendar_event/update_calendar_event)
+# ---------------------------------------------------------------------------
+
+
+def _single_calendar(calendar_id="me@gmail.com"):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": calendar_id,
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    return list_calendars
+
+
+async def _access_token(user_id, account_id):
+    return "AT-1"
+
+
+async def test_add_calendar_event_with_habit_id_tags_and_logs_session(tool_context, monkeypatch):
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        ),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    logged = {}
+
+    async def upsert_habit_session(user_id, *, habit_id, event_id, calendar_id, planned_start, planned_end):
+        logged["args"] = (user_id, habit_id, event_id, calendar_id, planned_start, planned_end)
+        return {}
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+    insert_body = service.events().insert_calls[0]["body"]
+    assert insert_body["extendedProperties"] == {"private": {"day_planner_habit_id": "h1"}}
+    assert logged["args"] == (
+        "user-1",
+        "h1",
+        "e1",
+        "me@gmail.com",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+    )
+
+
+async def test_add_calendar_event_without_habit_id_does_not_tag_or_log(tool_context, monkeypatch):
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Dinner", "2026-08-04T20:00:00-07:00", "2026-08-04T21:00:00-07:00"
+        ),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+    called = []
+
+    async def upsert_habit_session(*args, **kwargs):
+        called.append((args, kwargs))
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Dinner", "2026-08-04T20:00:00-07:00", "2026-08-04T21:00:00-07:00"
+    )
+
+    assert result["status"] == "success"
+    assert "extendedProperties" not in service.events().insert_calls[0]["body"]
+    assert called == []
+
+
+async def test_add_calendar_event_habit_session_log_failure_is_best_effort(
+    tool_context, monkeypatch
+):
+    """A Firestore-side logging failure must not take down event creation —
+    the calendar event landing is what matters; a missed log entry just
+    means one session is invisible to a future review."""
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        ),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    async def upsert_habit_session(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+
+
+async def test_update_calendar_event_reschedule_of_tagged_event_updates_log(
+    tool_context, monkeypatch
+):
+    service = FakeCalendarService(
+        inserted={
+            "id": "e1",
+            "summary": "Gym",
+            "start": {"dateTime": "2026-08-04T18:00:00-07:00"},
+            "end": {"dateTime": "2026-08-04T18:30:00-07:00"},
+            "htmlLink": "https://calendar.example/e1",
+            "extendedProperties": {"private": {"day_planner_habit_id": "h1"}},
+        },
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+    logged = {}
+
+    async def upsert_habit_session(user_id, *, habit_id, event_id, calendar_id, planned_start, planned_end):
+        logged["args"] = (habit_id, event_id, calendar_id, planned_start, planned_end)
+        return {}
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", start_time="2026-08-04T18:00:00-07:00"
+    )
+
+    assert result["status"] == "success"
+    assert logged["args"] == (
+        "h1",
+        "e1",
+        "me@gmail.com",
+        "2026-08-04T18:00:00-07:00",
+        "2026-08-04T18:30:00-07:00",
+    )
+
+
+async def test_update_calendar_event_summary_only_does_not_touch_habit_log(
+    tool_context, monkeypatch
+):
+    """Renaming a tagged habit session doesn't change when it's happening —
+    nothing for review_habit_week's comparison to need updated."""
+    service = FakeCalendarService(
+        inserted={
+            "id": "e1",
+            "summary": "Renamed",
+            "start": {"dateTime": "2026-08-04T07:00:00-07:00"},
+            "end": {"dateTime": "2026-08-04T07:30:00-07:00"},
+            "htmlLink": "https://calendar.example/e1",
+            "extendedProperties": {"private": {"day_planner_habit_id": "h1"}},
+        },
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+    called = []
+
+    async def upsert_habit_session(*args, **kwargs):
+        called.append((args, kwargs))
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", summary="Renamed"
+    )
+
+    assert result["status"] == "success"
+    assert called == []
+
+
+async def test_update_calendar_event_untagged_event_never_logs(tool_context, monkeypatch):
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Dentist", "2026-08-04T09:00:00-07:00", "2026-08-04T09:30:00-07:00"
+        ),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+    called = []
+
+    async def upsert_habit_session(*args, **kwargs):
+        called.append((args, kwargs))
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", start_time="2026-08-04T09:00:00-07:00"
+    )
+
+    assert result["status"] == "success"
+    assert called == []

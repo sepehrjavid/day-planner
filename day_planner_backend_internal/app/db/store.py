@@ -19,6 +19,19 @@ Collection layout:
                                                  plain record and not part of
                                                  the Memory Bank profile).
 
+  users/{user_id}/habit_sessions/{session_id}    one per calendar event the
+                                                 agent created for a habit,
+                                                 keyed on (calendar_id,
+                                                 event_id) via
+                                                 habit_session_id_for — see
+                                                 db/models.py's HabitSession
+                                                 docstring. Outlives the
+                                                 calendar event on purpose:
+                                                 review_habit_week needs a
+                                                 record of what was planned
+                                                 even after the event itself
+                                                 is deleted.
+
   user_emails/{normalized_email}                 uniqueness lock for signup.
                                                  Firestore has no unique
                                                  constraint, so "query, then
@@ -52,9 +65,11 @@ from .models import (
     ConnectedAccount,
     EmailAlreadyRegistered,
     Habit,
+    HabitSession,
     OAuthState,
     ThrottleState,
     account_id_for,
+    habit_session_id_for,
     hash_session_token,
     normalize_email,
     utcnow,
@@ -67,6 +82,7 @@ LOGIN_THROTTLE = "login_throttle"
 OAUTH_STATES = "oauth_states"
 CONNECTED_ACCOUNTS = "connected_accounts"
 HABITS = "habits"
+HABIT_SESSIONS = "habit_sessions"
 
 
 class Store:
@@ -502,3 +518,62 @@ class Store:
 
         updated = await ref.get()
         return Habit.from_dict(habit_id, updated.to_dict() or {})
+
+    # ------------------------------------------------------------------
+    # Habit sessions (the plan log review_habit_week diffs against
+    # actual calendar state)
+    # ------------------------------------------------------------------
+
+    def _habit_sessions(self, user_id: str):
+        return self._db.collection(USERS).document(user_id).collection(HABIT_SESSIONS)
+
+    async def upsert_habit_session(
+        self,
+        *,
+        user_id: str,
+        habit_id: str,
+        event_id: str,
+        calendar_id: str,
+        planned_start: datetime,
+        planned_end: datetime,
+    ) -> HabitSession:
+        """Create a session record, or — for the same (calendar_id,
+        event_id), e.g. after the agent reschedules its own event — update
+        its plan in place. created_at is set once and preserved across
+        later upserts; everything else always reflects the latest plan."""
+        session_id = habit_session_id_for(calendar_id, event_id)
+        ref = self._habit_sessions(user_id).document(session_id)
+
+        existing = await ref.get()
+        now = utcnow()
+        payload = {
+            "habit_id": habit_id,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+            "planned_start": planned_start,
+            "planned_end": planned_end,
+            "updated_at": now,
+        }
+        if not existing.exists:
+            payload["created_at"] = now
+        await ref.set(payload, merge=True)
+
+        updated = await ref.get()
+        return HabitSession.from_dict(session_id, updated.to_dict() or {})
+
+    async def list_habit_sessions(
+        self, user_id: str, *, planned_from: datetime, planned_to: datetime
+    ) -> list[HabitSession]:
+        """Every session planned to start in [planned_from, planned_to) —
+        a native Firestore Timestamp range query, not a string comparison,
+        so this stays correct regardless of which UTC offset a given
+        session's planned_start happens to carry."""
+        query = (
+            self._habit_sessions(user_id)
+            .where("planned_start", ">=", planned_from)
+            .where("planned_start", "<", planned_to)
+        )
+        return [
+            HabitSession.from_dict(doc.id, doc.to_dict() or {})
+            async for doc in query.stream()
+        ]
