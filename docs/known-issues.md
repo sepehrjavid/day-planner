@@ -80,3 +80,37 @@ Before assuming it's a drop-in rename, check whether `agentplatform.Client`
 actually honors `wait_for_completion` — that bug is the entire reason these
 two call sites bypass the ADK wrapper in the first place, so migrating to a
 client with the same bug would just reintroduce it under a new name.
+
+## Planned sleep zone won't support alternating/rotating schedules
+
+**Where it would live**: the sleep zone design in
+[todo.md](todo.md) §1 (day zones — not built yet; this is a scope
+boundary decided during design, not a bug in shipped code, tracked here
+so it doesn't get silently forgotten or later assumed to work).
+
+**The problem**: the planned sleep zone stores a `sleep_time`/`wake_time`
+pair per day of the week, which reliably covers *systematic* weekly
+variation (e.g. "I always sleep in on Sundays") but has no field for
+*which week* it is — so it cannot represent a genuinely alternating or
+rotating pattern, e.g. a nurse working a night shift every other Friday
+and sleeping during the day the following morning on shift weeks only.
+A day-of-week bucket applies to every occurrence of that day uniformly;
+there's no way to say "this rule applies on odd weeks only" without a
+real recurrence-rule engine (iCal-style RRULEs), which is a meaningfully
+bigger piece of scope than the rest of the zones design and isn't
+justified without evidence anyone actually needs it.
+
+**Current workaround, by design, not a gap to close silently**: this case
+is meant to be handled the same way any other one-off exception is (see
+`todo.md` §1's "Behavioral requirements" list) — the user states it
+conversationally when it's actually relevant that occurrence ("I'm on
+nights this Friday, sleeping during the day Saturday instead"), rather
+than the standing sleep schedule trying to encode a rotation it can't
+represent.
+
+**What would make it worth revisiting**: real evidence that alternating/
+rotating schedules are common enough among actual users to justify a
+recurrence-rule engine — at which point this becomes a genuine design
+task (how RRULE-style rules interact with the day-of-week defaults, how
+the agent resolves "which rule wins" for a given date), not a small
+addition to the existing sleep-zone fields.
