@@ -47,9 +47,16 @@ async def get_calendar_events(
     Returns:
         A dict with "status". On "success", "events" is a merged,
         time-sorted list across every connected and selected calendar, and
-        an optional "note" flags any accounts that were skipped. On
-        "needs_auth", "connect_url" is a link to hand the user — give it to
-        them and stop; do not try to work around missing calendar access.
+        an optional "note" flags any accounts that were skipped. Each event
+        carries "habit_id" when it's a session previously placed for a
+        tracked habit (see add_calendar_event's habit_id param) — the key
+        is absent entirely for a plain event, so check for its presence
+        rather than assuming it's always there. This is how you notice an
+        already-scheduled habit session colliding with something you've
+        just learned, e.g. a newly-stated work-hours preference (see
+        instruction.md). On "needs_auth", "connect_url" is a link to hand
+        the user — give it to them and stop; do not try to work around
+        missing calendar access.
     """
     user_id = tool_context.session.user_id
 
@@ -473,10 +480,16 @@ async def _fetch_calendar_list_entry(access_token: str, calendar_id: str) -> dic
     return await asyncio.to_thread(_get)
 
 
+def _extract_habit_id(item: dict) -> str | None:
+    return (item.get("extendedProperties") or {}).get("private", {}).get(
+        _HABIT_ID_PROPERTY
+    )
+
+
 def _trim_google_event(item: dict, calendar_id: str) -> dict:
     start = item.get("start", {})
     end = item.get("end", {})
-    return {
+    trimmed = {
         "event_id": item.get("id"),
         "calendar_id": calendar_id,
         "title": item.get("summary"),
@@ -484,6 +497,14 @@ def _trim_google_event(item: dict, calendar_id: str) -> dict:
         "end_time": end.get("dateTime", end.get("date")),
         "html_link": item.get("htmlLink"),
     }
+    # Only present when this event was tagged for a habit — a plain event's
+    # dict has no "habit_id" key at all, rather than an explicit null, so a
+    # simple presence check ("habit_id" in event / event.get("habit_id"))
+    # works everywhere this shape shows up (get/add/update_calendar_event).
+    habit_id = _extract_habit_id(item)
+    if habit_id:
+        trimmed["habit_id"] = habit_id
+    return trimmed
 
 
 async def _log_habit_session(user_id: str, habit_id: str, event: dict) -> None:
@@ -573,10 +594,7 @@ async def _patch_google_event(
     # googleapiclient is synchronous; keep it off the event loop like every
     # other blocking call in this codebase.
     item = await asyncio.to_thread(_patch)
-    habit_id = (item.get("extendedProperties") or {}).get("private", {}).get(
-        _HABIT_ID_PROPERTY
-    )
-    return _trim_google_event(item, calendar_id), habit_id
+    return _trim_google_event(item, calendar_id), _extract_habit_id(item)
 
 
 async def _delete_google_event(access_token: str, calendar_id: str, event_id: str) -> None:
@@ -615,16 +633,24 @@ async def _fetch_google_events(
         for item in response.get("items", []):
             start = item.get("start", {})
             end = item.get("end", {})
-            items.append(
-                {
-                    "event_id": item.get("id"),
-                    "title": item.get("summary", "(no title)"),
-                    "start_time": start.get("dateTime", start.get("date")),
-                    "end_time": end.get("dateTime", end.get("date")),
-                    "location": item.get("location"),
-                    "calendar_id": calendar_id,
-                }
-            )
+            entry = {
+                "event_id": item.get("id"),
+                "title": item.get("summary", "(no title)"),
+                "start_time": start.get("dateTime", start.get("date")),
+                "end_time": end.get("dateTime", end.get("date")),
+                "location": item.get("location"),
+                "calendar_id": calendar_id,
+            }
+            # Only present when this event was tagged for a habit — see
+            # _trim_google_event's identical convention. This is what lets
+            # the agent notice, from a plain get_calendar_events call, that
+            # an already-scheduled event is a habit session, e.g. when
+            # checking a newly-stated preference against what's already on
+            # the calendar (see instruction.md).
+            habit_id = _extract_habit_id(item)
+            if habit_id:
+                entry["habit_id"] = habit_id
+            items.append(entry)
         return items
 
     # googleapiclient is synchronous; keep it off the event loop like every

@@ -227,6 +227,51 @@ async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
     ]
 
 
+def _google_item_with_habit_tag(event_id, summary, start, end, habit_id):
+    item = _google_item(event_id, summary, start, end)
+    item["extendedProperties"] = {"private": {"day_planner_habit_id": habit_id}}
+    return item
+
+
+async def test_get_calendar_events_surfaces_habit_id_only_when_tagged(
+    tool_context, monkeypatch
+):
+    """This is the field instruction.md relies on to notice an
+    already-scheduled habit session colliding with a newly-stated
+    preference — a plain event must not carry the key at all."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-personal", "calendar_id": "me@gmail.com"}],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(
+        calendar_tool,
+        "build",
+        lambda *a, **k: FakeCalendarService(
+            [
+                _google_item_with_habit_tag(
+                    "e1", "Gym", "2026-08-04T07:00:00Z", "2026-08-04T07:30:00Z", "h1"
+                ),
+                _google_item("e2", "Dentist", "2026-08-04T09:00:00Z", "2026-08-04T09:30:00Z"),
+            ]
+        ),
+    )
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-04", "2026-08-05")
+    assert result["status"] == "success"
+    by_id = {e["event_id"]: e for e in result["events"]}
+    assert by_id["e1"]["habit_id"] == "h1"
+    assert "habit_id" not in by_id["e2"]
+
+
 def _google_inserted(event_id, summary, start, end, html_link="https://calendar.example/e"):
     return {
         "id": event_id,
