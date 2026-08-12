@@ -81,24 +81,27 @@ actually honors `wait_for_completion` — that bug is the entire reason these
 two call sites bypass the ADK wrapper in the first place, so migrating to a
 client with the same bug would just reintroduce it under a new name.
 
-## Planned sleep zone won't support alternating/rotating schedules
+## Sleep schedule doesn't support alternating/rotating schedules
 
-**Where it would live**: the sleep zone design in
-[todo.md](todo.md) §1 (day zones — not built yet; this is a scope
+**Where it lives**: `SleepSchedule` in
+`day_planner_backend_internal/app/db/models.py`, set via the agent's
+`set_sleep_schedule` tool (`day_planner_agent/zone_tools.py`) — part of
+the day zones feature from [todo.md](todo.md) §1. This is a scope
 boundary decided during design, not a bug in shipped code, tracked here
-so it doesn't get silently forgotten or later assumed to work).
+so it doesn't get silently forgotten or later assumed to work.
 
-**The problem**: the planned sleep zone stores a `sleep_time`/`wake_time`
-pair per day of the week, which reliably covers *systematic* weekly
-variation (e.g. "I always sleep in on Sundays") but has no field for
-*which week* it is — so it cannot represent a genuinely alternating or
-rotating pattern, e.g. a nurse working a night shift every other Friday
-and sleeping during the day the following morning on shift weeks only.
-A day-of-week bucket applies to every occurrence of that day uniformly;
-there's no way to say "this rule applies on odd weeks only" without a
-real recurrence-rule engine (iCal-style RRULEs), which is a meaningfully
-bigger piece of scope than the rest of the zones design and isn't
-justified without evidence anyone actually needs it.
+**The problem**: the sleep schedule stores a `sleep_time`/`wake_time`
+pair per day of the week (`day_overrides`), which reliably covers
+*systematic* weekly variation (e.g. "I always sleep in on Sundays") but
+has no field for *which week* it is — so it cannot represent a genuinely
+alternating or rotating pattern, e.g. a nurse working a night shift
+every other Friday and sleeping during the day the following morning on
+shift weeks only. A day-of-week bucket applies to every occurrence of
+that day uniformly; there's no way to say "this rule applies on odd
+weeks only" without a real recurrence-rule engine (iCal-style RRULEs),
+which is a meaningfully bigger piece of scope than the rest of the
+zones design and isn't justified without evidence anyone actually needs
+it.
 
 **Current workaround, by design, not a gap to close silently**: this case
 is meant to be handled the same way any other one-off exception is (see

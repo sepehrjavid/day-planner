@@ -32,6 +32,27 @@ Collection layout:
                                                  even after the event itself
                                                  is deleted.
 
+  users/{user_id}/zones/{zone_id}                one per named scheduling
+                                                 restriction (work hours,
+                                                 commute, ...) — see
+                                                 db/models.py's Zone
+                                                 docstring. No documents at
+                                                 all means no restriction of
+                                                 this kind exists for the
+                                                 user.
+
+  users/{user_id}/sleep_schedule/{fixed id}      singleton: the user's
+                                                 sleep/wake times and the
+                                                 cool-down/wake-up windows
+                                                 derived from them — see
+                                                 db/models.py's SleepSchedule
+                                                 docstring. A subcollection
+                                                 with one fixed-id document,
+                                                 the same shape every other
+                                                 user-scoped resource here
+                                                 uses, rather than a bare
+                                                 field on the user doc.
+
   user_emails/{normalized_email}                 uniqueness lock for signup.
                                                  Firestore has no unique
                                                  constraint, so "query, then
@@ -67,7 +88,9 @@ from .models import (
     Habit,
     HabitSession,
     OAuthState,
+    SleepSchedule,
     ThrottleState,
+    Zone,
     account_id_for,
     habit_session_id_for,
     hash_session_token,
@@ -83,6 +106,9 @@ OAUTH_STATES = "oauth_states"
 CONNECTED_ACCOUNTS = "connected_accounts"
 HABITS = "habits"
 HABIT_SESSIONS = "habit_sessions"
+ZONES = "zones"
+SLEEP_SCHEDULE = "sleep_schedule"
+SLEEP_SCHEDULE_DOC_ID = "current"
 
 
 class Store:
@@ -498,6 +524,7 @@ class Store:
         label: str | None = None,
         goal: str | None = None,
         status: str | None = None,
+        allowed_zones: list[str] | None = None,
     ) -> Habit | None:
         """Partial update. Returns None if habit_id doesn't exist for this
         user, so the route can turn that into a 404 rather than silently
@@ -514,6 +541,8 @@ class Store:
             payload["goal"] = goal
         if status is not None:
             payload["status"] = status
+        if allowed_zones is not None:
+            payload["allowed_zones"] = allowed_zones
         await ref.set(payload, merge=True)
 
         updated = await ref.get()
@@ -577,3 +606,126 @@ class Store:
             HabitSession.from_dict(doc.id, doc.to_dict() or {})
             async for doc in query.stream()
         ]
+
+    # ------------------------------------------------------------------
+    # Zones
+    # ------------------------------------------------------------------
+
+    def _zones(self, user_id: str):
+        return self._db.collection(USERS).document(user_id).collection(ZONES)
+
+    async def create_zone(
+        self,
+        *,
+        user_id: str,
+        label: str,
+        start_time: str,
+        end_time: str,
+        days_of_week: list[str],
+    ) -> Zone:
+        zone_id = uuid.uuid4().hex
+        now = utcnow()
+        payload = {
+            "label": label,
+            "start_time": start_time,
+            "end_time": end_time,
+            "days_of_week": days_of_week,
+            "created_at": now,
+            "updated_at": now,
+        }
+        await self._zones(user_id).document(zone_id).set(payload)
+        return Zone.from_dict(zone_id, payload)
+
+    async def list_zones(self, user_id: str) -> list[Zone]:
+        return [
+            Zone.from_dict(doc.id, doc.to_dict() or {})
+            async for doc in self._zones(user_id).stream()
+        ]
+
+    async def update_zone(
+        self,
+        *,
+        user_id: str,
+        zone_id: str,
+        label: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        days_of_week: list[str] | None = None,
+    ) -> Zone | None:
+        """Partial update. Returns None if zone_id doesn't exist for this
+        user, same 404-vs-silent-create reasoning as update_habit."""
+        ref = self._zones(user_id).document(zone_id)
+        snapshot = await ref.get()
+        if not snapshot.exists:
+            return None
+
+        payload: dict = {"updated_at": utcnow()}
+        if label is not None:
+            payload["label"] = label
+        if start_time is not None:
+            payload["start_time"] = start_time
+        if end_time is not None:
+            payload["end_time"] = end_time
+        if days_of_week is not None:
+            payload["days_of_week"] = days_of_week
+        await ref.set(payload, merge=True)
+
+        updated = await ref.get()
+        return Zone.from_dict(zone_id, updated.to_dict() or {})
+
+    # ------------------------------------------------------------------
+    # Sleep schedule (singleton per user)
+    # ------------------------------------------------------------------
+
+    def _sleep_schedule_ref(self, user_id: str):
+        return (
+            self._db.collection(USERS)
+            .document(user_id)
+            .collection(SLEEP_SCHEDULE)
+            .document(SLEEP_SCHEDULE_DOC_ID)
+        )
+
+    async def get_sleep_schedule(self, user_id: str) -> SleepSchedule | None:
+        snapshot = await self._sleep_schedule_ref(user_id).get()
+        if not snapshot.exists:
+            return None
+        return SleepSchedule.from_dict(snapshot.to_dict() or {})
+
+    async def set_sleep_schedule(
+        self,
+        *,
+        user_id: str,
+        sleep_time: str | None = None,
+        wake_time: str | None = None,
+        cool_down_minutes: int | None = None,
+        wake_up_buffer_minutes: int | None = None,
+        day_overrides: dict[str, dict[str, str]] | None = None,
+    ) -> SleepSchedule:
+        """Create-or-update, unlike update_zone/update_habit — there's
+        always exactly one sleep schedule per user, so the first call
+        naturally creates it rather than needing a separate create step.
+        Partial update like the others; day_overrides replaces the whole
+        map when provided rather than merging per-day, so clearing an
+        override means passing the full remaining set back, not just the
+        one key you want gone."""
+        ref = self._sleep_schedule_ref(user_id)
+        existing = await ref.get()
+        now = utcnow()
+
+        payload: dict = {"updated_at": now}
+        if not existing.exists:
+            payload["created_at"] = now
+        if sleep_time is not None:
+            payload["sleep_time"] = sleep_time
+        if wake_time is not None:
+            payload["wake_time"] = wake_time
+        if cool_down_minutes is not None:
+            payload["cool_down_minutes"] = cool_down_minutes
+        if wake_up_buffer_minutes is not None:
+            payload["wake_up_buffer_minutes"] = wake_up_buffer_minutes
+        if day_overrides is not None:
+            payload["day_overrides"] = day_overrides
+        await ref.set(payload, merge=True)
+
+        updated = await ref.get()
+        return SleepSchedule.from_dict(updated.to_dict() or {})

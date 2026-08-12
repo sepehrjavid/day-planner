@@ -17,6 +17,10 @@ HABIT_STATUS_ACTIVE = "active"
 HABIT_STATUS_PAUSED = "paused"
 HABIT_STATUS_ARCHIVED = "archived"
 
+# Canonical day-of-week codes shared by Zone.days_of_week and
+# SleepSchedule.day_overrides, so both entities key days the same way.
+DAYS_OF_WEEK = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
 
 class EmailAlreadyRegistered(Exception):
     """Signup lost the race, or the address was already taken."""
@@ -153,6 +157,13 @@ class Habit:
     status: str
     created_at: datetime
     updated_at: datetime
+    allowed_zones: list[str] = field(default_factory=list)
+    """Zone labels this habit may additionally be placed in, on top of the
+    default of any unzoned (open) time — e.g. a lunchtime-workout habit
+    allowed into a "Work" zone. See db/models.py's Zone docstring; a
+    standing override, not the same as a one-off conversational exception
+    for a single day (that never gets written here — see docs/todo.md §1's
+    "Behavioral requirements")."""
 
     @staticmethod
     def from_dict(habit_id: str, data: dict) -> "Habit":
@@ -163,6 +174,7 @@ class Habit:
             status=data.get("status", HABIT_STATUS_ACTIVE),
             created_at=data["created_at"],
             updated_at=data["updated_at"],
+            allowed_zones=data.get("allowed_zones", []),
         )
 
 
@@ -215,6 +227,94 @@ class HabitSession:
             calendar_id=data["calendar_id"],
             planned_start=data["planned_start"],
             planned_end=data["planned_end"],
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+        )
+
+
+@dataclass(frozen=True)
+class Zone:
+    """A structured, reusable scheduling constraint — work hours, commute,
+    or any other named block of a user's week — replacing the free-text
+    "I work 9-5 weekdays" sentences that used to live only in the Memory
+    Bank profile (see docs/todo.md §1).
+
+    A zone is a restriction by default: no habit may be placed inside one
+    unless its label appears in that habit's own `allowed_zones` (see the
+    Habit docstring above). No row at all for a user means no restriction
+    of that kind exists for them at all — there is no "empty work zone"
+    sentinel to special-case.
+
+    Deliberately excludes sleep: cool-down and wake-up aren't independent
+    blocks, they're offsets from sleep's own boundaries, which a plain
+    label/start/end/days shape can't express without inventing a
+    relative-to-another-zone concept only sleep would ever use. See
+    SleepSchedule below instead.
+    """
+
+    zone_id: str
+    label: str
+    start_time: str
+    """24-hour "HH:MM" wall-clock time, e.g. "09:00"."""
+    end_time: str
+    days_of_week: list[str]
+    """Subset of DAYS_OF_WEEK this zone applies to. A weekday-only zone
+    simply doesn't restrict weekends — no separate weekend-awareness
+    needed elsewhere for that case (see docs/todo.md §2)."""
+    created_at: datetime
+    updated_at: datetime
+
+    @staticmethod
+    def from_dict(zone_id: str, data: dict) -> "Zone":
+        return Zone(
+            zone_id=zone_id,
+            label=data["label"],
+            start_time=data["start_time"],
+            end_time=data["end_time"],
+            days_of_week=data.get("days_of_week", []),
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+        )
+
+
+@dataclass(frozen=True)
+class SleepSchedule:
+    """A user's sleep/wake times, per day of week, plus the two windows
+    derived from them — cool-down before sleep and a buffer after waking.
+    A singleton per user (there's only ever one), unlike Zone's plain list.
+
+    `sleep_time`/`wake_time` are the default applied to every day;
+    `day_overrides` holds exceptions only for the days that actually
+    differ (e.g. `{"sun": {"wake_time": "09:00"}}` for sleeping in on
+    Sundays) — so the common case of one schedule all week needs no extra
+    input. Any field left unset (None, or missing from day_overrides)
+    means "not configured yet" rather than a hard-coded default — nothing
+    here is enforced as a scheduling constraint until the user actually
+    sets it, same as Zone's "no row = no restriction" rule.
+
+    Deliberately doesn't support alternating/rotating schedules (e.g.
+    night-shift every other week) — see docs/known-issues.md for why that
+    needs a recurrence-rule engine out of scope here; a one-off shift is
+    handled the same way any other single-occasion exception is, stated
+    conversationally rather than encoded in the standing schedule.
+    """
+
+    sleep_time: str | None
+    wake_time: str | None
+    day_overrides: dict[str, dict[str, str]]
+    cool_down_minutes: int | None
+    wake_up_buffer_minutes: int | None
+    created_at: datetime
+    updated_at: datetime
+
+    @staticmethod
+    def from_dict(data: dict) -> "SleepSchedule":
+        return SleepSchedule(
+            sleep_time=data.get("sleep_time"),
+            wake_time=data.get("wake_time"),
+            day_overrides=data.get("day_overrides", {}),
+            cool_down_minutes=data.get("cool_down_minutes"),
+            wake_up_buffer_minutes=data.get("wake_up_buffer_minutes"),
             created_at=data["created_at"],
             updated_at=data["updated_at"],
         )

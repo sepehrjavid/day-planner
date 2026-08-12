@@ -123,6 +123,7 @@ async def update_habit(
     label: str | None = None,
     goal: str | None = None,
     status: str | None = None,
+    allowed_zones: list[str] | None = None,
 ) -> dict | None:
     """Returns None if habit_id doesn't exist for this user (backend 404)."""
     body: dict = {"user_id": user_id, "habit_id": habit_id}
@@ -132,6 +133,8 @@ async def update_habit(
         body["goal"] = goal
     if status is not None:
         body["status"] = status
+    if allowed_zones is not None:
+        body["allowed_zones"] = allowed_zones
     async with await _client() as client:
         response = await client.post("/internal/habits/update", json=body)
     if response.status_code == 404:
@@ -175,3 +178,92 @@ async def list_habit_sessions(
         )
     response.raise_for_status()
     return response.json()["sessions"]
+
+
+async def create_zone(
+    user_id: str, *, label: str, start_time: str, end_time: str, days_of_week: list[str]
+) -> dict:
+    async with await _client() as client:
+        response = await client.post(
+            "/internal/zones",
+            json={
+                "user_id": user_id,
+                "label": label,
+                "start_time": start_time,
+                "end_time": end_time,
+                "days_of_week": days_of_week,
+            },
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+async def list_zones(user_id: str) -> list[dict]:
+    async with await _client() as client:
+        response = await client.get("/internal/zones", params={"user_id": user_id})
+    response.raise_for_status()
+    return response.json()["zones"]
+
+
+async def update_zone(
+    user_id: str,
+    zone_id: str,
+    *,
+    label: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    days_of_week: list[str] | None = None,
+) -> dict | None:
+    """Returns None if zone_id doesn't exist for this user (backend 404)."""
+    body: dict = {"user_id": user_id, "zone_id": zone_id}
+    if label is not None:
+        body["label"] = label
+    if start_time is not None:
+        body["start_time"] = start_time
+    if end_time is not None:
+        body["end_time"] = end_time
+    if days_of_week is not None:
+        body["days_of_week"] = days_of_week
+    async with await _client() as client:
+        response = await client.post("/internal/zones/update", json=body)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()
+
+
+async def get_sleep_schedule(user_id: str) -> dict | None:
+    """Returns None if the user has never set a sleep schedule."""
+    async with await _client() as client:
+        response = await client.get("/internal/sleep-schedule", params={"user_id": user_id})
+    response.raise_for_status()
+    body = response.json()
+    return body["schedule"] if body["exists"] else None
+
+
+async def set_sleep_schedule(
+    user_id: str,
+    *,
+    sleep_time: str | None = None,
+    wake_time: str | None = None,
+    cool_down_minutes: int | None = None,
+    wake_up_buffer_minutes: int | None = None,
+    day_overrides: dict[str, dict[str, str]] | None = None,
+) -> dict:
+    """Create-or-update — always succeeds, the first call for a user
+    creates the schedule rather than needing a separate create step."""
+    body: dict = {"user_id": user_id}
+    if sleep_time is not None:
+        body["sleep_time"] = sleep_time
+    if wake_time is not None:
+        body["wake_time"] = wake_time
+    if cool_down_minutes is not None:
+        body["cool_down_minutes"] = cool_down_minutes
+    if wake_up_buffer_minutes is not None:
+        body["wake_up_buffer_minutes"] = wake_up_buffer_minutes
+    if day_overrides is not None:
+        body["day_overrides"] = day_overrides
+    async with await _client() as client:
+        response = await client.post("/internal/sleep-schedule", json=body)
+    response.raise_for_status()
+    return response.json()

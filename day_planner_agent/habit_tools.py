@@ -91,6 +91,7 @@ async def update_habit(
     label: str | None = None,
     goal: str | None = None,
     status: str | None = None,
+    allowed_zones: list[str] | None = None,
 ) -> dict:
     """Update or retire an existing habit.
 
@@ -111,16 +112,33 @@ async def update_habit(
         label: New short name, if it's changing.
         goal: New goal description, if it's changing.
         status: New status — "active", "paused", or "archived".
+        allowed_zones: The full list of zone labels (see zone_tools.py's
+            create_zone) this habit may be placed in, in addition to any
+            unzoned (open) time — e.g. ["Work"] for a habit explicitly
+            allowed during work hours. Also accepts the fixed labels
+            "cool-down" and "wake-up" for the two overridable windows
+            derived from the sleep schedule (never the sleep period
+            itself — that has no override). Replaces the stored list
+            wholesale when provided, not a merge — pass every zone that
+            should still apply, not just a new one; pass [] to clear it.
+            Only for a *standing* exception the user states as a rule for
+            this habit going forward; a one-off "just today" exception
+            stays purely conversational and must never be written here.
 
     Returns:
         dict with "status" ("success", "not_found", or "error") and, on
         success, "habit" (the updated record).
     """
-    if not any([label, goal, status]):
+    if not any([label, goal, status, allowed_zones is not None]):
         return {"status": "error", "message": "No fields provided to update."}
 
     updated = await backend_client.update_habit(
-        tool_context.session.user_id, habit_id, label=label, goal=goal, status=status
+        tool_context.session.user_id,
+        habit_id,
+        label=label,
+        goal=goal,
+        status=status,
+        allowed_zones=allowed_zones,
     )
     if updated is None:
         return {"status": "not_found", "message": f"No habit {habit_id!r}."}
