@@ -47,6 +47,10 @@ it in this order:
 list and aren't repeated here — worth knowing about when weighing overall
 priority beyond this document alone.
 
+§5 (Google Tasks as a booking mode) is independent of the §1–§4 build
+order above — no dependency in either direction — and can be picked up
+whenever, same as feature-ideas.md's items.
+
 ---
 
 ## 1. Day zones — structured scheduling constraints, replacing prose-parsed ones
@@ -261,3 +265,63 @@ already surfaces `habit_id` on tagged events (shipped separately, see
 `calendar_tool.py`'s `_trim_google_event`/`_fetch_google_events`), which is
 what lets the agent find a given habit's sessions across a future window
 in the first place.
+
+---
+
+## 5. Google Tasks as a booking mode for habit sessions
+
+**Priority: independent of §1–§4** — see "Suggested build order" above.
+No dependency in either direction; can be picked up any time.
+
+**Problem**: every habit session the agent places today becomes a Google
+Calendar event (`add_calendar_event` in `calendar_tool.py`). Some users
+would rather habit sessions show up as Google Tasks — a checklist item to
+check off — instead of a blocked-out calendar event. Not everyone wants
+that trade-off, so this needs to be a choice, not a replacement.
+
+**Scope, decided**: this is a single **global** setting —
+`habit_booking_mode` (`calendar_event`, the default, vs. `google_task`) —
+that applies to *all* of a user's habit sessions. Not configurable per
+habit and not configurable per individual session. Do not build a
+per-habit or per-session override for this; if that turns out to be
+wanted later, it's new scope, not an oversight here.
+
+**Where the setting should live**: not the free-text profile
+(`update_profile` in `memory_tools.py`). That profile is Memory
+Bank-backed, LLM-written prose, semantically searched — the same
+reasoning that pulled zones out of free-text preferences in §1 (a
+deterministic booking-mode check on every single habit placement is
+exactly the kind of thing that bug class hits) applies here too. This
+wants a real field on the user's record in `day_planner_backend_internal`,
+read once and preloaded alongside the profile/zones at session start
+(`_preload_profile` in `day_planner_agent/agent.py`), not re-derived from
+prose each time.
+
+**New surface needed**:
+- A settings tool (`update_settings`/`get_settings` or folded into an
+  existing user-settings shape if one exists by the time this is built) to
+  read/write `habit_booking_mode`.
+- Google Tasks API OAuth scope added to `day_planner_backend_internal`'s
+  token flow (see `oauth-design.md`) — today only Calendar scopes are
+  requested.
+- A new tool, e.g. `create_google_task` in a new `tasks_tool.py`,
+  mirroring `add_calendar_event`'s shape closely enough that placement
+  logic in `instruction.md` only branches at the final "persist this
+  session" step — everything upstream (which day, how long, load-based
+  sizing) should stay identical regardless of mode.
+
+**Open design questions, not yet resolved**:
+- Google Tasks' `due` field is a date/datetime but Google's own clients
+  only surface the date portion, not a specific time-of-day — unlike a
+  calendar event, a task can't carry "9:00–9:30am." Decide whether the
+  agent still privately computes a time-of-day for load-balancing purposes
+  and just drops it when writing the task, or whether time-of-day
+  placement logic is skipped entirely in task mode.
+- `review_habit_week` (`feature-ideas.md` §2) currently detects a lost
+  habit session via `bumped_by` — a calendar block getting displaced by a
+  conflicting event. A task doesn't get "bumped" the same way; it just
+  stays unchecked. Whether task-mode habits need a different outcome
+  vocabulary (e.g. completed-late vs. still-open) instead of reusing
+  `bumped_by` is unresolved.
+- Which Google Tasks tasklist to write into — a fixed app-created list vs.
+  a user-selected one — is undecided.
