@@ -37,9 +37,14 @@ async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict
     (e.g. "I want to exercise 180 minutes a week, sessions 30-60 min" or
     "read 20-40 minutes most nights") — not for a single day's plan, which
     belongs on the calendar via add_calendar_event instead, and not for a
-    fixed preference/constraint with no target of its own (e.g. "no
-    physical activity after 8pm", gym timing, sleep schedule, work hours)
-    — those still go through update_profile, even if phrased like a goal.
+    fixed preference/constraint with no target of its own and no
+    independent calendar footprint (e.g. "no physical activity after
+    8pm", gym timing, sleep schedule, work hours) — those still go
+    through update_profile, even if phrased like a goal. A habit that
+    rides entirely on an existing zone's own occurrences instead (e.g.
+    "listen to an audiobook whenever I have commute") still belongs here,
+    not update_profile, even though it has no numeric target either — see
+    the goal Arg below, and set allowed_zones via update_habit afterward.
 
     If one message states several distinct goals (e.g. "I want to
     maintain 90 minutes of gym and 1 hour of tennis per week"), call this
@@ -51,7 +56,11 @@ async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict
             "Reading".
         goal: The goal itself, in your own words, including frequency and
             session-length range, e.g. "180 minutes/week, sessions 30-60
-            minutes, mornings preferred".
+            minutes, mornings preferred" — or, for a habit anchored to a
+            zone instead (see above), just what the activity is, e.g.
+            "listen to an audiobook"; it needs no frequency/length of its
+            own since the zone's occurrences are the target. Don't ask
+            the user for one in that case.
 
     Returns:
         dict with "status" ("success" or "error") and, on success, "habit"
