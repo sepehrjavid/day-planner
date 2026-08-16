@@ -304,3 +304,129 @@ async def test_user_id_is_hashed_not_raw(caplog):
     record = _one_record(caplog)
     assert record["user_ref"] != "a-very-identifiable-user-id"
     assert "a-very-identifiable-user-id" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Loop detection (A1.3)
+# ---------------------------------------------------------------------------
+
+
+def _repeated_call(name: str, args: dict, n: int) -> list[dict]:
+    events = []
+    for i in range(n):
+        call_id = f"{name}-{i}"
+        events.append(_function_call_event(name, call_id, args))
+        events.append(_function_response_event(name, call_id, {"status": "success"}))
+    return events
+
+
+async def test_loop_detected_at_three_identical_calls(caplog):
+    events = _repeated_call("add_calendar_event", {"summary": "Gym"}, 3)
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="book gym")
+
+    record = _one_record(caplog)
+    assert record["loop_detected"] is True
+
+
+async def test_loop_not_detected_below_threshold(caplog):
+    events = _repeated_call("add_calendar_event", {"summary": "Gym"}, 2)
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="book gym")
+
+    record = _one_record(caplog)
+    assert record["loop_detected"] is False
+
+
+async def test_loop_not_detected_when_arguments_differ(caplog):
+    """Three calls to the same tool is not itself a loop — placing three
+    different habit sessions across a week looks exactly like this and
+    must not alert."""
+    events = [
+        _function_call_event("add_calendar_event", "c1", {"summary": "Gym Mon"}),
+        _function_response_event("add_calendar_event", "c1", {"status": "success"}),
+        _function_call_event("add_calendar_event", "c2", {"summary": "Gym Wed"}),
+        _function_response_event("add_calendar_event", "c2", {"status": "success"}),
+        _function_call_event("add_calendar_event", "c3", {"summary": "Gym Fri"}),
+        _function_response_event("add_calendar_event", "c3", {"status": "success"}),
+    ]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="plan my gym sessions")
+
+    record = _one_record(caplog)
+    assert record["loop_detected"] is False
+
+
+async def test_loop_not_detected_when_tool_names_differ(caplog):
+    events = _repeated_call("get_calendar_events", {}, 1) + _repeated_call(
+        "list_zones", {}, 1
+    ) + _repeated_call("list_habits", {}, 1)
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    assert record["loop_detected"] is False
+
+
+async def test_loop_detected_uses_warning_severity(caplog):
+    events = _repeated_call("add_calendar_event", {"summary": "Gym"}, 3)
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="book gym")
+
+    turn_records = [r for r in caplog.records if r.name == "day_planner.turn"]
+    assert len(turn_records) == 1
+    assert turn_records[0].levelname == "WARNING"
+
+
+async def test_non_loop_turn_uses_info_severity(caplog):
+    client, app = _agent_client([_model_text_event("ok")])
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    turn_records = [r for r in caplog.records if r.name == "day_planner.turn"]
+    assert turn_records[0].levelname == "INFO"
+
+
+async def test_args_fingerprint_present_and_stable_even_without_diagnostic_mode(caplog):
+    """Loop detection must work even with log_tool_args=False (the
+    default) — the fingerprint is computed unconditionally and never
+    exposes the raw values."""
+    events = _repeated_call("add_calendar_event", {"summary": "Gym"}, 3)
+    client, app = _agent_client(events, log_tool_args=False)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="book gym")
+
+    record = _one_record(caplog)
+    fingerprints = {c["args_fingerprint"] for c in record["tool_calls"]}
+    assert len(fingerprints) == 1
+    assert "args" not in record["tool_calls"][0]
+    assert "Gym" not in caplog.text
+
+
+async def test_args_fingerprint_differs_for_different_arguments(caplog):
+    events = [
+        _function_call_event("add_calendar_event", "c1", {"summary": "Gym"}),
+        _function_response_event("add_calendar_event", "c1", {"status": "success"}),
+        _function_call_event("add_calendar_event", "c2", {"summary": "Dentist"}),
+        _function_response_event("add_calendar_event", "c2", {"status": "success"}),
+    ]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    fingerprints = [c["args_fingerprint"] for c in record["tool_calls"]]
+    assert fingerprints[0] != fingerprints[1]

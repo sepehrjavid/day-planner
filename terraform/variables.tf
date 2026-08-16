@@ -147,3 +147,13 @@ variable "max_instances" {
   description = "Bounded per docs/deployment-gcp.md's cost-control note."
   default     = 2
 }
+
+variable "alert_notification_email" {
+  type        = string
+  description = <<-EOT
+    Where monitoring.tf's alert policies (loop detector, preload failure
+    rate — see docs/roadmaps/1-agent.md A1.3) send notifications. No
+    default deliberately: an alert with nowhere to go is worse than no
+    alert, since it looks configured but isn't.
+  EOT
+}

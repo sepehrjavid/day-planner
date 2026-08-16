@@ -15,6 +15,14 @@ kind of leak once already). Tool *response* payloads are never logged at
 all here, for any tool, diagnostic mode or not — only the response's
 "status" field is kept, which every tool in this codebase already returns
 as its status contract.
+
+Loop detection (A1.3) needs to compare call *arguments* for equality — the
+most expensive class of agent bug is the same tool called with the same
+arguments repeatedly — but must do that without ever logging the raw
+values, even with redaction on. Each call gets a one-way fingerprint
+(_fingerprint_args) computed unconditionally, independent of
+log_tool_args; three or more calls in a turn sharing both a tool name and
+a fingerprint sets loop_detected, which terraform/monitoring.tf alerts on.
 """
 
 from __future__ import annotations
@@ -55,16 +63,30 @@ _PRELOAD_OK_STATE_KEY = "day_planner:preload_ok"
 # so this only governs the args side.
 _NEVER_LOG_ARGS_FOR = frozenset({"get_profile", "update_profile", "save_memory", "load_memory"})
 
+# Three or more calls to the same tool with the same arguments in one turn
+# is the loop-detector threshold — see terraform/monitoring.tf.
+_LOOP_THRESHOLD = 3
+
 
 def hash_user_id(user_id: str) -> str:
     """One-way, so a raw user_id never appears in a log line."""
     return hashlib.sha256(user_id.encode()).hexdigest()[:16]
 
 
+def _fingerprint_args(args: dict | None) -> str:
+    """One-way and order-independent (sort_keys), so equal argument dicts
+    always fingerprint the same regardless of key order — computed
+    unconditionally for loop detection, never reversible back to the
+    actual values."""
+    canonical = json.dumps(args or {}, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 @dataclass
 class _ToolCall:
     name: str
     started_at: float
+    args_fingerprint: str
     args: dict | None = None
     duration_ms: float | None = None
     status: object | None = None
@@ -118,9 +140,12 @@ class TurnRecorder:
     def _start_call(self, call: dict) -> None:
         name = call.get("name", "unknown")
         call_id = call.get("id") or f"{name}:{len(self._open_calls) + len(self._finished_calls)}"
-        entry = _ToolCall(name=name, started_at=time.monotonic())
+        args = call.get("args")
+        entry = _ToolCall(
+            name=name, started_at=time.monotonic(), args_fingerprint=_fingerprint_args(args)
+        )
         if self.log_tool_args and name not in _NEVER_LOG_ARGS_FOR:
-            entry.args = call.get("args")
+            entry.args = args
         self._open_calls[call_id] = entry
 
     def _finish_call(self, response: dict) -> None:
@@ -136,7 +161,14 @@ class TurnRecorder:
                     entry = self._open_calls.pop(candidate_id)
                     break
             if entry is None:
-                entry = _ToolCall(name=name, started_at=time.monotonic())
+                # No corresponding function_call was ever observed for this
+                # response (unexpected event ordering) — args are unknown,
+                # so this fingerprints as "no args" rather than being left
+                # unset, at the cost of a rare false loop-match if this
+                # happens 3+ times in one turn.
+                entry = _ToolCall(
+                    name=name, started_at=time.monotonic(), args_fingerprint=_fingerprint_args(None)
+                )
         entry.duration_ms = (time.monotonic() - entry.started_at) * 1000
         entry.status = (response.get("response") or {}).get("status")
         self._finished_calls.append(entry)
@@ -154,6 +186,8 @@ class TurnRecorder:
             self._finished_calls.append(entry)
         self._open_calls.clear()
 
+        loop_detected = self._detect_loop()
+
         record = {
             "turn_id": self.turn_id,
             "session_id": self.session_id,
@@ -161,6 +195,7 @@ class TurnRecorder:
             "tool_calls": [
                 {
                     "name": c.name,
+                    "args_fingerprint": c.args_fingerprint,
                     "duration_ms": round(c.duration_ms, 1) if c.duration_ms is not None else None,
                     "status": c.status,
                     **({"args": c.args} if c.args is not None else {}),
@@ -174,5 +209,22 @@ class TurnRecorder:
             "preload_ok": self.preload_ok,
             "outcome": outcome,
             "wall_ms": round(wall_ms, 1),
+            "loop_detected": loop_detected,
         }
-        logger.info(json.dumps(record))
+        # WARNING severity for a detected loop makes it visually distinct
+        # in Cloud Logging on top of the boolean field itself — the
+        # boolean is what terraform/monitoring.tf's log-based metric
+        # actually filters on, so this is belt and suspenders, not load
+        # bearing.
+        (logger.warning if loop_detected else logger.info)(json.dumps(record))
+
+    def _detect_loop(self) -> bool:
+        """True if the same tool was called with the same arguments (by
+        fingerprint) _LOOP_THRESHOLD times or more anywhere in this turn."""
+        counts: dict[tuple[str, str], int] = {}
+        for c in self._finished_calls:
+            key = (c.name, c.args_fingerprint)
+            counts[key] = counts.get(key, 0) + 1
+            if counts[key] >= _LOOP_THRESHOLD:
+                return True
+        return False
