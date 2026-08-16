@@ -6,6 +6,7 @@ from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import load_memory
+from google.genai import types as genai_types
 from vertexai.agent_engines import AdkApp
 
 from .calendar_tool import (
@@ -212,7 +213,28 @@ def _build_instruction(ctx: ReadonlyContext) -> str:
 
 _llm_agent = Agent(
     name="day_planner_agent",
+    # "gemini-2.5-flash" (no further suffix) is Google's stable GA
+    # identifier for this release, not a floating pointer — Vertex AI marks
+    # an actual floating alias with an explicit "-latest" suffix instead
+    # (e.g. "gemini-flash-latest"), which this is not. Verified against
+    # Vertex AI's Generative AI release notes, 2026-08-16: GA'd 2025-06-17,
+    # confirmed retirement date 2026-10-16 (set 2026-04-02). That date is
+    # a hard deadline, not a someday: before it, run A3.3's model
+    # comparison matrix against whatever's current at the time and bump
+    # this deliberately — do not let the deployment silently start failing
+    # on retirement day.
     model="gemini-2.5-flash",
+    generate_content_config=genai_types.GenerateContentConfig(
+        thinking_config=genai_types.ThinkingConfig(
+            # Unset means dynamic thinking with no cap — every call,
+            # including trivial ones, spends an unmeasured and unbounded
+            # amount of output-token-priced thinking (see A0.5). 1024 is a
+            # deliberate stopgap ceiling, not a tuned number — there is no
+            # measurement yet to tune against. A3.3 replaces this with a
+            # value backed by the eval suite's actual cost/quality data.
+            thinking_budget=1024,
+        ),
+    ),
     description=(
         "Manages a user's connected Google Calendars — checking, creating, "
         "updating, and deleting events — proactively schedules their "

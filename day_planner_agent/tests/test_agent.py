@@ -376,3 +376,19 @@ def test_build_instruction_re_resolves_today_every_call(monkeypatch):
 
     assert "August 17, 2026" in first
     assert "August 18, 2026" in second
+
+
+# ---------------------------------------------------------------------------
+# Model pin and thinking budget (A0.5)
+# ---------------------------------------------------------------------------
+
+
+def test_model_is_pinned_explicitly():
+    assert agent._llm_agent.model == "gemini-2.5-flash"
+
+
+def test_thinking_budget_is_set_explicitly_not_defaulted():
+    config = agent._llm_agent.generate_content_config
+    assert config is not None
+    assert config.thinking_config is not None
+    assert config.thinking_config.thinking_budget == 1024
