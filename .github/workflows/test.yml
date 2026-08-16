@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # day_planner_agent imports itself as `from day_planner_agent
+          # import ...`, so pytest has to run from the repo root with the
+          # package one level below — not from inside the service
+          # directory, unlike the other two services below.
+          - service: day_planner_agent
+            working_directory: .
+            test_path: day_planner_agent/tests
+          - service: day_planner_backend_app
+            working_directory: day_planner_backend_app
+            test_path: tests
+          - service: day_planner_backend_internal
+            working_directory: day_planner_backend_internal
+            test_path: tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r ${{ matrix.service }}/requirements.txt
+          pip install -r ${{ matrix.service }}/requirements-dev.txt
+
+      - name: Run tests
+        working-directory: ${{ matrix.working_directory }}
+        run: python -m pytest ${{ matrix.test_path }} -q
