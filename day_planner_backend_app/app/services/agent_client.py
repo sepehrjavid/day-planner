@@ -15,21 +15,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 
 import vertexai
 from vertexai import agent_engines
+
+from . import turn_log
 
 logger = logging.getLogger(__name__)
 
 
 class AgentClient:
-    def __init__(self, *, project_id: str, location: str, reasoning_engine: str) -> None:
+    def __init__(
+        self,
+        *,
+        project_id: str,
+        location: str,
+        reasoning_engine: str,
+        log_tool_args: bool = False,
+    ) -> None:
         # Just sets config globals — no network call, so unlike _get_app
         # below this is safe to do eagerly at construction time.
         vertexai.init(project=project_id, location=location)
         self._reasoning_engine = reasoning_engine
         self._app: agent_engines.AgentEngine | None = None
         self._lock = asyncio.Lock()
+        # See turn_log.py — off by default, since tool arguments carry
+        # event titles, times, and locations.
+        self._log_tool_args = log_tool_args
 
     async def _get_app(self) -> agent_engines.AgentEngine:
         """Built on first use, not at construction.
@@ -71,11 +84,30 @@ class AgentClient:
             session = await app.async_create_session(user_id=user_id)
             session_id = session["id"]
 
+        recorder = turn_log.TurnRecorder(
+            turn_id=str(uuid.uuid4()),
+            session_id=session_id,
+            user_id=user_id,
+            log_tool_args=self._log_tool_args,
+        )
         reply_parts: list[str] = []
-        async for event in app.async_stream_query(
-            user_id=user_id, session_id=session_id, message=message
-        ):
-            reply_parts.append(_visible_text(event))
+        outcome = "completed"
+        try:
+            async for event in app.async_stream_query(
+                user_id=user_id, session_id=session_id, message=message
+            ):
+                reply_parts.append(_visible_text(event))
+                recorder.observe(event)
+        except TimeoutError:
+            outcome = "timed_out"
+            raise
+        except Exception:
+            outcome = "errored"
+            raise
+        finally:
+            # Emitted even on failure — a turn record for an errored or
+            # timed-out turn is exactly what makes it diagnosable.
+            recorder.emit(outcome=outcome)
 
         return session_id, "".join(reply_parts)
 

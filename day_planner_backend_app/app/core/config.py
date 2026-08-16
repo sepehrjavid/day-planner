@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # loop, or a compromised session) on a per-request-billed backend.
     chat_daily_quota: int = 50
 
+    # Diagnostic mode for turn_log.py's per-turn structured logging: off by
+    # default, since tool arguments carry event titles, times, and
+    # locations. Some tools' arguments are withheld from the log even when
+    # this is true — see turn_log._NEVER_LOG_ARGS_FOR.
+    log_tool_call_args: bool = False
+
     def redirect_uri(self, provider: str) -> str:
         return f"{self.public_base_url.rstrip('/')}/auth/{provider}/callback"
 
