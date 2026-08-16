@@ -347,3 +347,32 @@ def test_build_instruction_zones_fetch_failed():
     assert "Day zones and the sleep schedule could not be loaded" in text
     assert "hard constraints" in text
     assert "No day zones or sleep schedule are on file" not in text
+
+
+# ---------------------------------------------------------------------------
+# _build_instruction: injectable clock (A0.4)
+# ---------------------------------------------------------------------------
+
+
+def test_build_instruction_uses_pinned_today(monkeypatch):
+    from datetime import datetime
+
+    monkeypatch.setattr(agent, "_now", lambda: datetime(2026, 8, 17))
+    text = agent._build_instruction(FakeReadonlyContext({}))
+    assert "August 17, 2026" in text
+
+
+def test_build_instruction_re_resolves_today_every_call(monkeypatch):
+    """_build_instruction must call _now() fresh each time, not capture a
+    date once — Agent Engine keeps this Agent instance (and its bound
+    instruction callable) alive across many turns and requests."""
+    from datetime import datetime
+
+    dates = iter([datetime(2026, 8, 17), datetime(2026, 8, 18)])
+    monkeypatch.setattr(agent, "_now", lambda: next(dates))
+
+    first = agent._build_instruction(FakeReadonlyContext({}))
+    second = agent._build_instruction(FakeReadonlyContext({}))
+
+    assert "August 17, 2026" in first
+    assert "August 18, 2026" in second
