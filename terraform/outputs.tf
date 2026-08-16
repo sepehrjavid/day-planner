@@ -62,3 +62,15 @@ output "internal_image_push_target" {
   description = "Full push target for the internal service image (../day_planner_backend_internal)."
   value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.backend.repository_id}/backend-internal"
 }
+
+output "turn_logs_dataset" {
+  description = <<-EOT
+    BigQuery dataset turn_log.py's records land in (see bigquery.tf). The
+    table itself is created lazily by the log sink on its first matching
+    delivery, not at apply time — find its actual name via `bq ls
+    day_planner_turns` or the console once a turn has been logged, and use
+    it in place of {{TABLE}} in
+    day_planner_backend_app/app/services/turn_log_queries.sql.
+  EOT
+  value       = google_bigquery_dataset.turn_logs.dataset_id
+}
