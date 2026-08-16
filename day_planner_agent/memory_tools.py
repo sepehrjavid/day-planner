@@ -107,8 +107,6 @@ async def update_profile(
     if not statements:
         return {"status": "error", "message": "No fields provided to save."}
 
-    print("Statements: ", statements)
-
     client = vertexai.Client(project=service._project, location=service._location).aio
     operation = await client.agent_engines.memories.generate(
         name="reasoningEngines/" + service._agent_engine_id,
@@ -129,7 +127,6 @@ async def update_profile(
         logger.warning("update_profile failed: %s", operation.error)
         return {"status": "error", "message": str(operation.error)}
 
-    logger.info("update_profile: generate response %s", operation.response)
     return {"status": "success", "message": "Profile updated."}
 
 
@@ -155,7 +152,6 @@ async def get_profile(tool_context: ToolContext) -> dict:
     profiles = await service.retrieve_profiles(**_memory_scope(tool_context))
     for profile in profiles:
         if profile.schema_id == PROFILE_SCHEMA_ID:
-            print("Profile: ", profile.profile)
             return {"status": "success", "profile": profile.profile or {}}
     return {"status": "success", "profile": {}}
 
