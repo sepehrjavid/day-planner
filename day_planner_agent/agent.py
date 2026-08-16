@@ -48,6 +48,13 @@ _PRELOAD_OK_KEY = "day_planner:preload_ok"
 _INSTRUCTION_TEMPLATE = (Path(__file__).parent / "instruction.md").read_text()
 
 
+def _now() -> datetime:
+    """A module attribute rather than a bare datetime.now() call so a test
+    can pin "today" by monkeypatching agent._now — see _build_instruction,
+    which must re-resolve this every turn rather than capture it once."""
+    return datetime.now()
+
+
 def _refresh_preload_ok(callback_context: CallbackContext) -> None:
     state = callback_context.state
     failed = state.get(_PROFILE_PRELOAD_FAILED_KEY, False) or state.get(
@@ -197,7 +204,7 @@ def _build_instruction(ctx: ReadonlyContext) -> str:
         )
 
     return _INSTRUCTION_TEMPLATE.format(
-        today=datetime.now().strftime("%B %d, %Y"),
+        today=_now().strftime("%B %d, %Y"),
         profile_section=profile_section,
         zones_section=zones_section,
     )
