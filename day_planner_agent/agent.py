@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -23,20 +24,36 @@ from .zone_tools import (
     update_zone,
 )
 
+logger = logging.getLogger(__name__)
+
 # Session-state keys the preload callbacks below write to and the
 # instruction reads from. Prefixed so they don't collide with anything a
 # tool call might stash in state.
 _PROFILE_PRELOADED_KEY = "day_planner:profile_preloaded"
 _PRELOADED_PROFILE_KEY = "day_planner:preloaded_profile"
+_PROFILE_PRELOAD_FAILED_KEY = "day_planner:profile_preload_failed"
 _ZONES_PRELOADED_KEY = "day_planner:zones_preloaded"
 _PRELOADED_ZONES_KEY = "day_planner:preloaded_zones"
 _PRELOADED_SLEEP_SCHEDULE_KEY = "day_planner:preloaded_sleep_schedule"
+_ZONES_PRELOAD_FAILED_KEY = "day_planner:zones_preload_failed"
+
+# Read by A1.1's turn-record logging — True only when neither preload has a
+# failure latched for this session; see _refresh_preload_ok.
+_PRELOAD_OK_KEY = "day_planner:preload_ok"
 
 # The system prompt is long-form prose, not code — kept in its own file so
 # it reads and diffs like the rest of the agent's copy, instead of being
 # buried in string-concatenation. Loaded once at import time since
 # build_archive.sh ships it alongside agent.py either way.
 _INSTRUCTION_TEMPLATE = (Path(__file__).parent / "instruction.md").read_text()
+
+
+def _refresh_preload_ok(callback_context: CallbackContext) -> None:
+    state = callback_context.state
+    failed = state.get(_PROFILE_PRELOAD_FAILED_KEY, False) or state.get(
+        _ZONES_PRELOAD_FAILED_KEY, False
+    )
+    state[_PRELOAD_OK_KEY] = not failed
 
 
 async def _preload_profile(callback_context: CallbackContext) -> None:
@@ -51,14 +68,37 @@ async def _preload_profile(callback_context: CallbackContext) -> None:
     unconditional instead of dependent on the model choosing to act on an
     instruction. Later turns are a cheap state-flag check away from a
     no-op.
+
+    The preloaded flag is only set on a *successful* fetch, and any
+    exception is caught rather than left to propagate and kill the
+    invocation — a transient failure here must lead to a retry on the next
+    turn, not a flag latched True forever with nothing behind it (that
+    would look identical to "this user genuinely has no profile yet").
     """
     if callback_context.state.get(_PROFILE_PRELOADED_KEY):
         return
-    callback_context.state[_PROFILE_PRELOADED_KEY] = True
 
-    result = await get_profile(callback_context)
-    if result.get("status") == "success" and result.get("profile"):
+    try:
+        result = await get_profile(callback_context)
+    except Exception:
+        logger.warning("Profile preload failed", exc_info=True)
+        callback_context.state[_PROFILE_PRELOAD_FAILED_KEY] = True
+        _refresh_preload_ok(callback_context)
+        return
+
+    if result.get("status") != "success":
+        logger.warning(
+            "Profile preload returned non-success status: %s", result.get("status")
+        )
+        callback_context.state[_PROFILE_PRELOAD_FAILED_KEY] = True
+        _refresh_preload_ok(callback_context)
+        return
+
+    callback_context.state[_PROFILE_PRELOADED_KEY] = True
+    callback_context.state[_PROFILE_PRELOAD_FAILED_KEY] = False
+    if result.get("profile"):
         callback_context.state[_PRELOADED_PROFILE_KEY] = result["profile"]
+    _refresh_preload_ok(callback_context)
 
 
 async def _preload_zones(callback_context: CallbackContext) -> None:
@@ -68,18 +108,45 @@ async def _preload_zones(callback_context: CallbackContext) -> None:
     §1), so an unconditional fetch here is cheap, and it means placement
     doesn't depend on the model remembering to call list_zones/
     get_sleep_schedule itself before ever placing a session.
+
+    Zones and the sleep schedule are hard constraints (see instruction.md),
+    so failing open here is worse than failing open on the profile: it was
+    possible for a transient backend error to latch the preloaded flag True
+    with nothing fetched, which made _build_instruction claim "no day zones
+    or sleep schedule are on file" and the agent would then schedule
+    straight through work hours and sleep. The flag is now only set after
+    both fetches succeed, and any exception is caught and recorded as a
+    distinct failure state instead.
     """
     if callback_context.state.get(_ZONES_PRELOADED_KEY):
         return
+
+    try:
+        zones_result = await list_zones(callback_context)
+        sleep_result = await get_sleep_schedule(callback_context)
+    except Exception:
+        logger.warning("Zones/sleep preload failed", exc_info=True)
+        callback_context.state[_ZONES_PRELOAD_FAILED_KEY] = True
+        _refresh_preload_ok(callback_context)
+        return
+
+    if zones_result.get("status") != "success" or sleep_result.get("status") != "success":
+        logger.warning(
+            "Zones/sleep preload returned non-success status: zones=%s sleep=%s",
+            zones_result.get("status"),
+            sleep_result.get("status"),
+        )
+        callback_context.state[_ZONES_PRELOAD_FAILED_KEY] = True
+        _refresh_preload_ok(callback_context)
+        return
+
     callback_context.state[_ZONES_PRELOADED_KEY] = True
-
-    zones_result = await list_zones(callback_context)
-    if zones_result.get("status") == "success" and zones_result.get("zones"):
+    callback_context.state[_ZONES_PRELOAD_FAILED_KEY] = False
+    if zones_result.get("zones"):
         callback_context.state[_PRELOADED_ZONES_KEY] = zones_result["zones"]
-
-    sleep_result = await get_sleep_schedule(callback_context)
-    if sleep_result.get("status") == "success" and sleep_result.get("exists"):
+    if sleep_result.get("exists"):
         callback_context.state[_PRELOADED_SLEEP_SCHEDULE_KEY] = sleep_result["schedule"]
+    _refresh_preload_ok(callback_context)
 
 
 def _build_instruction(ctx: ReadonlyContext) -> str:
@@ -90,16 +157,34 @@ def _build_instruction(ctx: ReadonlyContext) -> str:
     # callable (ADK's InstructionProvider) makes ADK re-resolve it on every
     # turn instead.
     preloaded_profile = ctx.state.get(_PRELOADED_PROFILE_KEY)
-    profile_section = (
-        f"The user's standing preferences, already loaded for this "
-        f"session: {preloaded_profile}\n\n"
-        if preloaded_profile
-        else "No standing preferences are on file for this user yet.\n\n"
-    )
+    if ctx.state.get(_PROFILE_PRELOAD_FAILED_KEY):
+        profile_section = (
+            "Standing preferences could not be loaded for this session due "
+            "to a backend error — this is not the same as the user having "
+            "none on file. Do not tell the user their preferences are "
+            "unknown or missing; if you need one, call get_profile "
+            "yourself to re-check before relying on its absence.\n\n"
+        )
+    elif preloaded_profile:
+        profile_section = (
+            f"The user's standing preferences, already loaded for this "
+            f"session: {preloaded_profile}\n\n"
+        )
+    else:
+        profile_section = "No standing preferences are on file for this user yet.\n\n"
 
     preloaded_zones = ctx.state.get(_PRELOADED_ZONES_KEY)
     preloaded_sleep_schedule = ctx.state.get(_PRELOADED_SLEEP_SCHEDULE_KEY)
-    if preloaded_zones or preloaded_sleep_schedule:
+    if ctx.state.get(_ZONES_PRELOAD_FAILED_KEY):
+        zones_section = (
+            "Day zones and the sleep schedule could not be loaded for this "
+            "session due to a backend error. These are hard constraints — "
+            "do not assume the user has none just because nothing loaded. "
+            "Avoid placing or moving any habit session until you have "
+            "successfully re-checked with list_zones and "
+            "get_sleep_schedule.\n\n"
+        )
+    elif preloaded_zones or preloaded_sleep_schedule:
         zones_section = (
             f"The user's standing day zones, already loaded for this session: "
             f"{preloaded_zones or []}\n"
