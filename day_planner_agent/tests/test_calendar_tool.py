@@ -17,15 +17,22 @@ from day_planner_agent import backend_client, calendar_tool
 
 class FakeEventsResource:
     """`inserted` doubles as the fixed response for both insert() and
-    patch() — no test in this file exercises both on the same fake."""
+    patch() — no test in this file exercises both on the same fake.
+
+    `pages`, when given, overrides `items`: each call to list().execute()
+    returns the next raw response dict in order (so a test can hand back a
+    `nextPageToken` and assert the follow-up call carries it), instead of
+    always returning the same single-page `{"items": items}` response."""
 
     def __init__(
         self,
-        items: list[dict],
+        items: list[dict] | None = None,
+        pages: list[dict] | None = None,
         inserted: dict | None = None,
         patch_error: Exception | None = None,
     ) -> None:
-        self._items = items
+        self._items = items or []
+        self._pages = pages
         self._inserted = inserted
         self._patch_error = patch_error
         self.list_calls: list[dict] = []
@@ -49,6 +56,8 @@ class FakeEventsResource:
             raise self._patch_error
         if self._inserted is not None:
             return self._inserted
+        if self._pages is not None:
+            return self._pages[len(self.list_calls) - 1]
         return {"items": self._items}
 
 
@@ -78,7 +87,9 @@ class FakeCalendarService:
         calendar_list_entries: dict[str, dict] | None = None,
         patch_error: Exception | None = None,
     ) -> None:
-        self._events = FakeEventsResource(items or [], inserted, patch_error)
+        self._events = FakeEventsResource(
+            items=items or [], inserted=inserted, patch_error=patch_error
+        )
         self._calendar_list = FakeCalendarListResource(calendar_list_entries or {})
 
     def events(self):
@@ -270,6 +281,116 @@ async def test_get_calendar_events_surfaces_habit_id_only_when_tagged(
     by_id = {e["event_id"]: e for e in result["events"]}
     assert by_id["e1"]["habit_id"] == "h1"
     assert "habit_id" not in by_id["e2"]
+
+
+def _single_calendar_service(user_id_calendars):
+    async def list_calendars(user_id):
+        return user_id_calendars
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    return list_calendars, access_token
+
+
+async def test_fetches_all_pages_of_events(tool_context, monkeypatch):
+    """Google caps events().list at 250 items per page — a busy month can
+    span multiple pages, and every page must be collected, not just the
+    first (this was the actual A0.1 bug: nextPageToken was ignored)."""
+    list_calendars, access_token = _single_calendar_service(
+        {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com"}],
+        }
+    )
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    service = FakeCalendarService()
+    service._events._pages = [
+        {
+            "items": [_google_item("e1", "Page one", "2026-08-01T09:00:00Z", "2026-08-01T10:00:00Z")],
+            "nextPageToken": "tok2",
+        },
+        {
+            "items": [_google_item("e2", "Page two", "2026-08-02T09:00:00Z", "2026-08-02T10:00:00Z")],
+        },
+    ]
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-03")
+
+    assert result["status"] == "success"
+    assert [e["event_id"] for e in result["events"]] == ["e1", "e2"]
+    list_calls = service.events().list_calls
+    assert "pageToken" not in list_calls[0]
+    assert list_calls[1]["pageToken"] == "tok2"
+
+
+async def test_single_page_with_no_next_token_stops_after_one_call(tool_context, monkeypatch):
+    list_calendars, access_token = _single_calendar_service(
+        {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com"}],
+        }
+    )
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    service = FakeCalendarService(
+        [_google_item("e1", "Only page", "2026-08-01T09:00:00Z", "2026-08-01T10:00:00Z")]
+    )
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+    assert result["status"] == "success"
+    assert [e["event_id"] for e in result["events"]] == ["e1"]
+    assert len(service.events().list_calls) == 1
+
+
+async def test_page_cap_returns_partial_results_and_warns(tool_context, monkeypatch, caplog):
+    """A calendar backend that never stops returning nextPageToken must not
+    loop forever — the cap kicks in, what was collected so far is returned
+    rather than raised, and a structured warning is emitted (not a second
+    silent truncation)."""
+    monkeypatch.setattr(calendar_tool, "_MAX_EVENT_PAGES", 2)
+
+    list_calendars, access_token = _single_calendar_service(
+        {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com"}],
+        }
+    )
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    service = FakeCalendarService()
+    service._events._pages = [
+        {
+            "items": [_google_item("e1", "Page one", "2026-08-01T09:00:00Z", "2026-08-01T10:00:00Z")],
+            "nextPageToken": "tok2",
+        },
+        {
+            "items": [_google_item("e2", "Page two", "2026-08-02T09:00:00Z", "2026-08-02T10:00:00Z")],
+            "nextPageToken": "tok3",
+        },
+        {
+            "items": [_google_item("e3", "Page three (never fetched)", "2026-08-03T09:00:00Z", "2026-08-03T10:00:00Z")],
+        },
+    ]
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    with caplog.at_level("WARNING"):
+        result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-04")
+
+    assert result["status"] == "success"
+    assert [e["event_id"] for e in result["events"]] == ["e1", "e2"]
+    assert len(service.events().list_calls) == 2
+    assert any("safety cap" in record.message for record in caplog.records)
 
 
 def _google_inserted(event_id, summary, start, end, html_link="https://calendar.example/e"):

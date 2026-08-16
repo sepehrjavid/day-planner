@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 # visible to the app that set them, never to the user in the Calendar UI.
 _HABIT_ID_PROPERTY = "day_planner_habit_id"
 
+# Google's events().list returns at most 250 items per page. These caps are
+# a safety net against an unbounded loop (e.g. a misbehaving or malicious
+# calendar backend that never stops returning nextPageToken), not a limit
+# expected to be hit in normal use.
+_MAX_EVENT_PAGES = 20
+_MAX_EVENTS = 5000
+
 
 async def get_calendar_events(
     tool_context: ToolContext, date_from: str, date_to: str
@@ -618,39 +625,57 @@ async def _fetch_google_events(
         # fresh token.
         creds = Credentials(token=access_token)
         service = build("calendar", "v3", credentials=creds)
-        response = (
-            service.events()
-            .list(
+
+        items: list[dict] = []
+        page_token: str | None = None
+        pages = 0
+        while True:
+            list_kwargs = dict(
                 calendarId=calendar_id,
                 timeMin=f"{date_from}T00:00:00Z",
                 timeMax=f"{date_to}T00:00:00Z",
                 singleEvents=True,
                 orderBy="startTime",
             )
-            .execute()
-        )
-        items = []
-        for item in response.get("items", []):
-            start = item.get("start", {})
-            end = item.get("end", {})
-            entry = {
-                "event_id": item.get("id"),
-                "title": item.get("summary", "(no title)"),
-                "start_time": start.get("dateTime", start.get("date")),
-                "end_time": end.get("dateTime", end.get("date")),
-                "location": item.get("location"),
-                "calendar_id": calendar_id,
-            }
-            # Only present when this event was tagged for a habit — see
-            # _trim_google_event's identical convention. This is what lets
-            # the agent notice, from a plain get_calendar_events call, that
-            # an already-scheduled event is a habit session, e.g. when
-            # checking a newly-stated preference against what's already on
-            # the calendar (see instruction.md).
-            habit_id = _extract_habit_id(item)
-            if habit_id:
-                entry["habit_id"] = habit_id
-            items.append(entry)
+            if page_token:
+                list_kwargs["pageToken"] = page_token
+            response = service.events().list(**list_kwargs).execute()
+
+            for item in response.get("items", []):
+                start = item.get("start", {})
+                end = item.get("end", {})
+                entry = {
+                    "event_id": item.get("id"),
+                    "title": item.get("summary", "(no title)"),
+                    "start_time": start.get("dateTime", start.get("date")),
+                    "end_time": end.get("dateTime", end.get("date")),
+                    "location": item.get("location"),
+                    "calendar_id": calendar_id,
+                }
+                # Only present when this event was tagged for a habit — see
+                # _trim_google_event's identical convention. This is what lets
+                # the agent notice, from a plain get_calendar_events call,
+                # that an already-scheduled event is a habit session, e.g.
+                # when checking a newly-stated preference against what's
+                # already on the calendar (see instruction.md).
+                habit_id = _extract_habit_id(item)
+                if habit_id:
+                    entry["habit_id"] = habit_id
+                items.append(entry)
+
+            pages += 1
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+            if pages >= _MAX_EVENT_PAGES or len(items) >= _MAX_EVENTS:
+                # Not raised as an error: partial results from a calendar
+                # this busy are still more useful to the caller than none.
+                logger.warning(
+                    "calendar events pagination hit safety cap; "
+                    "returning partial results",
+                    extra={"page_count": pages, "event_count": len(items)},
+                )
+                break
         return items
 
     # googleapiclient is synchronous; keep it off the event loop like every

@@ -55,7 +55,7 @@ resource "google_cloud_run_v2_service" "default" {
 
   template {
     service_account = google_service_account.backend.email
-    timeout         = "60s"
+    timeout         = "900s"
 
     scaling {
       min_instance_count = 0
