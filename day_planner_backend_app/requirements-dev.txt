@@ -1,3 +1,9 @@
 -r requirements.txt
 
-pytest==8.3.4
+# Bumped from 8.3.4 to satisfy pytest-asyncio 1.4.0's >=8.4 floor — see
+# below. Matches day_planner_agent's own pin, which that suite already
+# validates.
+pytest==9.1.1
+# Only test_agent_client.py needs this (A1.1) — everything else in this
+# suite drives the app synchronously through FastAPI's TestClient.
+pytest-asyncio==1.4.0

@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
         project_id=settings.gcp_project_id,
         location=settings.agent_engine_location,
         reasoning_engine=settings.agent_engine_name,
+        log_tool_args=settings.log_tool_call_args,
     )
     logger.info("providers=%s", supported_providers(settings))
     yield
