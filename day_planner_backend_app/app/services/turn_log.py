@@ -22,10 +22,27 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("day_planner.turn")
+logger.setLevel(logging.INFO)
+# Bypass main.py's logging.basicConfig() formatter (adds a
+# "INFO:day_planner.turn:" prefix) and don't propagate to the root logger,
+# which would emit that prefixed copy a second time. Cloud Logging on Cloud
+# Run auto-parses a stdout line into structured jsonPayload only when the
+# *entire* line is valid JSON — a level/name prefix breaks that, and A1.2's
+# BigQuery sink depends on it (see terraform/bigquery.tf's sink filter,
+# which matches on jsonPayload.turn_id). Explicit stream=stdout: a bare
+# StreamHandler() defaults to stderr, which Cloud Run captures and parses
+# just as well, but stdout is the deliberate convention here so this
+# doesn't silently depend on Python's default.
+logger.propagate = False
+if not logger.handlers:
+    _handler = logging.StreamHandler(stream=sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_handler)
 
 # Preload state written by day_planner_agent's before_agent_callbacks (see
 # day_planner_agent/agent.py's _PRELOAD_OK_KEY) — surfaces on whichever
