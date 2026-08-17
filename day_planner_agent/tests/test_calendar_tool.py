@@ -8,8 +8,10 @@ calendar_tool.py calls it correctly and handles every response shape it can
 return.
 """
 
+import asyncio
 from types import SimpleNamespace
 
+import pytest
 from googleapiclient.errors import HttpError
 
 from day_planner_agent import backend_client, calendar_tool
@@ -1251,3 +1253,394 @@ async def test_update_calendar_event_untagged_event_never_logs(tool_context, mon
 
     assert result["status"] == "success"
     assert called == []
+
+
+# ---------------------------------------------------------------------------
+# A2.2 — concurrent fetches (get_calendar_events)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_calendar_events_fetches_tokens_concurrently(tool_context, monkeypatch):
+    """access_token per account must actually run concurrently, not one
+    at a time — verified by tracking peak overlap, not just call count."""
+    in_flight = 0
+    peak = 0
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-1", "calendar_id": "a@gmail.com"},
+                {"account_id": "acct-2", "calendar_id": "b@gmail.com"},
+                {"account_id": "acct-3", "calendar_id": "c@gmail.com"},
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.02)
+        in_flight -= 1
+        return f"AT-{account_id}"
+
+    async def get_events(token, calendar_id, date_from, date_to):
+        return []
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "_fetch_google_events", get_events)
+
+    await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+    assert peak > 1, "access_token calls ran serially, not concurrently"
+
+
+async def test_get_calendar_events_fetches_events_concurrently(tool_context, monkeypatch):
+    in_flight = 0
+    peak = 0
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-1", "calendar_id": "a@gmail.com"},
+                {"account_id": "acct-2", "calendar_id": "b@gmail.com"},
+                {"account_id": "acct-3", "calendar_id": "c@gmail.com"},
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    async def get_events(token, calendar_id, date_from, date_to):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.02)
+        in_flight -= 1
+        return [
+            {
+                "event_id": f"e-{calendar_id}",
+                "calendar_id": calendar_id,
+                "title": "x",
+                "start_time": "2026-08-01T09:00:00Z",
+                "end_time": "2026-08-01T09:30:00Z",
+                "location": None,
+            }
+        ]
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "_fetch_google_events", get_events)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+    assert peak > 1, "event fetches ran serially, not concurrently"
+    assert len(result["events"]) == 3
+
+
+async def test_get_calendar_events_sorts_correctly_even_when_completion_order_differs(
+    tool_context, monkeypatch
+):
+    """gather() does not guarantee completion order matches submission
+    order — a calendar whose fetch happens to finish first must not end
+    up first in the result just because of that."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-1", "calendar_id": "a@gmail.com"},
+                {"account_id": "acct-2", "calendar_id": "b@gmail.com"},
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    async def get_events(token, calendar_id, date_from, date_to):
+        # The *later* calendar (b) resolves first but has the *earlier*
+        # event — sorting must still win over completion order.
+        if calendar_id == "a@gmail.com":
+            await asyncio.sleep(0.02)
+            return [
+                {
+                    "event_id": "e-later",
+                    "calendar_id": calendar_id,
+                    "title": "Later",
+                    "start_time": "2026-08-01T14:00:00Z",
+                    "end_time": "2026-08-01T14:30:00Z",
+                    "location": None,
+                }
+            ]
+        return [
+            {
+                "event_id": "e-earlier",
+                "calendar_id": calendar_id,
+                "title": "Earlier",
+                "start_time": "2026-08-01T09:00:00Z",
+                "end_time": "2026-08-01T09:30:00Z",
+                "location": None,
+            }
+        ]
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "_fetch_google_events", get_events)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+    assert [e["event_id"] for e in result["events"]] == ["e-earlier", "e-later"]
+
+
+async def test_get_calendar_events_http_error_from_one_calendar_returns_error_status(
+    tool_context, monkeypatch
+):
+    """Error semantics must be unchanged: one calendar's HttpError still
+    surfaces as {"status": "error"}, even with the other fetch running
+    concurrently alongside it via gather(return_exceptions=True)."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {"account_id": "acct-1", "calendar_id": "a@gmail.com"},
+                {"account_id": "acct-2", "calendar_id": "b@gmail.com"},
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    async def get_events(token, calendar_id, date_from, date_to):
+        if calendar_id == "a@gmail.com":
+            raise HttpError(SimpleNamespace(status=500, reason="boom"), b"{}")
+        return []
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "_fetch_google_events", get_events)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+    assert result["status"] == "error"
+
+
+async def test_get_calendar_events_non_http_error_is_not_swallowed(tool_context, monkeypatch):
+    """Only HttpError is turned into a status:error response — anything
+    else must still propagate, matching the original serial loop's
+    behaviour of never catching non-HttpError exceptions at all."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "a@gmail.com"}],
+        }
+
+    async def access_token(user_id, account_id):
+        return "AT-1"
+
+    async def get_events(token, calendar_id, date_from, date_to):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "_fetch_google_events", get_events)
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+
+# ---------------------------------------------------------------------------
+# A2.2 — per-invocation memoization (add_calendar_event)
+# ---------------------------------------------------------------------------
+
+
+async def test_add_calendar_event_memoizes_list_calendars_within_one_invocation(
+    tool_context, monkeypatch
+):
+    """The literal acceptance criterion: a turn placing 5 events performs
+    1 list_calendars call, not 5."""
+    calls = []
+
+    async def list_calendars(user_id):
+        calls.append(1)
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    service = FakeCalendarService(
+        inserted=_google_inserted("e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    for _ in range(5):
+        result = await calendar_tool.add_calendar_event(
+            tool_context, "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        )
+        assert result["status"] == "success"
+
+    assert len(calls) == 1
+
+
+async def test_add_calendar_event_memoizes_calendar_list_entry_within_one_invocation(
+    tool_context, monkeypatch
+):
+    service = FakeCalendarService(
+        inserted=_google_inserted("e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    for _ in range(3):
+        await calendar_tool.add_calendar_event(
+            tool_context, "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        )
+
+    assert service.calendarList().get_calls == [{"calendarId": "me@gmail.com"}]
+
+
+async def test_add_calendar_event_shared_calendar_gets_correct_role_per_account(
+    tool_context, monkeypatch
+):
+    """A calendar shared across two of the user's connected accounts can
+    carry a different accessRole for each — accessRole is per-caller, not
+    a property of the calendar itself (see _fetch_calendar_list_entry's
+    own docstring). The cache must not let the first account's cached
+    role silently answer the second account's lookup of the same
+    calendar_id (review follow-up to A2.2)."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-work",
+                    "calendar_id": "shared@group.calendar.google.com",
+                    "summary": "Shared",
+                    "is_primary": False,
+                },
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "shared@group.calendar.google.com",
+                    "summary": "Shared",
+                    "is_primary": False,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    # Same calendar_id, different accessRole depending on which account's
+    # token is asking — work only reads it, personal can write to it.
+    work_service = FakeCalendarService(
+        calendar_list_entries={
+            "shared@group.calendar.google.com": {"accessRole": "reader", "summary": "Shared"}
+        }
+    )
+    personal_service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        ),
+        calendar_list_entries={
+            "shared@group.calendar.google.com": {"accessRole": "writer"}
+        },
+    )
+
+    def fake_build(service_name, version, credentials):
+        return work_service if credentials.token == "AT-acct-work" else personal_service
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", fake_build)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        calendar_summary="Shared",
+    )
+
+    # If the cache incorrectly keyed on calendar_id alone, the personal
+    # account's lookup would reuse work's cached "reader" entry, and this
+    # would come back not_writable instead of success.
+    assert result["status"] == "success"
+    assert personal_service.events().insert_calls[0]["calendarId"] == (
+        "shared@group.calendar.google.com"
+    )
+    assert work_service.calendarList().get_calls == [
+        {"calendarId": "shared@group.calendar.google.com"}
+    ]
+    assert personal_service.calendarList().get_calls == [
+        {"calendarId": "shared@group.calendar.google.com"}
+    ]
+
+
+async def test_add_calendar_event_cache_does_not_leak_across_invocations(monkeypatch):
+    """Out of scope, made explicit: caching is per-invocation only. A
+    second, later invocation (a new turn) must not reuse the first's
+    cached list_calendars result — the user's connected calendars can
+    change between turns."""
+    from conftest import FakeToolContext
+
+    calls = []
+
+    async def list_calendars(user_id):
+        calls.append(1)
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                }
+            ],
+        }
+
+    service = FakeCalendarService(
+        inserted=_google_inserted("e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    first_turn = FakeToolContext(user_id="user-1", invocation_id="inv-1")
+    await calendar_tool.add_calendar_event(
+        first_turn, "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+    )
+    second_turn = FakeToolContext(user_id="user-1", invocation_id="inv-2")
+    await calendar_tool.add_calendar_event(
+        second_turn, "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+    )
+
+    assert len(calls) == 2

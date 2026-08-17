@@ -32,11 +32,15 @@ class FakeToolContext:
     """The surface calendar_tool.py and habit_tools.py touch on a real
     ToolContext — .state added for A1.4's telemetry, which reads the
     zones agent.py's _preload_zones would have cached there and writes
-    its own per-session outcomes back into it."""
+    its own per-session outcomes back into it. .invocation_id added for
+    A2.2's per-invocation memoization in calendar_tool.py — real ADK
+    shares one invocation_id across every tool call within a single
+    turn, which is what scopes that cache to "this turn only"."""
 
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, user_id: str, invocation_id: str = "inv-1") -> None:
         self.session = FakeSession(user_id)
         self.state: dict = {}
+        self.invocation_id = invocation_id
 
 
 @pytest.fixture

@@ -76,26 +76,50 @@ async def get_calendar_events(
             "message": exc.message,
         }
 
-    account_ids = {c["account_id"] for c in calendars["calendars"]}
-    tokens_by_account = {
-        account_id: await backend_client.access_token(user_id, account_id)
-        for account_id in account_ids
-    }
+    # Sorted for reproducibility only — the original dict comprehension
+    # this replaces iterated a set too, so there was never an ordering
+    # guarantee to preserve here, unlike events.sort below.
+    account_ids = sorted({c["account_id"] for c in calendars["calendars"]})
+    tokens = await asyncio.gather(
+        *(backend_client.access_token(user_id, account_id) for account_id in account_ids)
+    )
+    tokens_by_account = dict(zip(account_ids, tokens))
+
+    skipped_accounts = {aid for aid, token in tokens_by_account.items() if token is None}
+    fetch_targets = [
+        target
+        for target in calendars["calendars"]
+        if tokens_by_account.get(target["account_id"]) is not None
+    ]
+
+    # return_exceptions=True so one calendar's HttpError doesn't cancel
+    # the others still in flight — but the original serial loop returned
+    # {"status": "error"} on the *first* HttpError and never reached the
+    # rest, so that's reproduced deliberately below rather than silently
+    # becoming "collect every calendar's error" or "ignore calendar-level
+    # failures". Anything that isn't an HttpError re-raises, matching the
+    # original code's total silence on any other exception type — it was
+    # never caught before, so it must not start being swallowed now.
+    fetch_results = await asyncio.gather(
+        *(
+            _fetch_google_events(
+                tokens_by_account[target["account_id"]],
+                target["calendar_id"],
+                date_from,
+                date_to,
+            )
+            for target in fetch_targets
+        ),
+        return_exceptions=True,
+    )
 
     events = []
-    skipped_accounts = {aid for aid, token in tokens_by_account.items() if token is None}
-    for target in calendars["calendars"]:
-        token = tokens_by_account.get(target["account_id"])
-        if token is None:
-            continue
-        try:
-            events.extend(
-                await _fetch_google_events(
-                    token, target["calendar_id"], date_from, date_to
-                )
-            )
-        except HttpError as exc:
-            return {"status": "error", "error_message": str(exc)}
+    for result in fetch_results:
+        if isinstance(result, HttpError):
+            return {"status": "error", "error_message": str(result)}
+        if isinstance(result, BaseException):
+            raise result
+        events.extend(result)
 
     events.sort(key=lambda e: e["start_time"] or "")
 
@@ -162,7 +186,7 @@ async def add_calendar_event(
     user_id = tool_context.session.user_id
 
     try:
-        calendars = await backend_client.list_calendars(user_id)
+        calendars = await _cached_list_calendars(tool_context, user_id)
     except backend_client.NeedsAuth as exc:
         return {
             "status": "needs_auth",
@@ -196,7 +220,9 @@ async def add_calendar_event(
             continue
         saw_any_token = True
         try:
-            entry = await _fetch_calendar_list_entry(token, candidate["calendar_id"])
+            entry = await _cached_calendar_list_entry(
+                tool_context, candidate["account_id"], token, candidate["calendar_id"]
+            )
         except HttpError as exc:
             return {"status": "error", "error_message": str(exc)}
         if entry.get("accessRole") in _WRITABLE_ROLES:
@@ -435,6 +461,48 @@ async def delete_calendar_event(
 
 
 _WRITABLE_ROLES = frozenset({"owner", "writer"})
+
+
+def _invocation_cache_key(tool_context: ToolContext) -> str:
+    # tool_context.invocation_id is shared across every tool call ADK
+    # makes while processing one user message (one turn) — that's what
+    # scopes this cache to "this invocation only", per A2.2's explicit
+    # "do not cache across turns or sessions". A stale entry from an
+    # earlier turn just never matches the current invocation_id; nothing
+    # actively evicts it, but state per session stays small enough that
+    # this hasn't needed to matter.
+    return f"calendar_tool:invocation_cache:{tool_context.invocation_id}"
+
+
+async def _cached_list_calendars(tool_context: ToolContext, user_id: str) -> dict:
+    """Memoized per invocation — add_calendar_event calling this once per
+    habit session placed in a turn (seven for seven sessions) was
+    repeating an identical backend_client.list_calendars call each time
+    (A2.2). Not memoized in get_calendar_events, which only ever calls
+    this once per turn already."""
+    cache = tool_context.state.setdefault(_invocation_cache_key(tool_context), {})
+    if "calendars" not in cache:
+        cache["calendars"] = await backend_client.list_calendars(user_id)
+    return cache["calendars"]
+
+
+async def _cached_calendar_list_entry(
+    tool_context: ToolContext, account_id: str, access_token: str, calendar_id: str
+) -> dict:
+    """Memoized per invocation, keyed on (account_id, calendar_id) —
+    deliberately *not* calendar_id alone. accessRole is per-caller by
+    nature (see _fetch_calendar_list_entry's own docstring: a plain
+    Calendar resource has no accessRole at all, only the caller's own
+    CalendarList entry does), so the same calendar_id shared across two
+    of the user's connected accounts can carry a different accessRole for
+    each — keying on calendar_id alone would let one account's cached
+    role silently answer the other account's lookup."""
+    cache = tool_context.state.setdefault(_invocation_cache_key(tool_context), {})
+    entries = cache.setdefault("calendar_list_entries", {})
+    key = f"{account_id}:{calendar_id}"
+    if key not in entries:
+        entries[key] = await _fetch_calendar_list_entry(access_token, calendar_id)
+    return entries[key]
 
 
 def _candidate_calendars(calendars: list[dict], calendar_summary: str | None) -> list[dict]:
