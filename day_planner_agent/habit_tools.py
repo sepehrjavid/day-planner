@@ -20,12 +20,29 @@ every other tool in this codebase — never a model-supplied argument.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 from google.adk.tools import ToolContext
 
 from . import backend_client
 from . import calendar_tool
+from . import zone_tools
+
+logger = logging.getLogger(__name__)
+
+# Mirrors turn_log.py's identical constant in day_planner_backend_app —
+# see review_habit_week's telemetry block below and turn_log.TurnRecorder
+# for the two ends of this channel. A tool_context.state write (as
+# opposed to something in the return value) surfaces in the ADK event's
+# actions.state_delta, which turn_log.py already scans for A0.2's
+# preload_ok the same way — this is what lets per-session outcome
+# telemetry reach Cloud Logging (A1.4) without adding a single token to
+# what review_habit_week returns to the model (A1.5's return shape is
+# unchanged).
+_HABIT_SESSION_OUTCOMES_STATE_KEY = "day_planner:habit_session_outcomes"
+
+_WEEKDAY_CODES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict:
@@ -255,6 +272,10 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
             entry["bumped_by"] = _find_conflict(events, session)
         results.append(entry)
 
+    # A1.4: telemetry only, never touches what's returned to the model
+    # above — see _emit_habit_session_telemetry.
+    _emit_habit_session_telemetry(tool_context, results)
+
     return {"status": "success", "sessions": results}
 
 
@@ -318,6 +339,73 @@ async def mark_habit_session(
             "marked_by": session.get("marked_by"),
         },
     }
+
+
+def _emit_habit_session_telemetry(tool_context: ToolContext, sessions: list[dict]) -> None:
+    """Best-effort: a failure here must never break review_habit_week's
+    actual return value to the model. Writes to tool_context.state rather
+    than returning anything — see _HABIT_SESSION_OUTCOMES_STATE_KEY above
+    for why that's what reaches turn_log.py without costing the model a
+    single token.
+
+    Reads zones from the same session-state cache agent.py's
+    _preload_zones already populated (zone_tools.PRELOADED_ZONES_STATE_KEY)
+    rather than calling list_zones again — no extra backend round-trip on
+    every review_habit_week call, at the cost of zone_constrained being
+    based on a possibly-stale snapshot if the user changed a zone mid-
+    session (the same staleness every other use of the preloaded zones
+    already accepts). Missing entirely (session not preloaded yet, or A0.2
+    preload failure) just means zone_constrained reads False for this
+    turn's telemetry — a diagnostic slice being occasionally wrong is
+    acceptable; it must never raise.
+
+    "source": "organic" on every entry — this only ever runs from an
+    agent- or user-triggered review_habit_week call; B2.2's future
+    push-based path (Roadmap 2) will tag its own entries "push" into the
+    same schema.
+    """
+    try:
+        zones = tool_context.state.get(zone_tools.PRELOADED_ZONES_STATE_KEY) or []
+
+        outcomes = []
+        for session in sessions:
+            try:
+                dt = datetime.fromisoformat(session["planned_start"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            outcomes.append(
+                {
+                    "habit_id": session["habit_id"],
+                    "session_status": session["session_status"],
+                    "outcome": session["outcome"],
+                    "hour_of_day": dt.hour,
+                    "day_of_week": _WEEKDAY_CODES[dt.weekday()],
+                    "zone_constrained": _zone_constrains(dt, zones),
+                    "source": "organic",
+                }
+            )
+
+        tool_context.state[_HABIT_SESSION_OUTCOMES_STATE_KEY] = outcomes
+    except Exception:
+        logger.warning("Failed to emit habit session telemetry", exc_info=True)
+
+
+def _zone_constrains(dt: datetime, zones: list[dict]) -> bool:
+    """Whether a session's planned start falls within a named zone's
+    window — a diagnostic slice (A1.4's "whether a zone constrained the
+    placement"), not a hard-constraint re-check. Doesn't handle a
+    midnight-crossing zone (start_time > end_time as plain strings) —
+    named zones like "Work"/"Commute" aren't typically that shape; sleep's
+    own midnight-crossing window is a separate concept entirely (see
+    zone_tools.get_sleep_schedule) and isn't part of this check."""
+    day_code = _WEEKDAY_CODES[dt.weekday()]
+    time_str = dt.strftime("%H:%M")
+    for zone in zones:
+        if day_code not in zone.get("days_of_week", []):
+            continue
+        if zone["start_time"] <= time_str < zone["end_time"]:
+            return True
+    return False
 
 
 def _same_instant(a: str, b: str) -> bool:

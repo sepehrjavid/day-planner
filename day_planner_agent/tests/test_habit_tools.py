@@ -8,7 +8,7 @@ day_planner_backend_internal's own test suite already covers
 /internal/habits* directly.
 """
 
-from day_planner_agent import backend_client, calendar_tool, habit_tools
+from day_planner_agent import backend_client, calendar_tool, habit_tools, zone_tools
 
 
 async def test_create_habit_passes_through(tool_context, monkeypatch):
@@ -435,3 +435,240 @@ async def test_mark_habit_session_user_id_comes_only_from_tool_context(tool_cont
     assert "user_id" not in habit_tools.mark_habit_session.__code__.co_varnames[
         : habit_tools.mark_habit_session.__code__.co_argcount
     ]
+
+
+# ---------------------------------------------------------------------------
+# Habit session outcome telemetry (A1.4)
+# ---------------------------------------------------------------------------
+
+
+def _review_fixtures(monkeypatch, sessions, events, habits=None):
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        return sessions
+
+    async def get_calendar_events(tool_context, date_from, date_to):
+        return {"status": "success", "events": events}
+
+    async def list_habits(user_id, *, status=None):
+        return habits or [{"habit_id": "h1", "label": "Gym"}]
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+
+
+async def test_review_habit_week_emits_telemetry_to_state_not_the_return_value(
+    tool_context, monkeypatch
+):
+    """The whole point of A1.4's design: telemetry reaches turn_log.py via
+    tool_context.state (surfaced in the ADK event's actions.state_delta),
+    never by growing what's returned to the model — A1.5's return shape
+    must stay exactly as it was."""
+    sessions = [
+        {
+            "habit_id": "h1",
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T07:00:00-07:00",
+            "planned_end": "2026-08-04T07:30:00-07:00",
+            "status": "completed",
+        }
+    ]
+    events = [
+        {
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-04T07:00:00-07:00",
+            "end_time": "2026-08-04T07:30:00-07:00",
+        }
+    ]
+    _review_fixtures(monkeypatch, sessions, events)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+
+    # Unchanged from what A1.5 already established — no new keys.
+    assert set(result["sessions"][0].keys()) == {
+        "habit_id",
+        "habit_label",
+        "event_id",
+        "calendar_id",
+        "planned_start",
+        "planned_end",
+        "session_status",
+        "completed_at",
+        "marked_by",
+        "outcome",
+    }
+
+    telemetry = tool_context.state["day_planner:habit_session_outcomes"]
+    assert len(telemetry) == 1
+    entry = telemetry[0]
+    assert entry["habit_id"] == "h1"
+    assert entry["session_status"] == "completed"
+    assert entry["outcome"] == "kept"
+    assert entry["hour_of_day"] == 7
+    assert entry["day_of_week"] == "tue"  # 2026-08-04 is a Tuesday
+    assert entry["source"] == "organic"
+
+
+async def test_review_habit_week_telemetry_marks_zone_constrained(tool_context, monkeypatch):
+    sessions = [
+        {  # inside the Work zone
+            "habit_id": "h1",
+            "event_id": "e-in-zone",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T10:00:00-07:00",  # Tuesday 10:00
+            "planned_end": "2026-08-04T10:30:00-07:00",
+        },
+        {  # outside it — evening, same day
+            "habit_id": "h1",
+            "event_id": "e-outside-zone",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T19:00:00-07:00",
+            "planned_end": "2026-08-04T19:30:00-07:00",
+        },
+    ]
+    events = [
+        {
+            "event_id": "e-in-zone",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-04T10:00:00-07:00",
+            "end_time": "2026-08-04T10:30:00-07:00",
+        },
+        {
+            "event_id": "e-outside-zone",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-04T19:00:00-07:00",
+            "end_time": "2026-08-04T19:30:00-07:00",
+        },
+    ]
+    _review_fixtures(monkeypatch, sessions, events)
+    tool_context.state[zone_tools.PRELOADED_ZONES_STATE_KEY] = [
+        {"label": "Work", "start_time": "09:00", "end_time": "17:30", "days_of_week": ["tue"]}
+    ]
+
+    await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+
+    by_event_hour = {
+        e["hour_of_day"]: e for e in tool_context.state["day_planner:habit_session_outcomes"]
+    }
+    assert by_event_hour[10]["zone_constrained"] is True
+    assert by_event_hour[19]["zone_constrained"] is False
+
+
+async def test_review_habit_week_telemetry_defaults_zone_constrained_false_without_preload(
+    tool_context, monkeypatch
+):
+    """No zones ever preloaded into state (missing key entirely, not just
+    empty) must not crash telemetry — zone_constrained just reads False."""
+    sessions = [
+        {
+            "habit_id": "h1",
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T10:00:00-07:00",
+            "planned_end": "2026-08-04T10:30:00-07:00",
+        }
+    ]
+    events = [
+        {
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-04T10:00:00-07:00",
+            "end_time": "2026-08-04T10:30:00-07:00",
+        }
+    ]
+    _review_fixtures(monkeypatch, sessions, events)
+    assert zone_tools.PRELOADED_ZONES_STATE_KEY not in tool_context.state
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+
+    assert result["status"] == "success"
+    telemetry = tool_context.state["day_planner:habit_session_outcomes"]
+    assert telemetry[0]["zone_constrained"] is False
+
+
+async def test_review_habit_week_telemetry_failure_does_not_break_return_value(
+    tool_context, monkeypatch
+):
+    """Best-effort by design — a broken telemetry computation must never
+    take down the actual tool response the model depends on."""
+    sessions = [
+        {
+            "habit_id": "h1",
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T10:00:00-07:00",
+            "planned_end": "2026-08-04T10:30:00-07:00",
+        }
+    ]
+    events = [
+        {
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-04T10:00:00-07:00",
+            "end_time": "2026-08-04T10:30:00-07:00",
+        }
+    ]
+    _review_fixtures(monkeypatch, sessions, events)
+
+    class ExplodingState(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("state boom")
+
+    tool_context.state = ExplodingState()
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    assert result["status"] == "success"
+    assert result["sessions"][0]["habit_id"] == "h1"
+
+
+# ---------------------------------------------------------------------------
+# _zone_constrains (pure function)
+# ---------------------------------------------------------------------------
+
+
+def test_zone_constrains_true_inside_window_on_matching_day():
+    from datetime import datetime
+
+    dt = datetime.fromisoformat("2026-08-04T10:00:00-07:00")  # Tuesday
+    zones = [{"label": "Work", "start_time": "09:00", "end_time": "17:30", "days_of_week": ["tue"]}]
+    assert habit_tools._zone_constrains(dt, zones) is True
+
+
+def test_zone_constrains_false_outside_time_window():
+    from datetime import datetime
+
+    dt = datetime.fromisoformat("2026-08-04T19:00:00-07:00")
+    zones = [{"label": "Work", "start_time": "09:00", "end_time": "17:30", "days_of_week": ["tue"]}]
+    assert habit_tools._zone_constrains(dt, zones) is False
+
+
+def test_zone_constrains_false_on_non_matching_day():
+    from datetime import datetime
+
+    dt = datetime.fromisoformat("2026-08-08T10:00:00-07:00")  # Saturday
+    zones = [{"label": "Work", "start_time": "09:00", "end_time": "17:30", "days_of_week": ["tue"]}]
+    assert habit_tools._zone_constrains(dt, zones) is False
+
+
+def test_zone_constrains_boundary_start_inclusive_end_exclusive():
+    from datetime import datetime
+
+    zones = [{"label": "Work", "start_time": "09:00", "end_time": "17:30", "days_of_week": ["tue"]}]
+    at_start = datetime.fromisoformat("2026-08-04T09:00:00-07:00")
+    at_end = datetime.fromisoformat("2026-08-04T17:30:00-07:00")
+    assert habit_tools._zone_constrains(at_start, zones) is True
+    assert habit_tools._zone_constrains(at_end, zones) is False
+
+
+def test_zone_constrains_false_with_no_zones():
+    from datetime import datetime
+
+    dt = datetime.fromisoformat("2026-08-04T10:00:00-07:00")
+    assert habit_tools._zone_constrains(dt, []) is False

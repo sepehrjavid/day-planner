@@ -91,6 +91,10 @@ def _preload_ok_event(value: bool) -> dict:
     return {"actions": {"state_delta": {"day_planner:preload_ok": value}}}
 
 
+def _habit_session_outcomes_event(outcomes: list[dict]) -> dict:
+    return {"actions": {"state_delta": {"day_planner:habit_session_outcomes": outcomes}}}
+
+
 def _one_record(caplog):
     records = [r for r in caplog.records if r.name == "day_planner.turn"]
     assert len(records) == 1, f"expected exactly one turn record, got {len(records)}"
@@ -247,6 +251,63 @@ async def test_preload_ok_null_when_never_observed(caplog):
 
     record = _one_record(caplog)
     assert record["preload_ok"] is None
+
+
+# ---------------------------------------------------------------------------
+# habit_session_outcomes (A1.4)
+# ---------------------------------------------------------------------------
+
+
+async def test_habit_session_outcomes_surfaces_from_state_delta(caplog):
+    outcomes = [
+        {
+            "habit_id": "h1",
+            "session_status": "completed",
+            "outcome": "kept",
+            "hour_of_day": 7,
+            "day_of_week": "tue",
+            "zone_constrained": False,
+            "source": "organic",
+        }
+    ]
+    events = [_habit_session_outcomes_event(outcomes), _model_text_event("ok")]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="how'd my week go")
+
+    record = _one_record(caplog)
+    assert record["habit_session_outcomes"] == outcomes
+
+
+async def test_habit_session_outcomes_empty_when_never_observed(caplog):
+    client, app = _agent_client([_model_text_event("ok")])
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    assert record["habit_session_outcomes"] == []
+
+
+async def test_habit_session_outcomes_accumulate_across_multiple_calls_in_one_turn(caplog):
+    """review_habit_week can run more than once in a turn (different
+    periods or habits) — each call's own event must add to the total, not
+    overwrite the previous call's outcomes."""
+    first_call = [{"habit_id": "h1", "session_status": "completed", "outcome": "kept"}]
+    second_call = [{"habit_id": "h2", "session_status": "pending", "outcome": "moved"}]
+    events = [
+        _habit_session_outcomes_event(first_call),
+        _habit_session_outcomes_event(second_call),
+        _model_text_event("ok"),
+    ]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    assert record["habit_session_outcomes"] == first_call + second_call
 
 
 async def test_outcome_completed_on_success(caplog):

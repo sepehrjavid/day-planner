@@ -1,6 +1,7 @@
--- Queries against A1.1/A1.2's turn-record telemetry. Kept alongside
+-- Queries against turn_log.py's turn-record telemetry (A1.1/A1.2, loop
+-- detection A1.3, habit session outcomes A1.4). Kept alongside
 -- turn_log.py (the thing that produces the rows these query) rather than
--- reinvented per question — see docs/roadmaps/1-agent.md A1.2.
+-- reinvented per question — see docs/roadmaps/1-agent.md.
 --
 -- Table placeholder: `{{PROJECT}}.day_planner_turns.{{TABLE}}`
 --
@@ -16,9 +17,12 @@
 --
 -- Every row is one turn_log.py record: LogEntry's own `timestamp` column
 -- for when the turn happened, `jsonPayload.*` for the turn record's own
--- fields (turn_id, session_id, user_ref, tool_calls[], model_calls,
--- input_tokens, output_tokens, thinking_tokens, preload_ok, outcome,
--- wall_ms — see turn_log.py's TurnRecorder.emit).
+-- fields (turn_id, session_id, user_ref, tool_calls[] — each with name,
+-- args_fingerprint, duration_ms, status — model_calls, input_tokens,
+-- output_tokens, thinking_tokens, preload_ok, outcome, wall_ms,
+-- loop_detected, habit_session_outcomes[] — each with habit_id,
+-- session_status, outcome, hour_of_day, day_of_week, zone_constrained,
+-- source — see turn_log.py's TurnRecorder.emit).
 
 -- 1. Tokens per turn (input / output / thinking), and the distribution.
 SELECT
@@ -105,3 +109,190 @@ WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY);
 SELECT *
 FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`
 WHERE jsonPayload.turn_id = @turn_id;
+
+-- =============================================================================
+-- A1.4 — completion rate, survival rate, restatement/abandonment signals.
+--
+-- COVERAGE CAVEAT — read this before trusting either rate below as a
+-- fleet-wide figure. Both are opt-in biased, in different ways:
+--   * Completion rate only observes sessions someone actually marked
+--     (mark_habit_session, either the agent on the user's say-so or a
+--     future UI). A session nobody ever mentioned again stays "pending"
+--     forever — it is NOT evidence of failure, and this data is silent
+--     about it, not negative about it.
+--   * Survival rate is only computed for sessions that happened to fall
+--     inside a review_habit_week call's date range, for a user who
+--     triggered one. Users who never ask "how'd my week go" contribute
+--     zero survival rows, not zero (or full) survival.
+-- Every query below reports its denominator for exactly this reason — a
+-- rate with no visible sample size invites being read as more
+-- representative than it is. jsonPayload.habit_session_outcomes[].source
+-- is "organic" for every row today (an agent- or user-triggered
+-- review_habit_week call); Roadmap 2's B2.2 will start writing "push"
+-- into the same schema once change-detection lands — filter or group on
+-- source once both exist so the two don't get silently averaged together.
+-- =============================================================================
+
+-- 7a. Completion rate by habit. session_status is one of "pending",
+-- "completed", "skipped" — pending gets its own column here, never
+-- folded into skipped/failure. completion_rate's denominator is every
+-- placed session with a recorded outcome, not just completed+skipped, so
+-- a habit nobody has marked yet correctly shows a low rate with a
+-- visible pending_count explaining why, rather than looking abandoned.
+SELECT
+  hso.habit_id,
+  COUNTIF(hso.session_status = 'completed') AS completed_count,
+  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
+  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  COUNT(*) AS total_sessions,
+  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
+  UNNEST(jsonPayload.habit_session_outcomes) AS hso
+WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+GROUP BY hso.habit_id
+ORDER BY total_sessions DESC;
+
+-- 7b. Completion rate by hour of day (0-23, the session's planned local
+-- start hour) — where in the day placements actually get done.
+SELECT
+  hso.hour_of_day,
+  COUNTIF(hso.session_status = 'completed') AS completed_count,
+  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
+  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  COUNT(*) AS total_sessions,
+  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
+  UNNEST(jsonPayload.habit_session_outcomes) AS hso
+WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+GROUP BY hso.hour_of_day
+ORDER BY hso.hour_of_day;
+
+-- 7c. Completion rate by day of week ("mon".."sun", the session's
+-- planned local day).
+SELECT
+  hso.day_of_week,
+  COUNTIF(hso.session_status = 'completed') AS completed_count,
+  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
+  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  COUNT(*) AS total_sessions,
+  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
+  UNNEST(jsonPayload.habit_session_outcomes) AS hso
+WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+GROUP BY hso.day_of_week
+ORDER BY
+  CASE hso.day_of_week
+    WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4
+    WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 7
+  END;
+
+-- 7d. Completion rate by whether a zone constrained the placement
+-- (habit_tools.py's _zone_constrains — a diagnostic overlap check
+-- against the zones preloaded for that session, not a hard-constraint
+-- re-verification). Tests whether being squeezed into open time around a
+-- zone predicts follow-through any differently than unconstrained time.
+SELECT
+  hso.zone_constrained,
+  COUNTIF(hso.session_status = 'completed') AS completed_count,
+  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
+  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  COUNT(*) AS total_sessions,
+  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
+  UNNEST(jsonPayload.habit_session_outcomes) AS hso
+WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+GROUP BY hso.zone_constrained;
+
+-- 8. Survival rate — DIAGNOSTIC ONLY, never a success measure (see the
+-- coverage caveat above). Share of sessions still present and unmoved
+-- (outcome = "kept") — useful for explaining *why* a session wasn't
+-- completed (bumped, moved, dropped), not for claiming it was: a "kept"
+-- session that's still "pending" only means nobody deleted it, and a
+-- "moved" + "completed" session is a full success despite a survival
+-- rate of zero for that row. Use query 7 for the actual success metric.
+SELECT
+  COUNTIF(hso.outcome = 'kept') AS kept_count,
+  COUNTIF(hso.outcome = 'moved') AS moved_count,
+  COUNTIF(hso.outcome = 'gone') AS gone_count,
+  COUNT(*) AS total_sessions,
+  SAFE_DIVIDE(COUNTIF(hso.outcome = 'kept'), COUNT(*)) AS survival_rate_diagnostic_only
+FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
+  UNNEST(jsonPayload.habit_session_outcomes) AS hso
+WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY);
+
+-- 9. Restatement/correction signal — the user immediately re-does or
+-- corrects something in the very next turn, a negative on comprehension
+-- rather than on placement. Approximated from data already collected
+-- since A1.1/A1.3: the same tool name + args_fingerprint (A1.3's one-way
+-- argument hash — see turn_log.py) called again in the session's very
+-- next turn, within a short window. No new instrumentation.
+--
+-- turn_order and turn_calls are deliberately separate CTEs: turn_order
+-- has to be one row per *turn* for ROW_NUMBER() to number turns in
+-- sequence, but computing it over UNNEST(tool_calls) directly (multiple
+-- rows per turn when a turn makes >1 call) would number tool calls
+-- instead, silently corrupting "the next turn" into "the next call,
+-- maybe from the same turn." Splitting them out and joining by turn_id
+-- keeps the two concerns apart.
+WITH turn_order AS (
+  SELECT
+    jsonPayload.session_id AS session_id,
+    jsonPayload.turn_id AS turn_id,
+    timestamp,
+    ROW_NUMBER() OVER (PARTITION BY jsonPayload.session_id ORDER BY timestamp) AS turn_seq
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`
+  WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+),
+turn_calls AS (
+  SELECT
+    jsonPayload.turn_id AS turn_id,
+    tool_call.name,
+    tool_call.args_fingerprint
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
+    UNNEST(jsonPayload.tool_calls) AS tool_call
+  WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
+SELECT
+  a.session_id,
+  a.turn_id AS first_turn_id,
+  b.turn_id AS restating_turn_id,
+  ac.name AS repeated_tool,
+  TIMESTAMP_DIFF(b.timestamp, a.timestamp, SECOND) AS seconds_between_turns
+FROM turn_order a
+JOIN turn_order b
+  ON a.session_id = b.session_id AND b.turn_seq = a.turn_seq + 1
+JOIN turn_calls ac ON ac.turn_id = a.turn_id
+JOIN turn_calls bc
+  ON bc.turn_id = b.turn_id
+  AND bc.name = ac.name
+  AND bc.args_fingerprint = ac.args_fingerprint
+-- "Immediately" — a repeat call hours later is a legitimate new request,
+-- not a correction of the last one. Tune this window against real data
+-- before trusting it (see A3.4's guidance on grounding thresholds in
+-- observed behaviour rather than a guess).
+WHERE TIMESTAMP_DIFF(b.timestamp, a.timestamp, SECOND) < 600
+ORDER BY a.session_id, a.timestamp;
+
+-- 10. Turn abandonment — the user placed sessions and then the
+-- conversation just stopped, with no follow-up turn at all. Also a pure
+-- query over existing data: the last turn per session_id, checked for
+-- whether it ever got a successor.
+WITH last_turn_per_session AS (
+  SELECT
+    jsonPayload.session_id,
+    jsonPayload.turn_id,
+    timestamp,
+    ARRAY_LENGTH(jsonPayload.tool_calls) > 0 AS placed_or_acted,
+    ROW_NUMBER() OVER (PARTITION BY jsonPayload.session_id ORDER BY timestamp DESC) AS rn
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`
+  WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
+SELECT session_id, turn_id, timestamp AS abandoned_after
+FROM last_turn_per_session
+WHERE rn = 1
+  AND placed_or_acted
+  -- Not abandoned if it's still within a plausible reply window — this
+  -- only flags a session whose last turn is old enough that a reply was
+  -- realistically expected and never came.
+  AND timestamp < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+ORDER BY abandoned_after DESC;

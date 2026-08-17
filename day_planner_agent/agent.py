@@ -24,6 +24,7 @@ from .habit_tools import (
 )
 from .memory_tools import get_profile, save_memory, update_profile
 from .zone_tools import (
+    PRELOADED_ZONES_STATE_KEY,
     create_zone,
     get_sleep_schedule,
     list_zones,
@@ -40,7 +41,9 @@ _PROFILE_PRELOADED_KEY = "day_planner:profile_preloaded"
 _PRELOADED_PROFILE_KEY = "day_planner:preloaded_profile"
 _PROFILE_PRELOAD_FAILED_KEY = "day_planner:profile_preload_failed"
 _ZONES_PRELOADED_KEY = "day_planner:zones_preloaded"
-_PRELOADED_ZONES_KEY = "day_planner:preloaded_zones"
+# Lives in zone_tools.py, not here — see that module for why (habit_tools.py
+# reads the same cache for A1.4's telemetry).
+_PRELOADED_ZONES_KEY = PRELOADED_ZONES_STATE_KEY
 _PRELOADED_SLEEP_SCHEDULE_KEY = "day_planner:preloaded_sleep_schedule"
 _ZONES_PRELOAD_FAILED_KEY = "day_planner:zones_preload_failed"
 

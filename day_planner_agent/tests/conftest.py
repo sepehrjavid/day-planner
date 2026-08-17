@@ -29,10 +29,14 @@ class FakeSession:
 
 
 class FakeToolContext:
-    """The only surface calendar_tool.py touches on a real ToolContext."""
+    """The surface calendar_tool.py and habit_tools.py touch on a real
+    ToolContext — .state added for A1.4's telemetry, which reads the
+    zones agent.py's _preload_zones would have cached there and writes
+    its own per-session outcomes back into it."""
 
     def __init__(self, user_id: str) -> None:
         self.session = FakeSession(user_id)
+        self.state: dict = {}
 
 
 @pytest.fixture
