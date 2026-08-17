@@ -29,6 +29,8 @@ from app import main  # noqa: E402
 from app.api.deps import require_internal_caller  # noqa: E402
 from app.services import crypto  # noqa: E402
 from app.db.models import (  # noqa: E402
+    HABIT_SESSION_STATUS_COMPLETED,
+    HABIT_SESSION_STATUS_PENDING,
     HABIT_STATUS_ACTIVE,
     STATUS_ACTIVE,
     STATUS_NEEDS_REAUTH,
@@ -246,8 +248,31 @@ class FakeStore:
             "planned_end": planned_end,
             "created_at": existing["created_at"] if existing else now,
             "updated_at": now,
+            # Completion state (A1.5) is preserved from any existing
+            # record, exactly like created_at above — this is what makes
+            # a reschedule (this method called again for the same
+            # calendar_id/event_id) not silently wipe out a completion.
+            "status": existing["status"] if existing else HABIT_SESSION_STATUS_PENDING,
+            "completed_at": existing.get("completed_at") if existing else None,
+            "marked_by": existing.get("marked_by") if existing else None,
         }
         bucket[session_id] = data
+        return HabitSession.from_dict(session_id, data)
+
+    async def set_habit_session_status(
+        self, *, user_id, calendar_id, event_id, status, marked_by
+    ):
+        session_id = habit_session_id_for(calendar_id, event_id)
+        bucket = self.habit_sessions.get(user_id, {})
+        data = bucket.get(session_id)
+        if data is None:
+            return None
+        if data.get("status") == status:
+            return HabitSession.from_dict(session_id, data)
+        data["status"] = status
+        data["marked_by"] = marked_by
+        data["updated_at"] = _now()
+        data["completed_at"] = _now() if status == HABIT_SESSION_STATUS_COMPLETED else None
         return HabitSession.from_dict(session_id, data)
 
     async def list_habit_sessions(self, user_id, *, planned_from, planned_to):

@@ -79,6 +79,8 @@ from datetime import datetime, timedelta
 from google.cloud import firestore
 
 from .models import (
+    HABIT_SESSION_STATUS_COMPLETED,
+    HABIT_SESSION_STATUS_PENDING,
     HABIT_STATUS_ACTIVE,
     STATUS_ACTIVE,
     STATUS_NEEDS_REAUTH,
@@ -569,7 +571,14 @@ class Store:
         """Create a session record, or — for the same (calendar_id,
         event_id), e.g. after the agent reschedules its own event — update
         its plan in place. created_at is set once and preserved across
-        later upserts; everything else always reflects the latest plan."""
+        later upserts; everything else always reflects the latest plan.
+
+        status/completed_at/marked_by (A1.5) are deliberately absent from
+        `payload` below — merge=True then leaves them completely untouched
+        on an existing document, which is what makes completion survive a
+        reschedule (see HabitSession's docstring for the invariant this
+        protects). Only a brand-new document gets an explicit starting
+        status, since there's no prior value to preserve."""
         session_id = habit_session_id_for(calendar_id, event_id)
         ref = self._habit_sessions(user_id).document(session_id)
 
@@ -585,6 +594,51 @@ class Store:
         }
         if not existing.exists:
             payload["created_at"] = now
+            payload["status"] = HABIT_SESSION_STATUS_PENDING
+        await ref.set(payload, merge=True)
+
+        updated = await ref.get()
+        return HabitSession.from_dict(session_id, updated.to_dict() or {})
+
+    async def set_habit_session_status(
+        self,
+        *,
+        user_id: str,
+        calendar_id: str,
+        event_id: str,
+        status: str,
+        marked_by: str,
+    ) -> HabitSession | None:
+        """Explicitly mark a session's completion state. Returns None if no
+        session exists for this (calendar_id, event_id) under this user, so
+        the route can turn that into a 404 rather than creating a record
+        via a side door that skips upsert_habit_session's own plan fields.
+
+        Idempotent: calling this again with the *same* status is a true
+        no-op — the existing record is returned unchanged, without even a
+        write, so completed_at doesn't keep drifting forward on repeated
+        calls. completed_at is only ever set when transitioning *to*
+        completed; transitioning to skipped clears it, since it would
+        otherwise misreport when a since-abandoned completion happened.
+        """
+        session_id = habit_session_id_for(calendar_id, event_id)
+        ref = self._habit_sessions(user_id).document(session_id)
+
+        snapshot = await ref.get()
+        if not snapshot.exists:
+            return None
+
+        current = snapshot.to_dict() or {}
+        if current.get("status") == status:
+            return HabitSession.from_dict(session_id, current)
+
+        now = utcnow()
+        payload = {
+            "status": status,
+            "marked_by": marked_by,
+            "updated_at": now,
+            "completed_at": now if status == HABIT_SESSION_STATUS_COMPLETED else None,
+        }
         await ref.set(payload, merge=True)
 
         updated = await ref.get()

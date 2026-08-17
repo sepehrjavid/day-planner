@@ -467,6 +467,144 @@ def test_list_habit_sessions_empty_by_default(client):
     assert body == {"sessions": []}
 
 
+def test_upsert_habit_session_defaults_to_pending_status(client):
+    """Three states, never two: a freshly-planned session is pending
+    (unknown), not implicitly anything else — see A1.5."""
+    body = _upsert_session(client).json()
+    assert body["status"] == "pending"
+    assert body["completed_at"] is None
+    assert body["marked_by"] is None
+
+
+def _set_status(client, **overrides):
+    body = {
+        "user_id": "u1",
+        "calendar_id": "me@gmail.com",
+        "event_id": "e1",
+        "status": "completed",
+        "marked_by": "user",
+    }
+    body.update(overrides)
+    return client.post("/internal/habit-sessions/status", json=body)
+
+
+def test_set_habit_session_status_requires_internal_caller(anon_client):
+    response = anon_client.post(
+        "/internal/habit-sessions/status",
+        json={
+            "user_id": "u1",
+            "calendar_id": "me@gmail.com",
+            "event_id": "e1",
+            "status": "completed",
+            "marked_by": "user",
+        },
+    )
+    assert response.status_code == 401
+
+
+def test_set_habit_session_status_marks_completed(client):
+    _upsert_session(client)
+    response = _set_status(client, status="completed", marked_by="user")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["marked_by"] == "user"
+    assert body["completed_at"] is not None
+
+
+def test_set_habit_session_status_marks_skipped_with_no_completed_at(client):
+    _upsert_session(client)
+    body = _set_status(client, status="skipped", marked_by="agent").json()
+    assert body["status"] == "skipped"
+    assert body["marked_by"] == "agent"
+    assert body["completed_at"] is None
+
+
+def test_set_habit_session_status_not_found_is_404(client):
+    response = _set_status(client, event_id="never-planned")
+    assert response.status_code == 404
+
+
+def test_set_habit_session_status_not_found_never_creates_a_session(client):
+    """A status call must never be a side door that creates a session
+    without a plan — upsert_habit_session (add_calendar_event/
+    update_calendar_event tagging a habit session) is the only writer of
+    the plan fields."""
+    _set_status(client, event_id="never-planned")
+    body = client.get(
+        "/internal/habit-sessions"
+        "?user_id=u1&planned_from=2026-01-01T00:00:00Z&planned_to=2027-01-01T00:00:00Z"
+    ).json()
+    assert body == {"sessions": []}
+
+
+def test_set_habit_session_status_is_idempotent(client):
+    """Marking complete twice must not keep bumping completed_at forward —
+    a genuine no-op on the second call, not just the same status value."""
+    _upsert_session(client)
+    first = _set_status(client, status="completed").json()
+
+    second = _set_status(client, status="completed").json()
+
+    assert second["completed_at"] == first["completed_at"]
+    assert second["updated_at"] == first["updated_at"]
+
+
+def test_set_habit_session_status_transition_updates_completed_at(client):
+    _upsert_session(client)
+    _set_status(client, status="skipped")
+
+    completed = _set_status(client, status="completed").json()
+    assert completed["status"] == "completed"
+    assert completed["completed_at"] is not None
+
+
+def test_set_habit_session_status_can_reset_to_pending(client):
+    """Resetting to pending (undoing a mis-mark, e.g. "actually I didn't
+    go") is an explicit mark like any other, not something the API
+    forbids — see A1.5 follow-up. Must also clear completed_at, the same
+    as a transition to skipped."""
+    _upsert_session(client)
+    _set_status(client, status="completed", marked_by="user")
+
+    reset = _set_status(client, status="pending", marked_by="user").json()
+    assert reset["status"] == "pending"
+    assert reset["completed_at"] is None
+
+
+def test_moved_and_completed_session_is_not_a_failure(client):
+    """The whole point of A1.5: a session the user moved and then actually
+    did must be reportable as a success, not a partial failure the
+    calendar diff alone would suggest."""
+    _upsert_session(client)
+    body = _set_status(client, status="completed", marked_by="user").json()
+    assert body["status"] == "completed"
+
+
+def test_completion_survives_a_reschedule(client):
+    """The reschedule-survival invariant (A1.5): upsert_habit_session runs
+    again every time update_calendar_event patches a habit-tagged event in
+    place — same (calendar_id, event_id), so the same document — and must
+    never reset a completion that was already recorded on it."""
+    _upsert_session(client)
+    completed = _set_status(client, status="completed", marked_by="user").json()
+
+    # Simulates update_calendar_event rescheduling the same tagged event —
+    # patched in place, so calendar_id/event_id (and the derived
+    # session_id) are unchanged.
+    rescheduled = _upsert_session(
+        client,
+        planned_start="2026-08-05T18:00:00-07:00",
+        planned_end="2026-08-05T18:30:00-07:00",
+    ).json()
+
+    assert rescheduled["session_id"] == completed["session_id"]
+    assert rescheduled["planned_start"] == "2026-08-05T18:00:00-07:00"
+    assert rescheduled["status"] == "completed"
+    assert rescheduled["marked_by"] == "user"
+    assert rescheduled["completed_at"] == completed["completed_at"]
+
+
 # ---------------------------------------------------------------------------
 # Zones
 # ---------------------------------------------------------------------------

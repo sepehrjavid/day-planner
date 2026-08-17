@@ -168,6 +168,33 @@ async def upsert_habit_session(
     return response.json()
 
 
+async def set_habit_session_status(
+    user_id: str,
+    *,
+    calendar_id: str,
+    event_id: str,
+    status: str,
+    marked_by: str = "agent",
+) -> dict | None:
+    """Returns None if no session is logged for this (calendar_id,
+    event_id) under this user (backend 404)."""
+    async with await _client() as client:
+        response = await client.post(
+            "/internal/habit-sessions/status",
+            json={
+                "user_id": user_id,
+                "calendar_id": calendar_id,
+                "event_id": event_id,
+                "status": status,
+                "marked_by": marked_by,
+            },
+        )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return response.json()
+
+
 async def list_habit_sessions(
     user_id: str, *, planned_from: str, planned_to: str
 ) -> list[dict]:

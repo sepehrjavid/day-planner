@@ -156,10 +156,11 @@ async def update_habit(
 
 async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: str) -> dict:
     """Compare the habit sessions the agent planned for a period against
-    what actually happened on the calendar — the "why do I keep missing
-    gym on Thursdays" feature. Only covers sessions add_calendar_event or
-    update_calendar_event tagged with a habit_id; a user-created event with
-    no habit tag never shows up here.
+    what actually happened — both whether the user actually did each one
+    (status) and what happened to it on the calendar (outcome). Only
+    covers sessions add_calendar_event or update_calendar_event tagged
+    with a habit_id; a user-created event with no habit tag never shows up
+    here.
 
     Call this when the user asks how their week/habits went, whether
     they're keeping up with something, or why a habit keeps failing —
@@ -179,16 +180,35 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
         A dict with "status". On "success", "sessions" is a list of
         planned habit sessions in the period, each with "habit_id",
         "habit_label", "planned_start", "planned_end", "event_id",
-        "calendar_id", and "outcome" — "kept" (still there, unchanged),
-        "moved" (still there, different time — could be a deliberate
-        reschedule or a conflict, "bumped_by" is the best signal for
-        which), or "gone" (deleted). Anything not "kept" also carries
-        "bumped_by": the title of whatever else now occupies that original
-        slot, or null if nothing does (the session was likely just
-        dropped, not displaced). Empty "sessions" means no habit session
-        was planned in this period at all — distinct from every one of
-        them being kept, so don't conflate the two when summarizing. On
-        "needs_auth"/"error", handle identically to get_calendar_events.
+        "calendar_id", "session_status", and "outcome".
+
+        "session_status" is the answer to *whether* it happened —
+        "completed", "skipped", or "pending" (nobody has said either way
+        yet; this is not itself a failure, never report it as one). Set
+        only via mark_habit_session or the user marking it themselves,
+        never inferred from calendar state. "completed_at"/"marked_by" are
+        set once "session_status" is "completed" or "skipped", else null.
+
+        "outcome" is the calendar diff, answering *why* — "kept" (still
+        there, unchanged), "moved" (still there, different time — could be
+        a deliberate reschedule or a conflict, "bumped_by" is the best
+        signal for which), or "gone" (deleted). Anything not "kept" also
+        carries "bumped_by": the title of whatever else now occupies that
+        original slot, or null if nothing does.
+
+        Read the two together, don't collapse them: "moved" + "completed"
+        is a successful reschedule, not a partial failure — report it as a
+        success. "gone" + "pending" is a session that was dropped with no
+        signal either way; "gone" + "completed" means the user did it and
+        then cleaned up the calendar entry, still a success. Only
+        "pending" sessions whose planned time has passed are worth
+        surfacing as open questions ("did you get to gym Tuesday?") —
+        never state or imply they didn't happen.
+
+        Empty "sessions" means no habit session was planned in this period
+        at all — distinct from every one of them being kept/completed, so
+        don't conflate the two when summarizing. On "needs_auth"/"error",
+        handle identically to get_calendar_events.
     """
     user_id = tool_context.session.user_id
 
@@ -226,6 +246,9 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
             "calendar_id": session["calendar_id"],
             "planned_start": session["planned_start"],
             "planned_end": session["planned_end"],
+            "session_status": session.get("status", "pending"),
+            "completed_at": session.get("completed_at"),
+            "marked_by": session.get("marked_by"),
             "outcome": outcome,
         }
         if outcome != "kept":
@@ -233,6 +256,68 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
         results.append(entry)
 
     return {"status": "success", "sessions": results}
+
+
+async def mark_habit_session(
+    tool_context: ToolContext, calendar_id: str, event_id: str, status: str
+) -> dict:
+    """Mark a planned habit session completed or skipped, so "I did the
+    gym this morning" or "I ended up skipping yoga" is captured as
+    first-class state — never infer this yourself from the event still
+    being on the calendar or from silence; only call this on the user's
+    explicit say-so. Also use this to undo a mis-mark ("actually I didn't
+    end up going" after marking it completed) by setting status back to
+    "pending" — resetting to unknown is itself an explicit mark, same as
+    any other transition, not something to avoid.
+
+    calendar_id and event_id must come from a prior get_calendar_events,
+    add_calendar_event, or review_habit_week result — never guess or ask
+    the user for them; call review_habit_week or get_calendar_events first
+    for the relevant period if you don't already have them from earlier in
+    the conversation.
+
+    Idempotent — marking a session with the status it already has is a
+    no-op, safe to call again if you're not sure it registered.
+
+    Args:
+        calendar_id: The calendar the session's event lives on, from a
+            prior result's "calendar_id" field.
+        event_id: The session's event id, from the same prior result's
+            "event_id" field.
+        status: "completed", "skipped", or "pending" (to reset a mis-mark
+            back to unknown).
+
+    Returns:
+        dict with "status" ("success", "not_found", or "error") and, on
+        success, "session" (habit_id, event_id, calendar_id,
+        session_status, completed_at, marked_by). "not_found" means no
+        habit session is logged for that calendar_id/event_id — call
+        review_habit_week or get_calendar_events first to find the right
+        one rather than guessing.
+    """
+    session = await backend_client.set_habit_session_status(
+        tool_context.session.user_id,
+        calendar_id=calendar_id,
+        event_id=event_id,
+        status=status,
+        marked_by="agent",
+    )
+    if session is None:
+        return {
+            "status": "not_found",
+            "message": f"No habit session logged for event {event_id!r}.",
+        }
+    return {
+        "status": "success",
+        "session": {
+            "habit_id": session["habit_id"],
+            "event_id": session["event_id"],
+            "calendar_id": session["calendar_id"],
+            "session_status": session["status"],
+            "completed_at": session.get("completed_at"),
+            "marked_by": session.get("marked_by"),
+        },
+    }
 
 
 def _same_instant(a: str, b: str) -> bool:
