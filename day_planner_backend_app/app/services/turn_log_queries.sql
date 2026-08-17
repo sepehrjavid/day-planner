@@ -20,9 +20,9 @@
 -- fields (turn_id, session_id, user_ref, tool_calls[] — each with name,
 -- args_fingerprint, duration_ms, status — model_calls, input_tokens,
 -- output_tokens, thinking_tokens, preload_ok, outcome, wall_ms,
--- loop_detected, habit_session_outcomes[] — each with habit_id,
--- session_status, outcome, hour_of_day, day_of_week, zone_constrained,
--- source — see turn_log.py's TurnRecorder.emit).
+-- loop_detected, habit_session_outcomes[] — each with session_ref,
+-- habit_id, session_status, outcome, hour_of_day, day_of_week,
+-- zone_constrained, source — see turn_log.py's TurnRecorder.emit).
 
 -- 1. Tokens per turn (input / output / thinking), and the distribution.
 SELECT
@@ -131,6 +131,26 @@ WHERE jsonPayload.turn_id = @turn_id;
 -- review_habit_week call); Roadmap 2's B2.2 will start writing "push"
 -- into the same schema once change-detection lands — filter or group on
 -- source once both exist so the two don't get silently averaged together.
+--
+-- DEDUP CAVEAT — review_habit_week reports every session in its date
+-- range, and instruction.md has the agent calling it proactively before
+-- every new period, so the same session is re-emitted on every review
+-- that happens to cover it. Every query below dedupes on
+-- hso.session_ref (a one-way hash of habit_session_id_for(calendar_id,
+-- event_id) — see habit_tools.py's _hash_session_ref; never the raw
+-- value, since calendar_id for a primary Google calendar is the user's
+-- own email address), keeping only the most recent observation per
+-- session so a session reviewed three times counts once, at its latest
+-- known status — not COUNT(*) over every observation.
+--
+-- PRELOAD CAVEAT — zone_constrained reads False whenever zones weren't
+-- preloaded for that session (including an A0.2 preload failure, not
+-- just "genuinely no zones"), so it's not reliable to treat False as
+-- confirmed unconstrained without checking. jsonPayload.preload_ok
+-- (A0.2/A1.1) is on the same top-level record as habit_session_outcomes
+-- — join or filter on it if you need to exclude turns where the
+-- guardrail preload itself failed, rather than mixing them silently into
+-- the zone_constrained = False bucket.
 -- =============================================================================
 
 -- 7a. Completion rate by habit. session_status is one of "pending",
@@ -139,49 +159,70 @@ WHERE jsonPayload.turn_id = @turn_id;
 -- placed session with a recorded outcome, not just completed+skipped, so
 -- a habit nobody has marked yet correctly shows a low rate with a
 -- visible pending_count explaining why, rather than looking abandoned.
+WITH latest_per_session AS (
+  SELECT
+    hso.*,
+    ROW_NUMBER() OVER (PARTITION BY hso.session_ref ORDER BY t.timestamp DESC) AS rn
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}` AS t,
+    UNNEST(t.jsonPayload.habit_session_outcomes) AS hso
+  WHERE t.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
 SELECT
-  hso.habit_id,
-  COUNTIF(hso.session_status = 'completed') AS completed_count,
-  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
-  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  habit_id,
+  COUNTIF(session_status = 'completed') AS completed_count,
+  COUNTIF(session_status = 'skipped') AS skipped_count,
+  COUNTIF(session_status = 'pending') AS pending_count,
   COUNT(*) AS total_sessions,
-  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
-FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
-  UNNEST(jsonPayload.habit_session_outcomes) AS hso
-WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-GROUP BY hso.habit_id
+  SAFE_DIVIDE(COUNTIF(session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM latest_per_session
+WHERE rn = 1
+GROUP BY habit_id
 ORDER BY total_sessions DESC;
 
 -- 7b. Completion rate by hour of day (0-23, the session's planned local
 -- start hour) — where in the day placements actually get done.
+WITH latest_per_session AS (
+  SELECT
+    hso.*,
+    ROW_NUMBER() OVER (PARTITION BY hso.session_ref ORDER BY t.timestamp DESC) AS rn
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}` AS t,
+    UNNEST(t.jsonPayload.habit_session_outcomes) AS hso
+  WHERE t.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
 SELECT
-  hso.hour_of_day,
-  COUNTIF(hso.session_status = 'completed') AS completed_count,
-  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
-  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  hour_of_day,
+  COUNTIF(session_status = 'completed') AS completed_count,
+  COUNTIF(session_status = 'skipped') AS skipped_count,
+  COUNTIF(session_status = 'pending') AS pending_count,
   COUNT(*) AS total_sessions,
-  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
-FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
-  UNNEST(jsonPayload.habit_session_outcomes) AS hso
-WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-GROUP BY hso.hour_of_day
-ORDER BY hso.hour_of_day;
+  SAFE_DIVIDE(COUNTIF(session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM latest_per_session
+WHERE rn = 1
+GROUP BY hour_of_day
+ORDER BY hour_of_day;
 
 -- 7c. Completion rate by day of week ("mon".."sun", the session's
 -- planned local day).
+WITH latest_per_session AS (
+  SELECT
+    hso.*,
+    ROW_NUMBER() OVER (PARTITION BY hso.session_ref ORDER BY t.timestamp DESC) AS rn
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}` AS t,
+    UNNEST(t.jsonPayload.habit_session_outcomes) AS hso
+  WHERE t.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
 SELECT
-  hso.day_of_week,
-  COUNTIF(hso.session_status = 'completed') AS completed_count,
-  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
-  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  day_of_week,
+  COUNTIF(session_status = 'completed') AS completed_count,
+  COUNTIF(session_status = 'skipped') AS skipped_count,
+  COUNTIF(session_status = 'pending') AS pending_count,
   COUNT(*) AS total_sessions,
-  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
-FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
-  UNNEST(jsonPayload.habit_session_outcomes) AS hso
-WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-GROUP BY hso.day_of_week
+  SAFE_DIVIDE(COUNTIF(session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM latest_per_session
+WHERE rn = 1
+GROUP BY day_of_week
 ORDER BY
-  CASE hso.day_of_week
+  CASE day_of_week
     WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4
     WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 7
   END;
@@ -189,19 +230,27 @@ ORDER BY
 -- 7d. Completion rate by whether a zone constrained the placement
 -- (habit_tools.py's _zone_constrains — a diagnostic overlap check
 -- against the zones preloaded for that session, not a hard-constraint
--- re-verification). Tests whether being squeezed into open time around a
--- zone predicts follow-through any differently than unconstrained time.
+-- re-verification; see the PRELOAD CAVEAT above). Tests whether being
+-- squeezed into open time around a zone predicts follow-through any
+-- differently than unconstrained time.
+WITH latest_per_session AS (
+  SELECT
+    hso.*,
+    ROW_NUMBER() OVER (PARTITION BY hso.session_ref ORDER BY t.timestamp DESC) AS rn
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}` AS t,
+    UNNEST(t.jsonPayload.habit_session_outcomes) AS hso
+  WHERE t.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
 SELECT
-  hso.zone_constrained,
-  COUNTIF(hso.session_status = 'completed') AS completed_count,
-  COUNTIF(hso.session_status = 'skipped') AS skipped_count,
-  COUNTIF(hso.session_status = 'pending') AS pending_count,
+  zone_constrained,
+  COUNTIF(session_status = 'completed') AS completed_count,
+  COUNTIF(session_status = 'skipped') AS skipped_count,
+  COUNTIF(session_status = 'pending') AS pending_count,
   COUNT(*) AS total_sessions,
-  SAFE_DIVIDE(COUNTIF(hso.session_status = 'completed'), COUNT(*)) AS completion_rate
-FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
-  UNNEST(jsonPayload.habit_session_outcomes) AS hso
-WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
-GROUP BY hso.zone_constrained;
+  SAFE_DIVIDE(COUNTIF(session_status = 'completed'), COUNT(*)) AS completion_rate
+FROM latest_per_session
+WHERE rn = 1
+GROUP BY zone_constrained;
 
 -- 8. Survival rate — DIAGNOSTIC ONLY, never a success measure (see the
 -- coverage caveat above). Share of sessions still present and unmoved
@@ -210,15 +259,28 @@ GROUP BY hso.zone_constrained;
 -- session that's still "pending" only means nobody deleted it, and a
 -- "moved" + "completed" session is a full success despite a survival
 -- rate of zero for that row. Use query 7 for the actual success metric.
+-- Dedup here uses the *earliest* observation per session, not latest
+-- like query 7 — outcome (the calendar diff) is about durability since
+-- placement, and the first review after placement is the most relevant
+-- one for that question; a much later review mostly reflects whatever
+-- has happened to the calendar since, not the original placement's
+-- survival.
+WITH earliest_per_session AS (
+  SELECT
+    hso.*,
+    ROW_NUMBER() OVER (PARTITION BY hso.session_ref ORDER BY t.timestamp ASC) AS rn
+  FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}` AS t,
+    UNNEST(t.jsonPayload.habit_session_outcomes) AS hso
+  WHERE t.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
 SELECT
-  COUNTIF(hso.outcome = 'kept') AS kept_count,
-  COUNTIF(hso.outcome = 'moved') AS moved_count,
-  COUNTIF(hso.outcome = 'gone') AS gone_count,
+  COUNTIF(outcome = 'kept') AS kept_count,
+  COUNTIF(outcome = 'moved') AS moved_count,
+  COUNTIF(outcome = 'gone') AS gone_count,
   COUNT(*) AS total_sessions,
-  SAFE_DIVIDE(COUNTIF(hso.outcome = 'kept'), COUNT(*)) AS survival_rate_diagnostic_only
-FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`,
-  UNNEST(jsonPayload.habit_session_outcomes) AS hso
-WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY);
+  SAFE_DIVIDE(COUNTIF(outcome = 'kept'), COUNT(*)) AS survival_rate_diagnostic_only
+FROM earliest_per_session
+WHERE rn = 1;
 
 -- 9. Restatement/correction signal — the user immediately re-does or
 -- corrects something in the very next turn, a negative on comprehension

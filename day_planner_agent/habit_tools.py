@@ -20,6 +20,7 @@ every other tool in this codebase — never a model-supplied argument.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime
 
@@ -43,6 +44,16 @@ logger = logging.getLogger(__name__)
 _HABIT_SESSION_OUTCOMES_STATE_KEY = "day_planner:habit_session_outcomes"
 
 _WEEKDAY_CODES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _hash_session_ref(calendar_id: str, event_id: str) -> str:
+    """One-way session identifier for telemetry dedup — see
+    _emit_habit_session_telemetry. Deliberately not the raw
+    habit_session_id_for(calendar_id, event_id) string: calendar_id for a
+    user's primary Google calendar *is* their email address, and A1.1's
+    redaction rule exists specifically to keep that kind of value out of
+    Cloud Logging."""
+    return hashlib.sha256(f"{calendar_id}__{event_id}".encode()).hexdigest()[:16]
 
 
 async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict:
@@ -363,6 +374,14 @@ def _emit_habit_session_telemetry(tool_context: ToolContext, sessions: list[dict
     agent- or user-triggered review_habit_week call; B2.2's future
     push-based path (Roadmap 2) will tag its own entries "push" into the
     same schema.
+
+    "session_ref" (_hash_session_ref) gives each entry a stable identity
+    so downstream queries can COUNT(DISTINCT session_ref) rather than
+    COUNT(*): review_habit_week reports every session in its date range,
+    and instruction.md has the agent calling it proactively before every
+    new period, so the same session is re-emitted on every review that
+    happens to cover it — without an identifier, a session reviewed three
+    times silently counts three times.
     """
     try:
         zones = tool_context.state.get(zone_tools.PRELOADED_ZONES_STATE_KEY) or []
@@ -375,6 +394,7 @@ def _emit_habit_session_telemetry(tool_context: ToolContext, sessions: list[dict
                 continue
             outcomes.append(
                 {
+                    "session_ref": _hash_session_ref(session["calendar_id"], session["event_id"]),
                     "habit_id": session["habit_id"],
                     "session_status": session["session_status"],
                     "outcome": session["outcome"],

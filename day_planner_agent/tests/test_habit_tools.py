@@ -672,3 +672,96 @@ def test_zone_constrains_false_with_no_zones():
 
     dt = datetime.fromisoformat("2026-08-04T10:00:00-07:00")
     assert habit_tools._zone_constrains(dt, []) is False
+
+
+# ---------------------------------------------------------------------------
+# session_ref (telemetry dedup identity — A1.4 follow-up)
+# ---------------------------------------------------------------------------
+
+
+async def test_telemetry_session_ref_is_stable_across_separate_reviews(tool_context, monkeypatch):
+    """The whole point of session_ref: the same session, reviewed in two
+    separate review_habit_week calls (as instruction.md's "call
+    proactively before every new period" guidance causes in practice),
+    must hash to the same value both times — that's what lets a query
+    COUNT(DISTINCT session_ref) instead of double-counting it."""
+    session = {
+        "habit_id": "h1",
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "planned_start": "2026-08-04T07:00:00-07:00",
+        "planned_end": "2026-08-04T07:30:00-07:00",
+    }
+    event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Gym",
+        "start_time": "2026-08-04T07:00:00-07:00",
+        "end_time": "2026-08-04T07:30:00-07:00",
+    }
+    _review_fixtures(monkeypatch, [session], [event])
+
+    await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    first_ref = tool_context.state["day_planner:habit_session_outcomes"][0]["session_ref"]
+
+    tool_context.state["day_planner:habit_session_outcomes"] = []
+    await habit_tools.review_habit_week(tool_context, "2026-08-03", "2026-08-10")
+    second_ref = tool_context.state["day_planner:habit_session_outcomes"][0]["session_ref"]
+
+    assert first_ref == second_ref
+
+
+async def test_telemetry_session_ref_differs_for_different_sessions(tool_context, monkeypatch):
+    sessions = [
+        {
+            "habit_id": "h1",
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T07:00:00-07:00",
+            "planned_end": "2026-08-04T07:30:00-07:00",
+        },
+        {
+            "habit_id": "h1",
+            "event_id": "e2",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-05T07:00:00-07:00",
+            "planned_end": "2026-08-05T07:30:00-07:00",
+        },
+    ]
+    events = [
+        {
+            "event_id": "e1",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-04T07:00:00-07:00",
+            "end_time": "2026-08-04T07:30:00-07:00",
+        },
+        {
+            "event_id": "e2",
+            "calendar_id": "me@gmail.com",
+            "title": "Gym",
+            "start_time": "2026-08-05T07:00:00-07:00",
+            "end_time": "2026-08-05T07:30:00-07:00",
+        },
+    ]
+    _review_fixtures(monkeypatch, sessions, events)
+
+    await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+
+    refs = [e["session_ref"] for e in tool_context.state["day_planner:habit_session_outcomes"]]
+    assert refs[0] != refs[1]
+
+
+def test_hash_session_ref_never_contains_the_raw_calendar_id():
+    """calendar_id for a primary Google calendar is the user's own email
+    address — the hash must never let it show up verbatim (see A0.6/A1.1's
+    redaction rule, which this exists to not violate)."""
+    ref = habit_tools._hash_session_ref("someone.private@gmail.com", "e1")
+    assert "someone.private@gmail.com" not in ref
+    assert "gmail" not in ref
+
+
+def test_hash_session_ref_is_deterministic():
+    a = habit_tools._hash_session_ref("me@gmail.com", "e1")
+    b = habit_tools._hash_session_ref("me@gmail.com", "e1")
+    assert a == b
