@@ -23,6 +23,14 @@ values, even with redaction on. Each call gets a one-way fingerprint
 (_fingerprint_args) computed unconditionally, independent of
 log_tool_args; three or more calls in a turn sharing both a tool name and
 a fingerprint sets loop_detected, which terraform/monitoring.tf alerts on.
+
+Habit session completion/survival telemetry (A1.4) rides the same
+state_delta channel preload_ok already established: review_habit_week
+writes its per-session outcomes into tool_context.state rather than its
+return value, so it reaches habit_session_outcomes here without adding a
+single token to what the model sees — see habit_tools.py's
+_emit_habit_session_telemetry and turn_log_queries.sql for the queries
+this feeds.
 """
 
 from __future__ import annotations
@@ -57,6 +65,13 @@ if not logger.handlers:
 # event's actions.state_delta first carries it, normally the first event
 # of the turn.
 _PRELOAD_OK_STATE_KEY = "day_planner:preload_ok"
+
+# Per-session completion/survival telemetry written by
+# day_planner_agent/habit_tools.py's review_habit_week (A1.4) — same
+# state_delta channel as preload_ok above, chosen specifically so this
+# data reaches here without adding a single token to what
+# review_habit_week returns to the model.
+_HABIT_SESSION_OUTCOMES_STATE_KEY = "day_planner:habit_session_outcomes"
 
 # Tools whose call arguments must never be logged even in diagnostic mode.
 # Response payloads are never logged for any tool (see module docstring),
@@ -114,6 +129,7 @@ class TurnRecorder:
     output_tokens: int = field(default=0, init=False)
     thinking_tokens: int = field(default=0, init=False)
     preload_ok: bool | None = field(default=None, init=False)
+    habit_session_outcomes: list = field(default_factory=list, init=False)
 
     def observe(self, event: dict) -> None:
         """Call once per event yielded by async_stream_query, in order."""
@@ -136,6 +152,14 @@ class TurnRecorder:
         state_delta = (event.get("actions") or {}).get("state_delta") or {}
         if _PRELOAD_OK_STATE_KEY in state_delta:
             self.preload_ok = state_delta[_PRELOAD_OK_STATE_KEY]
+        if _HABIT_SESSION_OUTCOMES_STATE_KEY in state_delta:
+            # Extended, not overwritten: review_habit_week can run more
+            # than once in a turn (different periods/habits), each call
+            # its own event with its own state_delta entry for this key —
+            # unlike preload_ok, which is only ever set once per session.
+            self.habit_session_outcomes.extend(
+                state_delta[_HABIT_SESSION_OUTCOMES_STATE_KEY] or []
+            )
 
     def _start_call(self, call: dict) -> None:
         name = call.get("name", "unknown")
@@ -210,6 +234,7 @@ class TurnRecorder:
             "outcome": outcome,
             "wall_ms": round(wall_ms, 1),
             "loop_detected": loop_detected,
+            "habit_session_outcomes": self.habit_session_outcomes,
         }
         # WARNING severity for a detected loop makes it visually distinct
         # in Cloud Logging on top of the boolean field itself — the

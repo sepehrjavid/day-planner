@@ -36,6 +36,16 @@ from google.adk.tools import ToolContext
 
 from . import backend_client
 
+# Session-state key agent.py's _preload_zones writes the preloaded zone
+# list to. Public here (rather than private in agent.py, which is where
+# it originated) so habit_tools.py can read the same cache for A1.4's
+# telemetry without a circular import (agent.py already imports this
+# module) or a second, redundant list_zones network call on every
+# review_habit_week — zones are already sitting in session state by the
+# time any tool runs, the same way agent.py's instruction-building reads
+# them.
+PRELOADED_ZONES_STATE_KEY = "day_planner:preloaded_zones"
+
 
 async def create_zone(
     tool_context: ToolContext,
