@@ -24,7 +24,13 @@ class FakeEventsResource:
     `pages`, when given, overrides `items`: each call to list().execute()
     returns the next raw response dict in order (so a test can hand back a
     `nextPageToken` and assert the follow-up call carries it), instead of
-    always returning the same single-page `{"items": items}` response."""
+    always returning the same single-page `{"items": items}` response.
+
+    `insert_effects`/`get_effects` (A2.3), when given, override `inserted`
+    for insert()/get(): each successive .execute() pops the next item —
+    an Exception instance is raised, anything else is returned — so a test
+    can script "503 then success" or "409 then a tombstoned get" without a
+    real Google Calendar retry loop."""
 
     def __init__(
         self,
@@ -32,31 +38,57 @@ class FakeEventsResource:
         pages: list[dict] | None = None,
         inserted: dict | None = None,
         patch_error: Exception | None = None,
+        insert_effects: list | None = None,
+        get_effects: list | None = None,
     ) -> None:
         self._items = items or []
         self._pages = pages
         self._inserted = inserted
         self._patch_error = patch_error
+        self._insert_effects = list(insert_effects) if insert_effects is not None else None
+        self._get_effects = list(get_effects) if get_effects is not None else None
         self.list_calls: list[dict] = []
         self.insert_calls: list[dict] = []
         self.patch_calls: list[dict] = []
+        self.get_calls: list[dict] = []
+        self._pending: str | None = None
 
     def list(self, **kwargs):
         self.list_calls.append(kwargs)
+        self._pending = "list"
         return self
 
     def insert(self, **kwargs):
         self.insert_calls.append(kwargs)
+        self._pending = "insert"
         return self
 
     def patch(self, **kwargs):
         self.patch_calls.append(kwargs)
+        self._pending = "patch"
+        return self
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        self._pending = "get"
         return self
 
     def execute(self):
-        if self.patch_calls and self._patch_error is not None:
-            raise self._patch_error
-        if self._inserted is not None:
+        if self._pending == "get":
+            effect = self._get_effects.pop(0)
+            if isinstance(effect, Exception):
+                raise effect
+            return effect
+        if self._pending == "patch":
+            if self._patch_error is not None:
+                raise self._patch_error
+            return self._inserted
+        if self._pending == "insert":
+            if self._insert_effects is not None:
+                effect = self._insert_effects.pop(0)
+                if isinstance(effect, Exception):
+                    raise effect
+                return effect
             return self._inserted
         if self._pages is not None:
             return self._pages[len(self.list_calls) - 1]
@@ -88,9 +120,15 @@ class FakeCalendarService:
         inserted: dict | None = None,
         calendar_list_entries: dict[str, dict] | None = None,
         patch_error: Exception | None = None,
+        insert_effects: list | None = None,
+        get_effects: list | None = None,
     ) -> None:
         self._events = FakeEventsResource(
-            items=items or [], inserted=inserted, patch_error=patch_error
+            items=items or [],
+            inserted=inserted,
+            patch_error=patch_error,
+            insert_effects=insert_effects,
+            get_effects=get_effects,
         )
         self._calendar_list = FakeCalendarListResource(calendar_list_entries or {})
 
@@ -1644,3 +1682,353 @@ async def test_add_calendar_event_cache_does_not_leak_across_invocations(monkeyp
     )
 
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# A2.3 — idempotency keys and retry-with-backoff on insert
+# ---------------------------------------------------------------------------
+
+
+async def _fast_sleep(_delay: float) -> None:
+    """Replaces calendar_tool._sleep in retry tests so backoff waits don't
+    actually elapse real time."""
+
+
+def _http_error(status: int) -> HttpError:
+    return HttpError(SimpleNamespace(status=status, reason="error"), b"{}")
+
+
+async def test_add_calendar_event_habit_tagged_insert_uses_deterministic_event_id(
+    tool_context, monkeypatch
+):
+    service = FakeCalendarService(
+        inserted=_google_inserted(
+            "whatever-google-echoes", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        ),
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    expected_id = calendar_tool._habit_session_event_id(
+        "user-1", "h1", "me@gmail.com", "2026-08-04T07:00:00-07:00"
+    )
+    assert service.events().insert_calls[0]["body"]["id"] == expected_id
+    # Calendar's own constraint on a caller-supplied id: base32hex, i.e.
+    # lowercase a-v and 0-9 only, 5-1024 characters.
+    assert 5 <= len(expected_id) <= 1024
+    assert all(c in "0123456789abcdefghijklmnopqrstuv" for c in expected_id)
+    # Deterministic: recomputing from the same inputs gets the same id, so
+    # a retried or re-issued call for the same logical session lands on it.
+    assert expected_id == calendar_tool._habit_session_event_id(
+        "user-1", "h1", "me@gmail.com", "2026-08-04T07:00:00-07:00"
+    )
+
+
+async def test_add_calendar_event_plain_appointment_uses_distinct_random_ids_for_two_calls(
+    tool_context, monkeypatch
+):
+    """Two separately-requested plain appointments that happen to share a
+    summary, calendar and start time are two real events, not a retry of
+    one another — a content-derived id would silently collapse them."""
+    service = FakeCalendarService(
+        insert_effects=[
+            _google_inserted(
+                "e1", "Drinks", "2026-08-04T20:00:00-07:00", "2026-08-04T21:00:00-07:00"
+            ),
+            _google_inserted(
+                "e2", "Drinks", "2026-08-04T20:00:00-07:00", "2026-08-04T21:00:00-07:00"
+            ),
+        ],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    first = await calendar_tool.add_calendar_event(
+        tool_context, "Drinks", "2026-08-04T20:00:00-07:00", "2026-08-04T21:00:00-07:00"
+    )
+    second = await calendar_tool.add_calendar_event(
+        tool_context, "Drinks", "2026-08-04T20:00:00-07:00", "2026-08-04T21:00:00-07:00"
+    )
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    insert_ids = [c["body"]["id"] for c in service.events().insert_calls]
+    assert len(insert_ids) == 2
+    assert insert_ids[0] != insert_ids[1]
+
+
+async def test_add_calendar_event_retries_after_503_then_succeeds(tool_context, monkeypatch):
+    service = FakeCalendarService(
+        insert_effects=[
+            _http_error(503),
+            _google_inserted("e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        ],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+    assert result["retry_count"] == 1
+    assert len(service.events().insert_calls) == 2
+
+
+async def test_add_calendar_event_retries_after_connection_error_then_succeeds(
+    tool_context, monkeypatch
+):
+    service = FakeCalendarService(
+        insert_effects=[
+            ConnectionError("boom"),
+            _google_inserted("e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        ],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+    assert result["retry_count"] == 1
+
+
+async def test_add_calendar_event_404_does_not_retry(tool_context, monkeypatch):
+    service = FakeCalendarService(
+        insert_effects=[_http_error(404)],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "error"
+    assert len(service.events().insert_calls) == 1
+
+
+async def test_add_calendar_event_409_with_live_existing_event_is_treated_as_success(
+    tool_context, monkeypatch
+):
+    existing_raw = {
+        "id": "some-id",
+        "status": "confirmed",
+        "summary": "Gym",
+        "start": {"dateTime": "2026-08-04T07:00:00-07:00"},
+        "end": {"dateTime": "2026-08-04T07:30:00-07:00"},
+        "htmlLink": "https://calendar.example/e",
+    }
+    service = FakeCalendarService(
+        insert_effects=[_http_error(409)],
+        get_effects=[existing_raw],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+    assert "retry_count" not in result
+    assert len(service.events().insert_calls) == 1
+    assert len(service.events().get_calls) == 1
+
+
+async def test_add_calendar_event_409_with_cancelled_existing_event_mints_fresh_id_and_retries(
+    tool_context, monkeypatch
+):
+    """Google retains a deleted event's id as a tombstone — a habit
+    session re-placed at a slot it once (and no longer) occupied can 409
+    against that tombstone. Reporting success there would leave the model
+    believing an event exists that doesn't."""
+    tombstoned = {"id": "gone", "status": "cancelled"}
+    service = FakeCalendarService(
+        insert_effects=[
+            _http_error(409),
+            _google_inserted("e2", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        ],
+        get_effects=[tombstoned],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+    assert result["retry_count"] == 1
+    insert_ids = [c["body"]["id"] for c in service.events().insert_calls]
+    deterministic_id = calendar_tool._habit_session_event_id(
+        "user-1", "h1", "me@gmail.com", "2026-08-04T07:00:00-07:00"
+    )
+    assert insert_ids == [deterministic_id, insert_ids[1]]
+    assert insert_ids[1] != deterministic_id
+
+
+async def test_add_calendar_event_409_with_missing_existing_event_mints_fresh_id_and_retries(
+    tool_context, monkeypatch
+):
+    """A 404 fetching the "existing" event behind a 409 is the same
+    tombstone case as a cancelled event — the id is unusable, not proof of
+    a prior success."""
+    service = FakeCalendarService(
+        insert_effects=[
+            _http_error(409),
+            _google_inserted("e2", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+        ],
+        get_effects=[_http_error(404)],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "success"
+    assert result["retry_count"] == 1
+
+
+async def test_add_calendar_event_placing_same_habit_session_twice_yields_one_event(
+    tool_context, monkeypatch
+):
+    """The literal acceptance criterion: two separate add_calendar_event
+    calls for the same habit at the same planned_start — not a retry of
+    one call, two genuinely separate tool invocations — create one
+    calendar event, not two."""
+    live_after_first_insert = {
+        "id": "e1",
+        "status": "confirmed",
+        "summary": "Gym",
+        "start": {"dateTime": "2026-08-04T07:00:00-07:00"},
+        "end": {"dateTime": "2026-08-04T07:30:00-07:00"},
+        "htmlLink": "https://calendar.example/e",
+    }
+    service = FakeCalendarService(
+        insert_effects=[
+            _google_inserted("e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"),
+            _http_error(409),
+        ],
+        get_effects=[live_after_first_insert],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    first = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+    second = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    assert first["event"]["event_id"] == second["event"]["event_id"] == "e1"
+    assert len(service.events().insert_calls) == 2
+    insert_ids = [c["body"]["id"] for c in service.events().insert_calls]
+    assert insert_ids[0] == insert_ids[1]
+
+
+async def test_add_calendar_event_gives_up_after_max_attempts_on_persistent_503(
+    tool_context, monkeypatch
+):
+    service = FakeCalendarService(
+        insert_effects=[_http_error(503) for _ in range(10)],
+        calendar_list_entries={"me@gmail.com": {"accessRole": "owner"}},
+    )
+
+    monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
+    monkeypatch.setattr(backend_client, "access_token", _access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+    monkeypatch.setattr(calendar_tool, "_sleep", _fast_sleep)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        habit_id="h1",
+    )
+
+    assert result["status"] == "error"
+    assert len(service.events().insert_calls) == calendar_tool._MAX_INSERT_ATTEMPTS
