@@ -133,3 +133,25 @@ def test_returns_session_on_success(anon_client, user, monkeypatch):
     body = response.json()
     assert body["status"] == "skipped"
     assert body["completed_at"] is None
+
+
+def test_can_reset_status_to_pending(anon_client, user, monkeypatch):
+    """Undoing a mis-mark is a valid transition, not just forward marks."""
+    calls = []
+
+    async def fake_set_status(settings, **kwargs):
+        calls.append(kwargs)
+        return _session_payload(status="pending", completed_at=None, marked_by="user")
+
+    monkeypatch.setattr(internal_client, "set_habit_session_status", fake_set_status)
+    _, headers = user
+
+    response = anon_client.post(
+        "/me/habit-sessions/status",
+        json={"calendar_id": "me@gmail.com", "event_id": "e1", "status": "pending"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert calls[0]["status"] == "pending"
+    assert response.json()["status"] == "pending"

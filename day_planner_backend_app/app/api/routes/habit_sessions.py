@@ -25,9 +25,10 @@ async def mark_habit_session(
     user_id: str = Depends(current_user_id),
     settings: Settings = Depends(get_settings),
 ):
-    """Mark a planned habit session completed or skipped. calendar_id and
-    event_id identify which session, the same pair the agent already
-    surfaces on habit sessions from get_calendar_events/review_habit_week.
+    """Mark a planned habit session completed, skipped, or back to
+    pending (correcting a mis-mark). calendar_id and event_id identify
+    which session, the same pair the agent already surfaces on habit
+    sessions from get_calendar_events/review_habit_week.
 
     marked_by is hardcoded "user" here — never something the client
     supplies — since this route is specifically the human directly

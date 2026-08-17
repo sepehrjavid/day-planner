@@ -290,11 +290,12 @@ async def list_habit_sessions(
 async def set_habit_session_status(
     body: SetHabitSessionStatusRequest, store: Store = Depends(get_store)
 ):
-    """Explicitly mark a planned habit session completed or skipped — the
-    first-class completion state review_habit_week now reports alongside
-    its calendar diff (A1.5). Called by day_planner_agent's mark_habit_session
-    tool (marked_by="agent") and day_planner_backend_app's user-facing route
-    (marked_by="user"). Idempotent — see Store.set_habit_session_status."""
+    """Explicitly mark a planned habit session completed, skipped, or
+    back to pending — the first-class completion state review_habit_week
+    now reports alongside its calendar diff (A1.5). Called by
+    day_planner_agent's mark_habit_session tool (marked_by="agent") and
+    day_planner_backend_app's user-facing route (marked_by="user").
+    Idempotent — see Store.set_habit_session_status."""
     session = await store.set_habit_session_status(
         user_id=body.user_id,
         calendar_id=body.calendar_id,

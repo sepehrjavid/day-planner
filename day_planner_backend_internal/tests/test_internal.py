@@ -559,6 +559,19 @@ def test_set_habit_session_status_transition_updates_completed_at(client):
     assert completed["completed_at"] is not None
 
 
+def test_set_habit_session_status_can_reset_to_pending(client):
+    """Resetting to pending (undoing a mis-mark, e.g. "actually I didn't
+    go") is an explicit mark like any other, not something the API
+    forbids — see A1.5 follow-up. Must also clear completed_at, the same
+    as a transition to skipped."""
+    _upsert_session(client)
+    _set_status(client, status="completed", marked_by="user")
+
+    reset = _set_status(client, status="pending", marked_by="user").json()
+    assert reset["status"] == "pending"
+    assert reset["completed_at"] is None
+
+
 def test_moved_and_completed_session_is_not_a_failure(client):
     """The whole point of A1.5: a session the user moved and then actually
     did must be reportable as a success, not a partial failure the

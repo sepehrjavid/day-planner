@@ -406,6 +406,31 @@ async def test_mark_habit_session_not_found(tool_context, monkeypatch):
     assert result["status"] == "not_found"
 
 
+async def test_mark_habit_session_can_reset_to_pending(tool_context, monkeypatch):
+    """Undoing a mis-mark ("actually I didn't end up going") is a valid
+    use of this tool, not just forward marks to completed/skipped."""
+    seen = {}
+
+    async def set_habit_session_status(user_id, *, calendar_id, event_id, status, marked_by):
+        seen["status"] = status
+        return {
+            "habit_id": "h1",
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+            "status": status,
+            "completed_at": None,
+            "marked_by": marked_by,
+        }
+
+    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+
+    result = await habit_tools.mark_habit_session(tool_context, "me@gmail.com", "e1", "pending")
+
+    assert result["status"] == "success"
+    assert result["session"]["session_status"] == "pending"
+    assert seen["status"] == "pending"
+
+
 async def test_mark_habit_session_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
     assert "user_id" not in habit_tools.mark_habit_session.__code__.co_varnames[
         : habit_tools.mark_habit_session.__code__.co_argcount

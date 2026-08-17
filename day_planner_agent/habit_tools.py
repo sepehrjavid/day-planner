@@ -265,7 +265,10 @@ async def mark_habit_session(
     gym this morning" or "I ended up skipping yoga" is captured as
     first-class state — never infer this yourself from the event still
     being on the calendar or from silence; only call this on the user's
-    explicit say-so.
+    explicit say-so. Also use this to undo a mis-mark ("actually I didn't
+    end up going" after marking it completed) by setting status back to
+    "pending" — resetting to unknown is itself an explicit mark, same as
+    any other transition, not something to avoid.
 
     calendar_id and event_id must come from a prior get_calendar_events,
     add_calendar_event, or review_habit_week result — never guess or ask
@@ -281,8 +284,8 @@ async def mark_habit_session(
             prior result's "calendar_id" field.
         event_id: The session's event id, from the same prior result's
             "event_id" field.
-        status: "completed" or "skipped". There is no way to mark a
-            session back to pending — only forward, explicit marks.
+        status: "completed", "skipped", or "pending" (to reset a mis-mark
+            back to unknown).
 
     Returns:
         dict with "status" ("success", "not_found", or "error") and, on

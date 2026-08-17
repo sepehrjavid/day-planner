@@ -19,11 +19,13 @@ from pydantic import BaseModel, Field
 
 from .calendars import InternalUserRequest
 
-# "pending" is deliberately not settable here — it's the implicit starting
-# state (see db/models.py's HABIT_SESSION_STATUS_PENDING), never something
-# to explicitly mark back to. No un-marking; see A1.5's "explicit marks
-# only" scope boundary.
-HabitSessionStatus = Literal["completed", "skipped"]
+# "pending" is settable here too, not just the implicit starting state
+# (see db/models.py's HABIT_SESSION_STATUS_PENDING) — an explicit reset
+# back to unknown, e.g. correcting a mis-mark ("I said completed but I
+# actually didn't go"), is itself an explicit mark, same as any other
+# transition, and A1.5's "explicit marks only" scope boundary is about
+# never *inferring* a status, not about which statuses can be set.
+HabitSessionStatus = Literal["pending", "completed", "skipped"]
 MarkedBy = Literal["user", "agent"]
 
 

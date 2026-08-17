@@ -1,9 +1,9 @@
 """Request/response models for /me/habit-sessions/status (A1.5).
 
-status only accepts "completed"/"skipped" — "pending" is the implicit
-starting state a session already has, never something to mark it back to
-(no un-marking; see day_planner_backend_internal's identical
-HabitSessionStatus for the same reasoning). marked_by is not a field a
+status accepts "pending" too, not just "completed"/"skipped" — resetting
+back to unknown (correcting a mis-mark) is itself an explicit action, the
+same as any other transition; see day_planner_backend_internal's identical
+HabitSessionStatus for the same reasoning. marked_by is not a field a
 client can set — the route hardcodes "user", since this is the human
 directly marking their own session, mirroring day_planner_agent's
 mark_habit_session tool hardcoding "agent" on its side of the same
@@ -15,7 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-HabitSessionStatus = Literal["completed", "skipped"]
+HabitSessionStatus = Literal["pending", "completed", "skipped"]
 
 
 class MarkHabitSessionRequest(BaseModel):
