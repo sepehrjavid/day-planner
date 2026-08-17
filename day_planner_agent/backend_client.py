@@ -1,18 +1,25 @@
 """HTTP client for day_planner_backend_internal.
 
-Owns the one thing every call to the internal backend needs: minting this
-runtime's own OIDC identity token. No calendar or OAuth credential lives
-here at all — day_planner_backend_internal owns all of that; this module
-only ever holds a short-lived bearer token for authenticating *to* the
-backend, minted fresh per call from this runtime's own service account via
-the metadata server (works on any GCP compute environment, Agent Engine
-included, with zero credentials checked into this codebase).
+Owns the two things every call to the internal backend needs: minting
+this runtime's own OIDC identity token, and the HTTP connection itself.
+No calendar or OAuth credential lives here at all — day_planner_backend_internal
+owns all of that; this module only ever holds a short-lived bearer token
+for authenticating *to* the backend, minted from this runtime's own
+service account via the metadata server (works on any GCP compute
+environment, Agent Engine included, with zero credentials checked into
+this codebase).
+
+Both the token and the HTTP client are cached at module scope and reused
+across calls (A2.1) — a planning turn makes roughly 28 backend calls, and
+minting a fresh token plus a fresh TLS handshake for every single one was
+the single highest-payoff fix in the roadmap this came from.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 import httpx
 from google.auth.transport.requests import Request
@@ -21,6 +28,11 @@ from google.oauth2 import id_token as google_id_token
 INTERNAL_BACKEND_URL = os.environ["INTERNAL_BACKEND_URL"].rstrip("/")
 
 _TIMEOUT = httpx.Timeout(10.0)
+
+# OIDC ID tokens minted this way are valid ~1 hour; refresh a few minutes
+# early so a token that's about to expire is never handed to a request
+# that might still be in flight when it does.
+_TOKEN_TTL_SECONDS = 55 * 60
 
 
 class NeedsAuth(Exception):
@@ -41,20 +53,61 @@ async def _mint_id_token() -> str:
     )
 
 
-async def _client() -> httpx.AsyncClient:
-    token = await _mint_id_token()
-    return httpx.AsyncClient(
-        base_url=INTERNAL_BACKEND_URL,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=_TIMEOUT,
-    )
+_token: str | None = None
+_token_minted_at: float = 0.0
+_token_lock = asyncio.Lock()
+
+
+async def _get_id_token() -> str:
+    """Cached and refreshed ~5 minutes before its actual ~1-hour expiry.
+
+    Double-checked locking, mirroring day_planner_backend_app's
+    agent_client.py -> _get_app: the cheap unlocked check handles the
+    overwhelmingly common case (token already fresh) without ever
+    touching the lock; the lock only matters for the rare race where
+    several concurrent calls all see an expired/missing token at once and
+    would otherwise each mint their own.
+    """
+    global _token, _token_minted_at
+    if _token is None or (time.monotonic() - _token_minted_at) >= _TOKEN_TTL_SECONDS:
+        async with _token_lock:
+            if _token is None or (time.monotonic() - _token_minted_at) >= _TOKEN_TTL_SECONDS:
+                _token = await _mint_id_token()
+                _token_minted_at = time.monotonic()
+    return _token
+
+
+_http_client: httpx.AsyncClient | None = None
+_http_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> httpx.AsyncClient:
+    """Built lazily on first use, not at import, and held for the
+    runtime's whole lifetime rather than one-per-call — connections get
+    pooled and reused instead of a fresh TLS handshake on every one of a
+    turn's ~28 backend calls. The Authorization header is deliberately
+    *not* set here: it rotates roughly every 55 minutes (see
+    _get_id_token) and this client outlives many such rotations, so it's
+    attached per-request via _auth_headers instead."""
+    global _http_client
+    if _http_client is None:
+        async with _http_client_lock:
+            if _http_client is None:
+                _http_client = httpx.AsyncClient(base_url=INTERNAL_BACKEND_URL, timeout=_TIMEOUT)
+    return _http_client
+
+
+async def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {await _get_id_token()}"}
 
 
 async def connect_link(user_id: str, *, provider: str = "google") -> str:
-    async with await _client() as client:
-        response = await client.post(
-            "/internal/connect-link", json={"user_id": user_id, "provider": provider}
-        )
+    client = await _get_client()
+    response = await client.post(
+        "/internal/connect-link",
+        json={"user_id": user_id, "provider": provider},
+        headers=await _auth_headers(),
+    )
     response.raise_for_status()
     return response.json()["connect_url"]
 
@@ -65,8 +118,10 @@ async def list_calendars(user_id: str) -> dict:
 
     Raises NeedsAuth if nothing is connected yet at all.
     """
-    async with await _client() as client:
-        response = await client.get("/internal/calendars", params={"user_id": user_id})
+    client = await _get_client()
+    response = await client.get(
+        "/internal/calendars", params={"user_id": user_id}, headers=await _auth_headers()
+    )
     response.raise_for_status()
     body = response.json()
 
@@ -86,11 +141,12 @@ async def access_token(user_id: str, account_id: str) -> str | None:
     between the two calls. The caller decides whether to skip just that
     account's calendars or treat it as fatal.
     """
-    async with await _client() as client:
-        response = await client.post(
-            "/internal/access-token",
-            json={"user_id": user_id, "account_id": account_id},
-        )
+    client = await _get_client()
+    response = await client.post(
+        "/internal/access-token",
+        json={"user_id": user_id, "account_id": account_id},
+        headers=await _auth_headers(),
+    )
     if response.status_code == 409:
         return None
     response.raise_for_status()
@@ -98,10 +154,12 @@ async def access_token(user_id: str, account_id: str) -> str | None:
 
 
 async def create_habit(user_id: str, *, label: str, goal: str) -> dict:
-    async with await _client() as client:
-        response = await client.post(
-            "/internal/habits", json={"user_id": user_id, "label": label, "goal": goal}
-        )
+    client = await _get_client()
+    response = await client.post(
+        "/internal/habits",
+        json={"user_id": user_id, "label": label, "goal": goal},
+        headers=await _auth_headers(),
+    )
     response.raise_for_status()
     return response.json()
 
@@ -110,8 +168,10 @@ async def list_habits(user_id: str, *, status: str | None = None) -> list[dict]:
     params: dict = {"user_id": user_id}
     if status is not None:
         params["status"] = status
-    async with await _client() as client:
-        response = await client.get("/internal/habits", params=params)
+    client = await _get_client()
+    response = await client.get(
+        "/internal/habits", params=params, headers=await _auth_headers()
+    )
     response.raise_for_status()
     return response.json()["habits"]
 
@@ -135,8 +195,10 @@ async def update_habit(
         body["status"] = status
     if allowed_zones is not None:
         body["allowed_zones"] = allowed_zones
-    async with await _client() as client:
-        response = await client.post("/internal/habits/update", json=body)
+    client = await _get_client()
+    response = await client.post(
+        "/internal/habits/update", json=body, headers=await _auth_headers()
+    )
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -152,18 +214,19 @@ async def upsert_habit_session(
     planned_start: str,
     planned_end: str,
 ) -> dict:
-    async with await _client() as client:
-        response = await client.post(
-            "/internal/habit-sessions",
-            json={
-                "user_id": user_id,
-                "habit_id": habit_id,
-                "event_id": event_id,
-                "calendar_id": calendar_id,
-                "planned_start": planned_start,
-                "planned_end": planned_end,
-            },
-        )
+    client = await _get_client()
+    response = await client.post(
+        "/internal/habit-sessions",
+        json={
+            "user_id": user_id,
+            "habit_id": habit_id,
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+            "planned_start": planned_start,
+            "planned_end": planned_end,
+        },
+        headers=await _auth_headers(),
+    )
     response.raise_for_status()
     return response.json()
 
@@ -178,17 +241,18 @@ async def set_habit_session_status(
 ) -> dict | None:
     """Returns None if no session is logged for this (calendar_id,
     event_id) under this user (backend 404)."""
-    async with await _client() as client:
-        response = await client.post(
-            "/internal/habit-sessions/status",
-            json={
-                "user_id": user_id,
-                "calendar_id": calendar_id,
-                "event_id": event_id,
-                "status": status,
-                "marked_by": marked_by,
-            },
-        )
+    client = await _get_client()
+    response = await client.post(
+        "/internal/habit-sessions/status",
+        json={
+            "user_id": user_id,
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "status": status,
+            "marked_by": marked_by,
+        },
+        headers=await _auth_headers(),
+    )
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -198,11 +262,12 @@ async def set_habit_session_status(
 async def list_habit_sessions(
     user_id: str, *, planned_from: str, planned_to: str
 ) -> list[dict]:
-    async with await _client() as client:
-        response = await client.get(
-            "/internal/habit-sessions",
-            params={"user_id": user_id, "planned_from": planned_from, "planned_to": planned_to},
-        )
+    client = await _get_client()
+    response = await client.get(
+        "/internal/habit-sessions",
+        params={"user_id": user_id, "planned_from": planned_from, "planned_to": planned_to},
+        headers=await _auth_headers(),
+    )
     response.raise_for_status()
     return response.json()["sessions"]
 
@@ -210,24 +275,27 @@ async def list_habit_sessions(
 async def create_zone(
     user_id: str, *, label: str, start_time: str, end_time: str, days_of_week: list[str]
 ) -> dict:
-    async with await _client() as client:
-        response = await client.post(
-            "/internal/zones",
-            json={
-                "user_id": user_id,
-                "label": label,
-                "start_time": start_time,
-                "end_time": end_time,
-                "days_of_week": days_of_week,
-            },
-        )
+    client = await _get_client()
+    response = await client.post(
+        "/internal/zones",
+        json={
+            "user_id": user_id,
+            "label": label,
+            "start_time": start_time,
+            "end_time": end_time,
+            "days_of_week": days_of_week,
+        },
+        headers=await _auth_headers(),
+    )
     response.raise_for_status()
     return response.json()
 
 
 async def list_zones(user_id: str) -> list[dict]:
-    async with await _client() as client:
-        response = await client.get("/internal/zones", params={"user_id": user_id})
+    client = await _get_client()
+    response = await client.get(
+        "/internal/zones", params={"user_id": user_id}, headers=await _auth_headers()
+    )
     response.raise_for_status()
     return response.json()["zones"]
 
@@ -251,8 +319,10 @@ async def update_zone(
         body["end_time"] = end_time
     if days_of_week is not None:
         body["days_of_week"] = days_of_week
-    async with await _client() as client:
-        response = await client.post("/internal/zones/update", json=body)
+    client = await _get_client()
+    response = await client.post(
+        "/internal/zones/update", json=body, headers=await _auth_headers()
+    )
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -261,8 +331,10 @@ async def update_zone(
 
 async def get_sleep_schedule(user_id: str) -> dict | None:
     """Returns None if the user has never set a sleep schedule."""
-    async with await _client() as client:
-        response = await client.get("/internal/sleep-schedule", params={"user_id": user_id})
+    client = await _get_client()
+    response = await client.get(
+        "/internal/sleep-schedule", params={"user_id": user_id}, headers=await _auth_headers()
+    )
     response.raise_for_status()
     body = response.json()
     return body["schedule"] if body["exists"] else None
@@ -290,7 +362,9 @@ async def set_sleep_schedule(
         body["wake_up_buffer_minutes"] = wake_up_buffer_minutes
     if day_overrides is not None:
         body["day_overrides"] = day_overrides
-    async with await _client() as client:
-        response = await client.post("/internal/sleep-schedule", json=body)
+    client = await _get_client()
+    response = await client.post(
+        "/internal/sleep-schedule", json=body, headers=await _auth_headers()
+    )
     response.raise_for_status()
     return response.json()
