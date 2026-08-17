@@ -221,7 +221,7 @@ async def add_calendar_event(
         saw_any_token = True
         try:
             entry = await _cached_calendar_list_entry(
-                tool_context, token, candidate["calendar_id"]
+                tool_context, candidate["account_id"], token, candidate["calendar_id"]
             )
         except HttpError as exc:
             return {"status": "error", "error_message": str(exc)}
@@ -487,18 +487,22 @@ async def _cached_list_calendars(tool_context: ToolContext, user_id: str) -> dic
 
 
 async def _cached_calendar_list_entry(
-    tool_context: ToolContext, access_token: str, calendar_id: str
+    tool_context: ToolContext, account_id: str, access_token: str, calendar_id: str
 ) -> dict:
-    """Memoized per invocation, keyed on calendar_id alone — within one
-    invocation the same calendar_id always resolves to the same
-    accessRole/timeZone regardless of exactly which token fetched it, so
-    a second add_calendar_event call targeting the same calendar reuses
-    the first's result instead of hitting Google again (A2.2)."""
+    """Memoized per invocation, keyed on (account_id, calendar_id) —
+    deliberately *not* calendar_id alone. accessRole is per-caller by
+    nature (see _fetch_calendar_list_entry's own docstring: a plain
+    Calendar resource has no accessRole at all, only the caller's own
+    CalendarList entry does), so the same calendar_id shared across two
+    of the user's connected accounts can carry a different accessRole for
+    each — keying on calendar_id alone would let one account's cached
+    role silently answer the other account's lookup."""
     cache = tool_context.state.setdefault(_invocation_cache_key(tool_context), {})
     entries = cache.setdefault("calendar_list_entries", {})
-    if calendar_id not in entries:
-        entries[calendar_id] = await _fetch_calendar_list_entry(access_token, calendar_id)
-    return entries[calendar_id]
+    key = f"{account_id}:{calendar_id}"
+    if key not in entries:
+        entries[key] = await _fetch_calendar_list_entry(access_token, calendar_id)
+    return entries[key]
 
 
 def _candidate_calendars(calendars: list[dict], calendar_summary: str | None) -> list[dict]:

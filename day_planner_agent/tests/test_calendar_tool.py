@@ -1522,6 +1522,85 @@ async def test_add_calendar_event_memoizes_calendar_list_entry_within_one_invoca
     assert service.calendarList().get_calls == [{"calendarId": "me@gmail.com"}]
 
 
+async def test_add_calendar_event_shared_calendar_gets_correct_role_per_account(
+    tool_context, monkeypatch
+):
+    """A calendar shared across two of the user's connected accounts can
+    carry a different accessRole for each — accessRole is per-caller, not
+    a property of the calendar itself (see _fetch_calendar_list_entry's
+    own docstring). The cache must not let the first account's cached
+    role silently answer the second account's lookup of the same
+    calendar_id (review follow-up to A2.2)."""
+
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-work",
+                    "calendar_id": "shared@group.calendar.google.com",
+                    "summary": "Shared",
+                    "is_primary": False,
+                },
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "shared@group.calendar.google.com",
+                    "summary": "Shared",
+                    "is_primary": False,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    # Same calendar_id, different accessRole depending on which account's
+    # token is asking — work only reads it, personal can write to it.
+    work_service = FakeCalendarService(
+        calendar_list_entries={
+            "shared@group.calendar.google.com": {"accessRole": "reader", "summary": "Shared"}
+        }
+    )
+    personal_service = FakeCalendarService(
+        inserted=_google_inserted(
+            "e1", "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+        ),
+        calendar_list_entries={
+            "shared@group.calendar.google.com": {"accessRole": "writer"}
+        },
+    )
+
+    def fake_build(service_name, version, credentials):
+        return work_service if credentials.token == "AT-acct-work" else personal_service
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", fake_build)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context,
+        "Gym",
+        "2026-08-04T07:00:00-07:00",
+        "2026-08-04T07:30:00-07:00",
+        calendar_summary="Shared",
+    )
+
+    # If the cache incorrectly keyed on calendar_id alone, the personal
+    # account's lookup would reuse work's cached "reader" entry, and this
+    # would come back not_writable instead of success.
+    assert result["status"] == "success"
+    assert personal_service.events().insert_calls[0]["calendarId"] == (
+        "shared@group.calendar.google.com"
+    )
+    assert work_service.calendarList().get_calls == [
+        {"calendarId": "shared@group.calendar.google.com"}
+    ]
+    assert personal_service.calendarList().get_calls == [
+        {"calendarId": "shared@group.calendar.google.com"}
+    ]
+
+
 async def test_add_calendar_event_cache_does_not_leak_across_invocations(monkeypatch):
     """Out of scope, made explicit: caching is per-invocation only. A
     second, later invocation (a new turn) must not reuse the first's
