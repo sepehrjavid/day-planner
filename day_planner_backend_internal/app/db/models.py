@@ -17,6 +17,17 @@ HABIT_STATUS_ACTIVE = "active"
 HABIT_STATUS_PAUSED = "paused"
 HABIT_STATUS_ARCHIVED = "archived"
 
+# HabitSession.status — three states, never two. PENDING means unknown,
+# not failed; nothing may impute SKIPPED from an untouched PENDING session
+# (see A1.5 in docs/roadmaps/1-agent.md — that would silently poison every
+# metric built on this field).
+HABIT_SESSION_STATUS_PENDING = "pending"
+HABIT_SESSION_STATUS_COMPLETED = "completed"
+HABIT_SESSION_STATUS_SKIPPED = "skipped"
+
+MARKED_BY_USER = "user"
+MARKED_BY_AGENT = "agent"
+
 # Canonical day-of-week codes shared by Zone.days_of_week and
 # SleepSchedule.day_overrides, so both entities key days the same way.
 DAYS_OF_WEEK = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -207,6 +218,24 @@ class HabitSession:
     list_habit_sessions can run a native chronological range query rather
     than a string-lexicographic one — two events in different UTC offsets
     don't sort the same way as strings that they do as instants.
+
+    status/completed_at/marked_by (A1.5) are first-class completion state,
+    separate from whether the calendar event still exists — the calendar
+    diff review_habit_week already did (kept/moved/gone) measures plan
+    *durability*, not whether the user actually did the thing. Set only via
+    Store.set_habit_session_status, never implied from calendar state.
+
+    Invariant: completion must survive a reschedule. upsert_habit_session
+    is called again on every update_calendar_event patch to a
+    habit-tagged event, and since that patches the event in place,
+    (calendar_id, event_id) — and so habit_session_id_for's key — never
+    changes across a reschedule, and upsert_habit_session preserves
+    status/completed_at/marked_by rather than resetting them. A path that
+    *deletes and recreates* the event instead would produce a new key and
+    orphan the completion; no such path exists in this codebase today
+    (calendar_tool.py's update_calendar_event always patches), and adding
+    one is forbidden by this contract unless it's also taught to carry
+    status forward explicitly.
     """
 
     session_id: str
@@ -217,6 +246,9 @@ class HabitSession:
     planned_end: datetime
     created_at: datetime
     updated_at: datetime
+    status: str = HABIT_SESSION_STATUS_PENDING
+    completed_at: datetime | None = None
+    marked_by: str | None = None
 
     @staticmethod
     def from_dict(session_id: str, data: dict) -> "HabitSession":
@@ -229,6 +261,12 @@ class HabitSession:
             planned_end=data["planned_end"],
             created_at=data["created_at"],
             updated_at=data["updated_at"],
+            # .get with a default: documents written before A1.5 have
+            # neither field — must read back as PENDING (unknown), not
+            # crash and not silently read as some other status.
+            status=data.get("status", HABIT_SESSION_STATUS_PENDING),
+            completed_at=data.get("completed_at"),
+            marked_by=data.get("marked_by"),
         )
 
 

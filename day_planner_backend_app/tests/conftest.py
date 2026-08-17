@@ -21,6 +21,7 @@ os.environ.setdefault("KMS_KEY_NAME", "projects/p/locations/l/keyRings/r/cryptoK
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_ID", "abc.apps.googleusercontent.com")
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_SECRET", "shh")
 os.environ.setdefault("PUBLIC_BASE_URL", "http://localhost:8080")
+os.environ.setdefault("INTERNAL_BACKEND_URL", "https://internal.example.invalid")
 os.environ.setdefault(
     "AGENT_ENGINE_NAME",
     "projects/test-proj/locations/us-central1/reasoningEngines/1",

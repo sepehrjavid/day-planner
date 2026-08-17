@@ -15,7 +15,13 @@ from .calendar_tool import (
     get_calendar_events,
     update_calendar_event,
 )
-from .habit_tools import create_habit, list_habits, review_habit_week, update_habit
+from .habit_tools import (
+    create_habit,
+    list_habits,
+    mark_habit_session,
+    review_habit_week,
+    update_habit,
+)
 from .memory_tools import get_profile, save_memory, update_profile
 from .zone_tools import (
     create_zone,
@@ -258,6 +264,7 @@ _llm_agent = Agent(
         list_habits,
         update_habit,
         review_habit_week,
+        mark_habit_session,
         create_zone,
         list_zones,
         update_zone,

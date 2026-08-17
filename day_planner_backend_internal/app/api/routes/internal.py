@@ -27,6 +27,7 @@ from ...schemas.calendars import (
 from ...schemas.habit_sessions import (
     HabitSessionOut,
     HabitSessionsResponse,
+    SetHabitSessionStatusRequest,
     UpsertHabitSessionRequest,
 )
 from ...schemas.habits import (
@@ -243,6 +244,9 @@ def _to_habit_session_out(session) -> HabitSessionOut:
         planned_end=session.planned_end,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        status=session.status,
+        completed_at=session.completed_at,
+        marked_by=session.marked_by,
     )
 
 
@@ -280,6 +284,27 @@ async def list_habit_sessions(
         user_id, planned_from=planned_from, planned_to=planned_to
     )
     return HabitSessionsResponse(sessions=[_to_habit_session_out(s) for s in sessions])
+
+
+@router.post("/habit-sessions/status", response_model=HabitSessionOut)
+async def set_habit_session_status(
+    body: SetHabitSessionStatusRequest, store: Store = Depends(get_store)
+):
+    """Explicitly mark a planned habit session completed or skipped — the
+    first-class completion state review_habit_week now reports alongside
+    its calendar diff (A1.5). Called by day_planner_agent's mark_habit_session
+    tool (marked_by="agent") and day_planner_backend_app's user-facing route
+    (marked_by="user"). Idempotent — see Store.set_habit_session_status."""
+    session = await store.set_habit_session_status(
+        user_id=body.user_id,
+        calendar_id=body.calendar_id,
+        event_id=body.event_id,
+        status=body.status,
+        marked_by=body.marked_by,
+    )
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return _to_habit_session_out(session)
 
 
 def _to_zone_out(zone) -> ZoneOut:

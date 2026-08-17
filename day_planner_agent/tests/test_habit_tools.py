@@ -285,3 +285,128 @@ async def test_review_habit_week_buckets_outcomes_and_names_the_cause(tool_conte
     assert by_event["e4"]["outcome"] == "gone"
     assert by_event["e4"]["bumped_by"] is None
     assert by_event["e4"]["habit_label"] == "h-unknown"
+
+
+async def test_review_habit_week_surfaces_session_status(tool_context, monkeypatch):
+    """The whole point of A1.5: "moved" + "completed" must be reportable
+    as a success, not a partial failure the calendar diff alone would
+    suggest. A session with no status field at all (pre-A1.5 data, or a
+    backend that hasn't rolled the field out) must read as "pending", not
+    crash or silently misreport."""
+    sessions = [
+        {
+            "habit_id": "h1",
+            "event_id": "e-moved-completed",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-04T07:00:00-07:00",
+            "planned_end": "2026-08-04T07:30:00-07:00",
+            "status": "completed",
+            "completed_at": "2026-08-04T09:00:00Z",
+            "marked_by": "user",
+        },
+        {
+            "habit_id": "h1",
+            "event_id": "e-no-status-field",
+            "calendar_id": "me@gmail.com",
+            "planned_start": "2026-08-05T07:00:00-07:00",
+            "planned_end": "2026-08-05T07:30:00-07:00",
+        },
+    ]
+
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        return sessions
+
+    async def get_calendar_events(tool_context, date_from, date_to):
+        return {
+            "status": "success",
+            "events": [
+                {
+                    "event_id": "e-moved-completed",
+                    "calendar_id": "me@gmail.com",
+                    "title": "Gym",
+                    "start_time": "2026-08-04T18:00:00-07:00",
+                    "end_time": "2026-08-04T18:30:00-07:00",
+                },
+                {
+                    "event_id": "e-no-status-field",
+                    "calendar_id": "me@gmail.com",
+                    "title": "Gym",
+                    "start_time": "2026-08-05T07:00:00-07:00",
+                    "end_time": "2026-08-05T07:30:00-07:00",
+                },
+            ],
+        }
+
+    async def list_habits(user_id, *, status=None):
+        return [{"habit_id": "h1", "label": "Gym"}]
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    by_event = {s["event_id"]: s for s in result["sessions"]}
+
+    moved_completed = by_event["e-moved-completed"]
+    assert moved_completed["outcome"] == "moved"
+    assert moved_completed["session_status"] == "completed"
+    assert moved_completed["completed_at"] == "2026-08-04T09:00:00Z"
+    assert moved_completed["marked_by"] == "user"
+
+    no_status = by_event["e-no-status-field"]
+    assert no_status["session_status"] == "pending"
+    assert no_status["completed_at"] is None
+    assert no_status["marked_by"] is None
+
+
+# ---------------------------------------------------------------------------
+# mark_habit_session
+# ---------------------------------------------------------------------------
+
+
+async def test_mark_habit_session_passes_through_and_hardcodes_marked_by(
+    tool_context, monkeypatch
+):
+    seen = {}
+
+    async def set_habit_session_status(user_id, *, calendar_id, event_id, status, marked_by):
+        seen["args"] = (user_id, calendar_id, event_id, status, marked_by)
+        return {
+            "habit_id": "h1",
+            "event_id": event_id,
+            "calendar_id": calendar_id,
+            "status": status,
+            "completed_at": "2026-08-04T09:00:00Z",
+            "marked_by": marked_by,
+        }
+
+    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+
+    result = await habit_tools.mark_habit_session(
+        tool_context, "me@gmail.com", "e1", "completed"
+    )
+
+    assert result["status"] == "success"
+    assert result["session"]["session_status"] == "completed"
+    # marked_by="agent" is hardcoded by the tool itself — not something a
+    # model argument could override, since mark_habit_session's own
+    # signature has no marked_by parameter at all.
+    assert seen["args"] == ("user-1", "me@gmail.com", "e1", "completed", "agent")
+
+
+async def test_mark_habit_session_not_found(tool_context, monkeypatch):
+    async def set_habit_session_status(user_id, *, calendar_id, event_id, status, marked_by):
+        return None
+
+    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+
+    result = await habit_tools.mark_habit_session(
+        tool_context, "me@gmail.com", "never-planned", "completed"
+    )
+    assert result["status"] == "not_found"
+
+
+async def test_mark_habit_session_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
+    assert "user_id" not in habit_tools.mark_habit_session.__code__.co_varnames[
+        : habit_tools.mark_habit_session.__code__.co_argcount
+    ]

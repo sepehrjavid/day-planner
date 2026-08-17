@@ -13,10 +13,18 @@ instead of a string comparison.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from .calendars import InternalUserRequest
+
+# "pending" is deliberately not settable here — it's the implicit starting
+# state (see db/models.py's HABIT_SESSION_STATUS_PENDING), never something
+# to explicitly mark back to. No un-marking; see A1.5's "explicit marks
+# only" scope boundary.
+HabitSessionStatus = Literal["completed", "skipped"]
+MarkedBy = Literal["user", "agent"]
 
 
 class UpsertHabitSessionRequest(InternalUserRequest):
@@ -25,6 +33,17 @@ class UpsertHabitSessionRequest(InternalUserRequest):
     calendar_id: str = Field(min_length=1)
     planned_start: datetime
     planned_end: datetime
+
+
+class SetHabitSessionStatusRequest(InternalUserRequest):
+    calendar_id: str = Field(min_length=1)
+    event_id: str = Field(min_length=1)
+    status: HabitSessionStatus
+    # Declared by the caller (day_planner_agent's tool hardcodes "agent";
+    # day_planner_backend_app's user-facing route hardcodes "user" — never
+    # taken from an end user's own request body or a model argument), the
+    # same trust pattern as user_id on every other route here.
+    marked_by: MarkedBy
 
 
 class HabitSessionOut(BaseModel):
@@ -36,6 +55,9 @@ class HabitSessionOut(BaseModel):
     planned_end: datetime
     created_at: datetime
     updated_at: datetime
+    status: str
+    completed_at: datetime | None = None
+    marked_by: str | None = None
 
 
 class HabitSessionsResponse(BaseModel):
