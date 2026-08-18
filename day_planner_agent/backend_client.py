@@ -12,7 +12,9 @@ this codebase).
 Both the token and the HTTP client are cached at module scope and reused
 across calls (A2.1) — a planning turn makes roughly 28 backend calls, and
 minting a fresh token plus a fresh TLS handshake for every single one was
-the single highest-payoff fix in the roadmap this came from.
+the single highest-payoff fix in the roadmap this came from. Every call
+routes through _get/_post (A2.3), which retries exactly once on a 401 to
+recover from that cached token going stale before its TTL says it should.
 """
 
 from __future__ import annotations
@@ -101,12 +103,41 @@ async def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {await _get_id_token()}"}
 
 
-async def connect_link(user_id: str, *, provider: str = "google") -> str:
+def _invalidate_token() -> None:
+    global _token
+    _token = None
+
+
+async def _get(url: str, **kwargs) -> httpx.Response:
+    """GET through the shared client, with A2.3's 401-retry-once: the
+    cached token (A2.1) can go stale before its TTL — a service-account
+    change, clock skew, an audience mismatch after a future client split —
+    and would otherwise fail every call until the TTL elapses on its own.
+    require_internal_caller runs as a router-level dependency ahead of
+    every /internal/* handler body, so a 401 means nothing was processed;
+    retrying is safe for reads and writes alike. A second 401 is a real
+    auth failure, not staleness, and is not retried again here."""
     client = await _get_client()
-    response = await client.post(
-        "/internal/connect-link",
-        json={"user_id": user_id, "provider": provider},
-        headers=await _auth_headers(),
+    response = await client.get(url, headers=await _auth_headers(), **kwargs)
+    if response.status_code == 401:
+        _invalidate_token()
+        response = await client.get(url, headers=await _auth_headers(), **kwargs)
+    return response
+
+
+async def _post(url: str, **kwargs) -> httpx.Response:
+    """POST counterpart to _get — see its docstring for the 401 handling."""
+    client = await _get_client()
+    response = await client.post(url, headers=await _auth_headers(), **kwargs)
+    if response.status_code == 401:
+        _invalidate_token()
+        response = await client.post(url, headers=await _auth_headers(), **kwargs)
+    return response
+
+
+async def connect_link(user_id: str, *, provider: str = "google") -> str:
+    response = await _post(
+        "/internal/connect-link", json={"user_id": user_id, "provider": provider}
     )
     response.raise_for_status()
     return response.json()["connect_url"]
@@ -118,10 +149,7 @@ async def list_calendars(user_id: str) -> dict:
 
     Raises NeedsAuth if nothing is connected yet at all.
     """
-    client = await _get_client()
-    response = await client.get(
-        "/internal/calendars", params={"user_id": user_id}, headers=await _auth_headers()
-    )
+    response = await _get("/internal/calendars", params={"user_id": user_id})
     response.raise_for_status()
     body = response.json()
 
@@ -141,11 +169,8 @@ async def access_token(user_id: str, account_id: str) -> str | None:
     between the two calls. The caller decides whether to skip just that
     account's calendars or treat it as fatal.
     """
-    client = await _get_client()
-    response = await client.post(
-        "/internal/access-token",
-        json={"user_id": user_id, "account_id": account_id},
-        headers=await _auth_headers(),
+    response = await _post(
+        "/internal/access-token", json={"user_id": user_id, "account_id": account_id}
     )
     if response.status_code == 409:
         return None
@@ -154,11 +179,8 @@ async def access_token(user_id: str, account_id: str) -> str | None:
 
 
 async def create_habit(user_id: str, *, label: str, goal: str) -> dict:
-    client = await _get_client()
-    response = await client.post(
-        "/internal/habits",
-        json={"user_id": user_id, "label": label, "goal": goal},
-        headers=await _auth_headers(),
+    response = await _post(
+        "/internal/habits", json={"user_id": user_id, "label": label, "goal": goal}
     )
     response.raise_for_status()
     return response.json()
@@ -168,10 +190,7 @@ async def list_habits(user_id: str, *, status: str | None = None) -> list[dict]:
     params: dict = {"user_id": user_id}
     if status is not None:
         params["status"] = status
-    client = await _get_client()
-    response = await client.get(
-        "/internal/habits", params=params, headers=await _auth_headers()
-    )
+    response = await _get("/internal/habits", params=params)
     response.raise_for_status()
     return response.json()["habits"]
 
@@ -195,10 +214,7 @@ async def update_habit(
         body["status"] = status
     if allowed_zones is not None:
         body["allowed_zones"] = allowed_zones
-    client = await _get_client()
-    response = await client.post(
-        "/internal/habits/update", json=body, headers=await _auth_headers()
-    )
+    response = await _post("/internal/habits/update", json=body)
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -214,8 +230,7 @@ async def upsert_habit_session(
     planned_start: str,
     planned_end: str,
 ) -> dict:
-    client = await _get_client()
-    response = await client.post(
+    response = await _post(
         "/internal/habit-sessions",
         json={
             "user_id": user_id,
@@ -225,7 +240,6 @@ async def upsert_habit_session(
             "planned_start": planned_start,
             "planned_end": planned_end,
         },
-        headers=await _auth_headers(),
     )
     response.raise_for_status()
     return response.json()
@@ -241,8 +255,7 @@ async def set_habit_session_status(
 ) -> dict | None:
     """Returns None if no session is logged for this (calendar_id,
     event_id) under this user (backend 404)."""
-    client = await _get_client()
-    response = await client.post(
+    response = await _post(
         "/internal/habit-sessions/status",
         json={
             "user_id": user_id,
@@ -251,7 +264,6 @@ async def set_habit_session_status(
             "status": status,
             "marked_by": marked_by,
         },
-        headers=await _auth_headers(),
     )
     if response.status_code == 404:
         return None
@@ -262,11 +274,9 @@ async def set_habit_session_status(
 async def list_habit_sessions(
     user_id: str, *, planned_from: str, planned_to: str
 ) -> list[dict]:
-    client = await _get_client()
-    response = await client.get(
+    response = await _get(
         "/internal/habit-sessions",
         params={"user_id": user_id, "planned_from": planned_from, "planned_to": planned_to},
-        headers=await _auth_headers(),
     )
     response.raise_for_status()
     return response.json()["sessions"]
@@ -275,8 +285,7 @@ async def list_habit_sessions(
 async def create_zone(
     user_id: str, *, label: str, start_time: str, end_time: str, days_of_week: list[str]
 ) -> dict:
-    client = await _get_client()
-    response = await client.post(
+    response = await _post(
         "/internal/zones",
         json={
             "user_id": user_id,
@@ -285,17 +294,13 @@ async def create_zone(
             "end_time": end_time,
             "days_of_week": days_of_week,
         },
-        headers=await _auth_headers(),
     )
     response.raise_for_status()
     return response.json()
 
 
 async def list_zones(user_id: str) -> list[dict]:
-    client = await _get_client()
-    response = await client.get(
-        "/internal/zones", params={"user_id": user_id}, headers=await _auth_headers()
-    )
+    response = await _get("/internal/zones", params={"user_id": user_id})
     response.raise_for_status()
     return response.json()["zones"]
 
@@ -319,10 +324,7 @@ async def update_zone(
         body["end_time"] = end_time
     if days_of_week is not None:
         body["days_of_week"] = days_of_week
-    client = await _get_client()
-    response = await client.post(
-        "/internal/zones/update", json=body, headers=await _auth_headers()
-    )
+    response = await _post("/internal/zones/update", json=body)
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -331,10 +333,7 @@ async def update_zone(
 
 async def get_sleep_schedule(user_id: str) -> dict | None:
     """Returns None if the user has never set a sleep schedule."""
-    client = await _get_client()
-    response = await client.get(
-        "/internal/sleep-schedule", params={"user_id": user_id}, headers=await _auth_headers()
-    )
+    response = await _get("/internal/sleep-schedule", params={"user_id": user_id})
     response.raise_for_status()
     body = response.json()
     return body["schedule"] if body["exists"] else None
@@ -362,9 +361,6 @@ async def set_sleep_schedule(
         body["wake_up_buffer_minutes"] = wake_up_buffer_minutes
     if day_overrides is not None:
         body["day_overrides"] = day_overrides
-    client = await _get_client()
-    response = await client.post(
-        "/internal/sleep-schedule", json=body, headers=await _auth_headers()
-    )
+    response = await _post("/internal/sleep-schedule", json=body)
     response.raise_for_status()
     return response.json()

@@ -16,8 +16,12 @@ model never gets a chance to say whose schedule to read.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import logging
+import random
 import re
+import secrets
 
 from google.adk.tools import ToolContext
 from google.oauth2.credentials import Credentials
@@ -40,6 +44,85 @@ _HABIT_ID_PROPERTY = "day_planner_habit_id"
 # expected to be hit in normal use.
 _MAX_EVENT_PAGES = 20
 _MAX_EVENTS = 5000
+
+# --- Insert idempotency + retry (A2.3) --------------------------------
+#
+# Every insert now carries a caller-supplied event id, which is what makes
+# retrying an insert safe at all — a retried request either creates the
+# event or lands a 409 "duplicate" on an id that's already there, never a
+# second event. Two different ids are derived depending on what's being
+# created, because "the same logical write, retried" and "the same
+# content, submitted twice on purpose" need different answers:
+#
+# - Habit-tagged (habit_id is set): the id is a stable hash of
+#   (user_id, habit_id, calendar_id, planned_start) — that tuple *is* the
+#   identity of "this habit's session at this time". Retried or re-issued
+#   (e.g. the model calls add_calendar_event again for a session it
+#   already placed), it lands on the same event rather than duplicating
+#   it. This is what "duplicate gym session" in the roadmap refers to.
+# - Plain appointment (no habit_id): there's no such identity — a second
+#   "drinks with friends" at the same time on the same calendar is a
+#   perfectly legitimate second event, not a duplicate. Deriving its id
+#   from content would silently swallow that. Instead the id is random,
+#   generated once per add_calendar_event call and reused across that
+#   call's own retries only, so a retried attempt still lands on the same
+#   event without two distinct user-requested appointments ever colliding.
+#
+# Character set is Calendar's own constraint, not a stylistic choice: per
+# https://developers.google.com/workspace/calendar/v3/reference/events/insert,
+# a caller-supplied id must use base32hex's alphabet (lowercase a-v, 0-9),
+# 5-1024 characters.
+_B32_TO_B32HEX = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+    "0123456789ABCDEFGHIJKLMNOPQRSTUV",
+)
+
+
+def _base32hex(raw: bytes) -> str:
+    b32 = base64.b32encode(raw).decode().rstrip("=")
+    return b32.translate(_B32_TO_B32HEX).lower()
+
+
+def _habit_session_event_id(
+    user_id: str, habit_id: str, calendar_id: str, planned_start: str
+) -> str:
+    raw = f"{user_id}:{habit_id}:{calendar_id}:{planned_start}".encode()
+    return _base32hex(hashlib.sha256(raw).digest())
+
+
+def _fresh_event_id() -> str:
+    """160 bits of randomness, base32hex-encoded — collision odds are
+    negligible, unlike a content hash of a plain appointment."""
+    return _base32hex(secrets.token_bytes(20))
+
+
+# 429/5xx are the transient classes worth retrying; everything else (400,
+# 401 — handled separately by backend_client, not this API — 403, 404) is
+# either a real client error or something a retry can't fix.
+_RETRYABLE_INSERT_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# Bounded so one tool call can't run away inside a single turn (the app
+# service's own request timeout is 900s — see A0's prerequisite — and this
+# is one insert among dozens of calls in a planning turn). Three retries
+# past the initial attempt is enough to ride out a brief blip without
+# eating a meaningful fraction of that budget even at the capped delay.
+_MAX_INSERT_ATTEMPTS = 4
+_INSERT_RETRY_BASE_DELAY_S = 0.5
+_INSERT_RETRY_MAX_DELAY_S = 8.0
+
+# Module attribute rather than a bare asyncio.sleep call so tests can swap
+# it for a no-op and not actually wait out the backoff — same pattern as
+# agent.py's _now() (A0.4).
+_sleep = asyncio.sleep
+
+
+async def _sleep_before_retry(attempt: int) -> None:
+    # Full jitter: a random delay in [0, cap], where cap grows
+    # exponentially with attempt number. Spreads out retries from
+    # concurrent callers instead of having them all thunder back at
+    # once on the same schedule.
+    cap = min(_INSERT_RETRY_MAX_DELAY_S, _INSERT_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)))
+    await _sleep(random.uniform(0, cap))
 
 
 async def get_calendar_events(
@@ -176,12 +259,14 @@ async def add_calendar_event(
 
     Returns:
         A dict with "status". On "success", "event" has the created event's
-        id, title, times, and a link. On "needs_auth", "connect_url" is a
-        link to hand the user. On "not_found", no connected calendar matched
-        calendar_summary. On "not_writable", the matched calendar(s) are
-        read-only for this user (e.g. a subscribed holiday calendar, or a
-        calendar someone else shared without edit access) — tell the user
-        rather than guessing at a substitute.
+        id, title, times, and a link, and "retry_count" is present (>0)
+        only if a transient failure had to be retried before it succeeded.
+        On "needs_auth", "connect_url" is a link to hand the user. On
+        "not_found", no connected calendar matched calendar_summary. On
+        "not_writable", the matched calendar(s) are read-only for this user
+        (e.g. a subscribed holiday calendar, or a calendar someone else
+        shared without edit access) — tell the user rather than guessing at
+        a substitute.
     """
     user_id = tool_context.session.user_id
 
@@ -249,8 +334,13 @@ async def add_calendar_event(
             ),
         }
 
+    event_id = (
+        _habit_session_event_id(user_id, habit_id, target["calendar_id"], start_time)
+        if habit_id
+        else _fresh_event_id()
+    )
     try:
-        event = await _insert_google_event(
+        event, retry_count = await _insert_google_event_with_retry(
             token,
             target["calendar_id"],
             summary,
@@ -258,6 +348,7 @@ async def add_calendar_event(
             end_time,
             location,
             entry.get("timeZone"),
+            event_id=event_id,
             extended_properties={_HABIT_ID_PROPERTY: habit_id} if habit_id else None,
         )
     except HttpError as exc:
@@ -266,7 +357,10 @@ async def add_calendar_event(
     if habit_id:
         await _log_habit_session(user_id, habit_id, event)
 
-    return {"status": "success", "event": event}
+    result: dict = {"status": "success", "event": event}
+    if retry_count:
+        result["retry_count"] = retry_count
+    return result
 
 
 async def update_calendar_event(
@@ -612,6 +706,7 @@ async def _insert_google_event(
     end_time: str,
     location: str | None,
     calendar_timezone: str | None,
+    event_id: str | None = None,
     extended_properties: dict | None = None,
 ) -> dict:
     def _insert() -> dict:
@@ -622,6 +717,8 @@ async def _insert_google_event(
             "start": _time_field(start_time, calendar_timezone),
             "end": _time_field(end_time, calendar_timezone),
         }
+        if event_id:
+            body["id"] = event_id
         if location:
             body["location"] = location
         if extended_properties:
@@ -632,6 +729,85 @@ async def _insert_google_event(
     # googleapiclient is synchronous; keep it off the event loop like every
     # other blocking call in this codebase.
     return await asyncio.to_thread(_insert)
+
+
+async def _fetch_google_event_or_none(
+    access_token: str, calendar_id: str, event_id: str
+) -> dict | None:
+    """The raw (untrimmed) event resource, or None if it doesn't exist.
+    Used only to resolve a 409 on insert — needs the raw "status" field
+    (confirmed/cancelled), which _trim_google_event doesn't carry."""
+
+    def _get() -> dict | None:
+        creds = Credentials(token=access_token)
+        service = build("calendar", "v3", credentials=creds)
+        try:
+            return service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+        except HttpError as exc:
+            if exc.resp.status == 404:
+                return None
+            raise
+
+    return await asyncio.to_thread(_get)
+
+
+async def _insert_google_event_with_retry(
+    access_token: str,
+    calendar_id: str,
+    summary: str,
+    start_time: str,
+    end_time: str,
+    location: str | None,
+    calendar_timezone: str | None,
+    *,
+    event_id: str,
+    extended_properties: dict | None = None,
+) -> tuple[dict, int]:
+    """Returns (trimmed event, retry_count). event_id is always supplied
+    by the caller (see the module-level note on _habit_session_event_id /
+    _fresh_event_id) — that's what makes retrying safe at all.
+
+    A 409 means this id already exists on the calendar. That's not
+    unconditionally success: Google retains a deleted event's id as a
+    tombstone, so re-placing a habit session at a slot it was once
+    (and no longer is) booked at can 409 against a cancelled event that
+    isn't really there. The existing event is fetched and checked — live
+    means a prior attempt already landed and this is a genuine idempotent
+    replay; cancelled or gone means the id is unusable for a different
+    reason, and a fresh one is minted and retried rather than reporting
+    success over an event that doesn't exist.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            event = await _insert_google_event(
+                access_token,
+                calendar_id,
+                summary,
+                start_time,
+                end_time,
+                location,
+                calendar_timezone,
+                event_id=event_id,
+                extended_properties=extended_properties,
+            )
+            return event, attempt - 1
+        except HttpError as exc:
+            status = exc.resp.status
+            if status == 409:
+                existing = await _fetch_google_event_or_none(access_token, calendar_id, event_id)
+                if existing is not None and existing.get("status") != "cancelled":
+                    return _trim_google_event(existing, calendar_id), attempt - 1
+                event_id = _fresh_event_id()
+                if attempt >= _MAX_INSERT_ATTEMPTS:
+                    raise
+            elif status not in _RETRYABLE_INSERT_STATUSES or attempt >= _MAX_INSERT_ATTEMPTS:
+                raise
+        except OSError:
+            if attempt >= _MAX_INSERT_ATTEMPTS:
+                raise
+        await _sleep_before_retry(attempt)
 
 
 async def _patch_google_event(

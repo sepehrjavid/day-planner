@@ -13,8 +13,9 @@ _NEVER_LOG_ARGS_FOR — profile and memory payloads must not appear in logs
 at any level, diagnostic mode or not (see A0.6, which removed exactly this
 kind of leak once already). Tool *response* payloads are never logged at
 all here, for any tool, diagnostic mode or not — only the response's
-"status" field is kept, which every tool in this codebase already returns
-as its status contract.
+"status" field, and (A2.3) its "retry_count" field when present, are
+kept. Both are call metadata, never event/profile/memory content, so
+retry_count carries the same redaction guarantee status already did.
 
 Loop detection (A1.3) needs to compare call *arguments* for equality — the
 most expensive class of agent bug is the same tool called with the same
@@ -31,6 +32,11 @@ return value, so it reaches habit_session_outcomes here without adding a
 single token to what the model sees — see habit_tools.py's
 _emit_habit_session_telemetry and turn_log_queries.sql for the queries
 this feeds.
+
+retry_count itself comes straight off the tool's own return value (not
+state_delta, unlike preload_ok/habit_session_outcomes above) — set by
+calendar_tool.py's add_calendar_event only when a transient failure had
+to be retried before an insert succeeded.
 """
 
 from __future__ import annotations
@@ -105,6 +111,7 @@ class _ToolCall:
     args: dict | None = None
     duration_ms: float | None = None
     status: object | None = None
+    retry_count: int | None = None
 
 
 @dataclass
@@ -194,7 +201,9 @@ class TurnRecorder:
                     name=name, started_at=time.monotonic(), args_fingerprint=_fingerprint_args(None)
                 )
         entry.duration_ms = (time.monotonic() - entry.started_at) * 1000
-        entry.status = (response.get("response") or {}).get("status")
+        payload = response.get("response") or {}
+        entry.status = payload.get("status")
+        entry.retry_count = payload.get("retry_count")
         self._finished_calls.append(entry)
 
     def emit(self, *, outcome: str) -> None:
@@ -223,6 +232,7 @@ class TurnRecorder:
                     "duration_ms": round(c.duration_ms, 1) if c.duration_ms is not None else None,
                     "status": c.status,
                     **({"args": c.args} if c.args is not None else {}),
+                    **({"retry_count": c.retry_count} if c.retry_count is not None else {}),
                 }
                 for c in self._finished_calls
             ],

@@ -146,6 +146,26 @@ async def test_records_tool_call_name_and_status(caplog):
     assert call["status"] == "success"
     assert call["duration_ms"] is not None
     assert "args" not in call
+    assert "retry_count" not in call
+
+
+async def test_retry_count_surfaces_when_present(caplog):
+    """A2.3: add_calendar_event includes retry_count in its own response
+    (not state_delta) only when a transient failure had to be retried
+    before an insert succeeded."""
+    events = [
+        _function_call_event("add_calendar_event", "c1"),
+        _function_response_event(
+            "add_calendar_event", "c1", {"status": "success", "retry_count": 2}
+        ),
+    ]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="book gym")
+
+    record = _one_record(caplog)
+    assert record["tool_calls"][0]["retry_count"] == 2
 
 
 async def test_tool_args_withheld_by_default(caplog):
