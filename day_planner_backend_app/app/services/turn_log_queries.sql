@@ -19,10 +19,11 @@
 -- for when the turn happened, `jsonPayload.*` for the turn record's own
 -- fields (turn_id, session_id, user_ref, tool_calls[] — each with name,
 -- args_fingerprint, duration_ms, status — model_calls, input_tokens,
--- output_tokens, thinking_tokens, preload_ok, outcome, wall_ms,
--- loop_detected, habit_session_outcomes[] — each with session_ref,
--- habit_id, session_status, outcome, hour_of_day, day_of_week,
--- zone_constrained, source — see turn_log.py's TurnRecorder.emit).
+-- output_tokens, thinking_tokens, cached_tokens, preload_ok, outcome,
+-- wall_ms, loop_detected, habit_session_outcomes[] — each with
+-- session_ref, habit_id, session_status, outcome, hour_of_day,
+-- day_of_week, zone_constrained, source — see turn_log.py's
+-- TurnRecorder.emit).
 
 -- 1. Tokens per turn (input / output / thinking), and the distribution.
 SELECT
@@ -334,6 +335,34 @@ JOIN turn_calls bc
 -- observed behaviour rather than a guess).
 WHERE TIMESTAMP_DIFF(b.timestamp, a.timestamp, SECOND) < 600
 ORDER BY a.session_id, a.timestamp;
+
+-- 11. Context cache hit rate (A2.5). cached_tokens is Vertex AI's own
+-- cachedContentTokenCount, reported whenever a model call's prefix hit
+-- Gemini's implicit context cache — see turn_log.py's module docstring
+-- and agent.py/instruction.md for what makes that prefix (the static
+-- rules + tool schemas, ~11k tokens) actually cacheable: today/profile/
+-- zones sit at the *end* of the prompt now specifically so the front of
+-- every request is byte-identical across users and turns.
+--
+-- hit_rate_by_tokens is the input-cost-reduction number (cached tokens
+-- are billed at a 90% discount) — this is what "confirm the cost
+-- reduction in A1.2's data" (A2.5's acceptance criterion) means in
+-- practice. turns_with_any_cache_hit is the simpler, coarser signal:
+-- did caching engage at all for this turn's first model call, where the
+-- ~11k-token prefix lives (later calls in the same turn carry growing
+-- conversation history ahead of it, which any implicit-caching engine
+-- may or may not still recognize past a certain length — this query
+-- does not distinguish first-call from later-call hits within a turn,
+-- only whether a turn had a hit anywhere in it).
+SELECT
+  COUNT(*) AS turns,
+  COUNTIF(jsonPayload.cached_tokens > 0) AS turns_with_any_cache_hit,
+  SAFE_DIVIDE(COUNTIF(jsonPayload.cached_tokens > 0), COUNT(*)) AS turn_hit_rate,
+  SUM(jsonPayload.cached_tokens) AS total_cached_tokens,
+  SUM(jsonPayload.input_tokens) AS total_input_tokens,
+  SAFE_DIVIDE(SUM(jsonPayload.cached_tokens), SUM(jsonPayload.input_tokens)) AS hit_rate_by_tokens
+FROM `{{PROJECT}}.day_planner_turns.{{TABLE}}`
+WHERE timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY);
 
 -- 10. Turn abandonment — the user placed sessions and then the
 -- conversation just stopped, with no follow-up turn at all. Also a pure

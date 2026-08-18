@@ -77,12 +77,13 @@ def _function_response_event(name: str, call_id: str, response: dict) -> dict:
     }
 
 
-def _usage_event(prompt=100, candidates=20, thoughts=5) -> dict:
+def _usage_event(prompt=100, candidates=20, thoughts=5, cached=0) -> dict:
     return {
         "usage_metadata": {
             "prompt_token_count": prompt,
             "candidates_token_count": candidates,
             "thoughts_token_count": thoughts,
+            "cached_content_token_count": cached,
         }
     }
 
@@ -249,6 +250,21 @@ async def test_model_call_tokens_are_summed_across_events(caplog):
     assert record["input_tokens"] == 150
     assert record["output_tokens"] == 30
     assert record["thinking_tokens"] == 5
+    assert record["cached_tokens"] == 0
+
+
+async def test_cached_tokens_summed_across_events(caplog):
+    """A2.5: cached_tokens comes off the same usage_metadata dict as the
+    other token fields — Vertex AI's cachedContentTokenCount, reported
+    whenever a model call's prefix hit Gemini's implicit context cache."""
+    events = [_usage_event(cached=8000), _usage_event(cached=8200)]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    assert record["cached_tokens"] == 16200
 
 
 async def test_preload_ok_surfaces_from_state_delta(caplog):
