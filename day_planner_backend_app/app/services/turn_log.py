@@ -37,6 +37,17 @@ retry_count itself comes straight off the tool's own return value (not
 state_delta, unlike preload_ok/habit_session_outcomes above) — set by
 calendar_tool.py's add_calendar_event only when a transient failure had
 to be retried before an insert succeeded.
+
+cached_tokens (A2.5) comes off the same usage_metadata dict as
+input_tokens/output_tokens/thinking_tokens above — Vertex AI reports it
+as cached_content_token_count whenever a model call's prefix hit Gemini's
+implicit context cache. It only means anything once agent.py's
+instruction is structured so the static rules+tools prefix is actually
+byte-identical across calls (see instruction.md and agent._build_instruction
+— the volatile today/profile/zones injections were moved to the end of
+the prompt specifically so this prefix can be recognized as a cache hit
+at all); this field is what makes that measurable, alongside
+turn_log_queries.sql.
 """
 
 from __future__ import annotations
@@ -135,6 +146,7 @@ class TurnRecorder:
     input_tokens: int = field(default=0, init=False)
     output_tokens: int = field(default=0, init=False)
     thinking_tokens: int = field(default=0, init=False)
+    cached_tokens: int = field(default=0, init=False)
     preload_ok: bool | None = field(default=None, init=False)
     habit_session_outcomes: list = field(default_factory=list, init=False)
 
@@ -146,6 +158,7 @@ class TurnRecorder:
             self.input_tokens += usage.get("prompt_token_count") or 0
             self.output_tokens += usage.get("candidates_token_count") or 0
             self.thinking_tokens += usage.get("thoughts_token_count") or 0
+            self.cached_tokens += usage.get("cached_content_token_count") or 0
 
         content = event.get("content") or {}
         for part in content.get("parts") or []:
@@ -240,6 +253,7 @@ class TurnRecorder:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "thinking_tokens": self.thinking_tokens,
+            "cached_tokens": self.cached_tokens,
             "preload_ok": self.preload_ok,
             "outcome": outcome,
             "wall_ms": round(wall_ms, 1),

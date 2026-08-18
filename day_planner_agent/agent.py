@@ -173,6 +173,18 @@ def _build_instruction(ctx: ReadonlyContext) -> str:
     # "today" would silently go stale until the next redeploy. Using a
     # callable (ADK's InstructionProvider) makes ADK re-resolve it on every
     # turn instead.
+    #
+    # Implicit context caching (A2.5) is on by default for gemini-2.5-flash
+    # on Vertex AI — there's no API call or config flag here to opt into.
+    # What it actually needs is a genuinely stable prefix: a cache hit only
+    # covers a byte-identical run from the very start of the request, and
+    # {today}/{profile_section}/{zones_section} used to sit within the
+    # first few sentences of instruction.md, which meant the ~11k-token
+    # rules+tools prefix diverged (by date, then by user) before a single
+    # cacheable token was ever reached. instruction.md now puts all three
+    # at the *end* instead, so every user's request shares the same static
+    # prefix up to that point. This function's own .format(...) call below
+    # didn't need to change at all — only the template's layout did.
     preloaded_profile = ctx.state.get(_PRELOADED_PROFILE_KEY)
     if ctx.state.get(_PROFILE_PRELOAD_FAILED_KEY):
         profile_section = (

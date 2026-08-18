@@ -379,6 +379,55 @@ def test_build_instruction_re_resolves_today_every_call(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _build_instruction: static prefix stability for context caching (A2.5)
+# ---------------------------------------------------------------------------
+
+
+def test_build_instruction_volatile_content_sits_after_the_static_rules():
+    """The whole point of A2.5's reorder: today/profile/zones must render
+    after every rule paragraph, not interleaved with them — an implicit
+    cache hit only covers a byte-identical prefix, and this is the one
+    property that keeps the ~11k-token rules+tools prefix identical across
+    every user and every day. A regression here wouldn't fail any other
+    test (the three-way section tests above only check substring presence,
+    not position), so this needs its own check."""
+    ctx = FakeReadonlyContext(
+        {
+            agent._PRELOADED_PROFILE_KEY: {"foo": "bar"},
+            agent._PRELOADED_ZONES_KEY: [{"label": "Work"}],
+        }
+    )
+    text = agent._build_instruction(ctx)
+
+    # The last sentence of the static rules block (instruction.md), used
+    # as the boundary — everything at or before this index must be
+    # identical across users/days; everything after it is the volatile
+    # tail (today, profile, zones).
+    static_end = text.index("briefly confirm what you saved.")
+    today_start = text.index("Today is ")
+    profile_start = text.index("already loaded for this session: {'foo': 'bar'}")
+    zones_start = text.index("standing day zones, already loaded for this session")
+
+    assert static_end < today_start < profile_start < zones_start
+
+
+def test_build_instruction_volatile_content_sits_after_static_rules_on_preload_failure():
+    """Same ordering property, but for the failure-text branches — those
+    are static strings too (chosen by preload state, not injected data),
+    so they must stay before the volatile tail exactly like the success
+    branches do."""
+    ctx = FakeReadonlyContext(
+        {agent._PROFILE_PRELOAD_FAILED_KEY: True, agent._ZONES_PRELOAD_FAILED_KEY: True}
+    )
+    text = agent._build_instruction(ctx)
+
+    static_end = text.index("briefly confirm what you saved.")
+    today_start = text.index("Today is ")
+
+    assert static_end < today_start
+
+
+# ---------------------------------------------------------------------------
 # Model pin and thinking budget (A0.5)
 # ---------------------------------------------------------------------------
 
