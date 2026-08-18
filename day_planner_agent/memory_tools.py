@@ -28,9 +28,26 @@ SDK versions, silently drops wait_for_completion — the write appears to
 succeed but nothing gets generated/stored, with no error raised. Read calls
 (retrieve_profiles, search_memory via load_memory) are plain passthroughs
 in that wrapper with no such bug, so those are used as-is.
+
+wait_for_completion=True is correct and necessary (it's the only thing
+standing between this module and the exact bug described above) — but it
+also means the call blocks until Memory Bank's server-side extraction
+pipeline finishes, which is multi-second and was stalling the whole turn
+on it (A2.4). The fix isn't to drop wait_for_completion; it's to stop
+awaiting the write inline. update_profile/save_memory schedule it as a
+background task (_schedule_background_write) and return as soon as it's
+been dispatched, not once it's done — the actual generate()/create() call
+underneath is byte-for-byte the same blocking, wait_for_completion=True
+call as before, just no longer on the path the model is waiting on. This
+relies on the same standing assumption as A2.1's module-level HTTP
+client/token cache: the process this runs in (Agent Engine) is long-lived
+across turns, not spun up fresh per request, so a task scheduled here
+keeps running after this turn's response has gone out.
 """
 
+import asyncio
 import logging
+import random
 from typing import Optional
 
 import vertexai
@@ -40,6 +57,65 @@ from google.genai import types as genai_types
 logger = logging.getLogger(__name__)
 
 PROFILE_SCHEMA_ID = "day-planner-profile"
+
+# A background write's own failure has nowhere left to report to — the
+# tool call it belongs to already returned — so it gets a few attempts of
+# its own before giving up. Not shared with calendar_tool.py's retry logic
+# (A2.3): that one keys off HTTP status codes and needs an idempotency
+# key to be safe to retry at all; this one is a same-payload SDK call
+# where a merged, LLM-driven extraction pipeline is expected to tolerate
+# a harmless duplicate submission, so a flat retry is enough.
+_BACKGROUND_WRITE_MAX_ATTEMPTS = 3
+_BACKGROUND_WRITE_BASE_DELAY_S = 1.0
+
+# Module attribute rather than a bare asyncio.sleep call so tests can swap
+# it for a no-op — same pattern as agent.py's _now() (A0.4) and
+# calendar_tool.py's _sleep (A2.3).
+_sleep = asyncio.sleep
+
+# A fire-and-forget asyncio.Task with no other strong reference can be
+# garbage-collected mid-flight ("Task was destroyed but it is pending") —
+# this set plus the done-callback in _schedule_background_write is
+# asyncio's own documented idiom for avoiding that.
+_pending_writes: set[asyncio.Task] = set()
+
+
+def _schedule_background_write(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _pending_writes.add(task)
+    task.add_done_callback(_pending_writes.discard)
+    return task
+
+
+async def _write_with_retry(kind: str, attempt_write) -> None:
+    """Runs after the tool that scheduled it has already returned to the
+    model — a failure here can only be logged, never surfaced to the
+    caller. attempt_write is a zero-arg async callable, called fresh each
+    attempt (a coroutine object can only be awaited once)."""
+    for attempt in range(1, _BACKGROUND_WRITE_MAX_ATTEMPTS + 1):
+        try:
+            operation = await attempt_write()
+        except Exception:
+            logger.warning(
+                "%s failed (attempt %d/%d)",
+                kind,
+                attempt,
+                _BACKGROUND_WRITE_MAX_ATTEMPTS,
+                exc_info=True,
+            )
+        else:
+            if operation.error is None:
+                return
+            logger.warning(
+                "%s failed (attempt %d/%d): %s",
+                kind,
+                attempt,
+                _BACKGROUND_WRITE_MAX_ATTEMPTS,
+                operation.error,
+            )
+        if attempt < _BACKGROUND_WRITE_MAX_ATTEMPTS:
+            await _sleep(_BACKGROUND_WRITE_BASE_DELAY_S * attempt + random.uniform(0, 0.5))
+    logger.error("%s permanently failed after %d attempts", kind, _BACKGROUND_WRITE_MAX_ATTEMPTS)
 
 
 def _memory_service(tool_context: ToolContext):
@@ -95,7 +171,10 @@ async def update_profile(
             words (e.g. "gym sessions are 1 hour for upper body days").
 
     Returns:
-        dict with "status" ("success" or "error") and "message".
+        dict with "status" ("success" or "error") and "message". "success"
+        means the update was accepted and is saving in the background, not
+        that it has finished — get_profile called immediately afterward is
+        not guaranteed to see it yet.
     """
     service = _memory_service(tool_context)
     if service is None:
@@ -108,26 +187,29 @@ async def update_profile(
         return {"status": "error", "message": "No fields provided to save."}
 
     client = vertexai.Client(project=service._project, location=service._location).aio
-    operation = await client.agent_engines.memories.generate(
-        name="reasoningEngines/" + service._agent_engine_id,
-        direct_contents_source=vertexai.types.GenerateMemoriesRequestDirectContentsSource(
-            events=[
-                vertexai.types.GenerateMemoriesRequestDirectContentsSourceEvent(
-                    content=genai_types.Content(
-                        role="user",
-                        parts=[genai_types.Part(text=" ".join(statements))],
-                    )
-                )
-            ]
-        ),
-        scope=_memory_scope(tool_context),
-        config={"wait_for_completion": True},
-    )
-    if operation.error:
-        logger.warning("update_profile failed: %s", operation.error)
-        return {"status": "error", "message": str(operation.error)}
+    scope = _memory_scope(tool_context)
+    agent_engine_id = service._agent_engine_id
 
-    return {"status": "success", "message": "Profile updated."}
+    async def _write():
+        return await client.agent_engines.memories.generate(
+            name="reasoningEngines/" + agent_engine_id,
+            direct_contents_source=vertexai.types.GenerateMemoriesRequestDirectContentsSource(
+                events=[
+                    vertexai.types.GenerateMemoriesRequestDirectContentsSourceEvent(
+                        content=genai_types.Content(
+                            role="user",
+                            parts=[genai_types.Part(text=" ".join(statements))],
+                        )
+                    )
+                ]
+            ),
+            scope=scope,
+            config={"wait_for_completion": True},
+        )
+
+    _schedule_background_write(_write_with_retry("update_profile", _write))
+
+    return {"status": "success", "message": "Saving profile."}
 
 
 async def get_profile(tool_context: ToolContext) -> dict:
@@ -165,21 +247,26 @@ async def save_memory(tool_context: ToolContext, fact: str) -> dict:
         fact: The fact to remember, as a short, self-contained statement.
 
     Returns:
-        dict with "status" ("success" or "error") and "message".
+        dict with "status" ("success" or "error") and "message". "success"
+        means the fact was accepted and is saving in the background, not
+        that it has finished.
     """
     service = _memory_service(tool_context)
     if service is None:
         return {"status": "error", "message": "Memory Bank is not configured."}
 
     client = vertexai.Client(project=service._project, location=service._location).aio
-    operation = await client.agent_engines.memories.create(
-        name="reasoningEngines/" + service._agent_engine_id,
-        fact=fact,
-        scope=_memory_scope(tool_context),
-        config={"wait_for_completion": True},
-    )
-    if operation.error:
-        logger.warning("save_memory failed: %s", operation.error)
-        return {"status": "error", "message": str(operation.error)}
+    scope = _memory_scope(tool_context)
+    agent_engine_id = service._agent_engine_id
 
-    return {"status": "success", "message": "Saved."}
+    async def _write():
+        return await client.agent_engines.memories.create(
+            name="reasoningEngines/" + agent_engine_id,
+            fact=fact,
+            scope=scope,
+            config={"wait_for_completion": True},
+        )
+
+    _schedule_background_write(_write_with_retry("save_memory", _write))
+
+    return {"status": "success", "message": "Saving."}
