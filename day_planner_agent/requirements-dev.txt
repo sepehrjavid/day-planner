@@ -2,3 +2,7 @@
 
 pytest==9.1.1
 pytest-asyncio==1.4.0
+
+# day_planner_agent/evals/ (A3.1) — parses the declarative scenario
+# format. Dev-only: evals aren't part of what's deployed to Agent Engine.
+PyYAML==6.0.3
