@@ -1,0 +1,19 @@
+name: placement still works with no zones and no sleep schedule on file at all
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  zones: []
+  sleep_schedule: null
+  habits:
+    - {label: Gym, goal: "90 min/week, sessions 30-45 minutes"}
+  calendar_events: []
+when:
+  user_says: "Plan my gym sessions for this week."
+expect:
+  tool_calls:
+    - {name: add_calendar_event, min_count: 2}
+  invariants:
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id
+    - placed_minutes_meets_target

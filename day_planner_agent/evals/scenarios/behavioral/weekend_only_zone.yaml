@@ -1,0 +1,19 @@
+name: a zone that applies only on the weekend is avoided even though weekdays are unrestricted
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  zones:
+    - {label: Volunteering, start: "10:00", end: "13:00", days: [Sat]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits:
+    - {label: Gym, goal: "150 min/week, sessions 30-60 minutes"}
+  calendar_events: []
+when:
+  user_says: "Plan my gym sessions for this week."
+expect:
+  tool_calls:
+    - {name: add_calendar_event, min_count: 3}
+  invariants:
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id
