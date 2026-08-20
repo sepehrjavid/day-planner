@@ -38,7 +38,7 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: "//iam.googleapis.com/projects/866887811778/locations/global/workloadIdentityPools/default/providers/github-default"
+          workload_identity_provider: "projects/866887811778/locations/global/workloadIdentityPools/default/providers/github-default"
           service_account: "sepi-day-planner-rw@sepi-wifs.iam.gserviceaccount.com"
 
       - uses: actions/setup-python@v5
