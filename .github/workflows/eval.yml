@@ -1,0 +1,73 @@
+name: Agent Eval Suite
+
+# Manual only (A3.1) — this suite calls the real model (Vertex AI, never
+# faked; see day_planner_agent/evals/runner.py's own docstring) for every
+# trial, unlike test.yml which is deliberately credential-free (A0.3).
+# ~19 minutes and several million input tokens for the full 27-scenario
+# suite at --repeat 3, and today's tier-1 pass rate isn't at the gate's
+# stated 100% yet (see BASELINE.md) — wiring this to run automatically
+# on every commit, as the roadmap's scope item 9 eventually asks for,
+# would fail every single push for pre-existing gaps, not anything a
+# given commit introduced. Runs on demand from main until that's no
+# longer true.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario_subdir:
+        description: >-
+          Scenario subdirectory under day_planner_agent/evals/scenarios/
+          to run — leave blank for the full suite, or e.g. "zone_sleep",
+          "decisions", "behavioral" for just one.
+        required: false
+        default: ""
+      repeat:
+        description: "Trials per scenario"
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation — no stored key
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "//iam.googleapis.com/projects/866887811778/locations/global/workloadIdentityPools/default/providers/github-default"
+          service_account: "sepi-day-planner-rw@sepi-wifs.iam.gserviceaccount.com"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r day_planner_agent/requirements.txt
+          pip install -r day_planner_agent/requirements-dev.txt
+
+      - name: Run eval suite
+        env:
+          # Matches terraform.tfvars' actual deployment project/region —
+          # the service account authenticated above needs Vertex AI
+          # caller permissions there, WIF's home project (866887811778 /
+          # sepi-wifs) is unrelated to which project's APIs get called.
+          GOOGLE_CLOUD_PROJECT: sepi-dev-planner
+          GOOGLE_CLOUD_LOCATION: europe-west1
+          GOOGLE_GENAI_USE_VERTEXAI: "TRUE"
+          INTERNAL_BACKEND_URL: https://internal.example.invalid
+        run: |
+          python day_planner_agent/evals/runner.py \
+            "day_planner_agent/evals/scenarios/${{ github.event.inputs.scenario_subdir }}" \
+            --repeat "${{ github.event.inputs.repeat }}" \
+            | tee eval-report.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval-report.txt
