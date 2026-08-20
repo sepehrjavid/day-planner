@@ -126,9 +126,9 @@ class FakeCalendarListResource:
 
 
 class FakeCalendarService:
-    def __init__(self, existing: list[dict] | None = None) -> None:
+    def __init__(self, existing: list[dict] | None = None, access_role: str = "owner") -> None:
         self._events = FakeEventsResource(existing)
-        self._calendar_list = FakeCalendarListResource()
+        self._calendar_list = FakeCalendarListResource(access_role=access_role)
 
     def events(self):
         return self._events
@@ -155,6 +155,13 @@ class ScenarioFixture:
     backend_client's real functions return — see zone_tools.py,
     habit_tools.py, and calendar_tool.py's own docstrings for the exact
     dict fields expected.
+
+    zones_fetch_fails/needs_auth/calendar_access_role (A3.2) inject the
+    three failure modes clean fixtures would otherwise hide — see
+    evals/scenarios/failure_modes/. A clean fixture that always succeeds
+    would never have caught A0.2 (the preload-fail-open bug): the agent
+    looks perfectly behaved in every scenario while failing open in
+    production, because nothing ever exercises the failure path at all.
     """
 
     def __init__(
@@ -164,16 +171,27 @@ class ScenarioFixture:
         sleep_schedule: dict | None = None,
         habits: list[dict] | None = None,
         calendar_events: list[dict] | None = None,
+        zones_fetch_fails: bool = False,
+        needs_auth: bool = False,
+        calendar_access_role: str = "owner",
     ) -> None:
         self.zones = list(zones or [])
         self.sleep_schedule = sleep_schedule
         self.habits = list(habits or [])
-        self.calendar_service = FakeCalendarService(calendar_events)
+        self.calendar_service = FakeCalendarService(calendar_events, access_role=calendar_access_role)
         self.habit_sessions: list[dict] = []
+        self.zones_fetch_fails = zones_fetch_fails
+        self.needs_auth = needs_auth
 
     # -- backend_client fakes --------------------------------------------
 
     async def list_calendars(self, user_id):
+        if self.needs_auth:
+            from day_planner_agent import backend_client
+
+            raise backend_client.NeedsAuth(
+                "https://connect.example/start", "That calendar's account needs reconnecting."
+            )
         return {
             "connected": True,
             "needs_reauth": [],
@@ -191,6 +209,8 @@ class ScenarioFixture:
         return "FAKE-TOKEN"
 
     async def list_zones(self, user_id):
+        if self.zones_fetch_fails:
+            raise RuntimeError("simulated backend failure fetching zones")
         return list(self.zones)
 
     async def get_sleep_schedule(self, user_id):

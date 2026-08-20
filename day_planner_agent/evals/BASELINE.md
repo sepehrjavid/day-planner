@@ -11,13 +11,47 @@ point and must never be read as one** — see the pre/post comparison
 section below for the closest thing to one this suite can produce.
 
 Model: `gemini-2.5-flash` (pinned per A0.5, see `agent.py`). Scenarios:
-`day_planner_agent/evals/scenarios/` (27 scenarios: 21 tier `constraint`,
-6 tier `decision`). Run with:
+`day_planner_agent/evals/scenarios/` (30 scenarios: 24 tier `constraint`,
+6 tier `decision`, including A3.2's 3 failure-mode scenarios). Run with:
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
     day_planner_agent/evals/scenarios --repeat 3
 ```
+
+## A3.2 — clean fixtures hide failure modes
+
+Added `day_planner_agent/evals/scenarios/failure_modes/`: zone fetch
+failing, calendar `needs_auth`, and a read-only (`not_writable`)
+calendar — the three A0.2/A3.2 explicitly ask for. All three pass at
+100% today.
+
+**A real, unplanned finding surfaced while building the zone-fetch-fails
+scenario, unrelated to A0.2 itself**: when the model re-checks zones mid-
+conversation (as instruction.md explicitly invites after a preload
+failure — "call list_zones yourself to re-check") and that re-check also
+fails, the exception isn't caught anywhere in zone_tools.py (or
+calendar_tool.py/habit_tools.py/memory_tools.py, by the same pattern) —
+it propagates uncaught through ADK's tool-calling machinery and crashes
+the whole turn, instead of returning a `{"status": "error"}` the model
+could react to. This happened in 2-3 of 3 real trials once the initial
+preload was made to fail persistently. Flagged as its own follow-up
+task (not fixed here — out of scope for a scenarios-only task) rather
+than silently worked around.
+
+This also meant `no_events_actually_placed` alone couldn't distinguish
+"the agent correctly declined to place anything" from "the turn crashed
+before the agent did anything at all" — both produce zero placed events.
+The zone-fetch-fails scenario adds a second check, `model_invoked`
+(`expect.model_invoked: true`), which asserts the model actually
+produced token usage before any exception — true whether or not a later
+re-check crash occurs, false only when the turn dies at the preload
+callback itself. **Verified as a genuine A0.2 regression test**: reverting
+`_preload_zones` to the pre-A0.2 ordering (flag set before fetch, no
+try/except) and re-running this one scenario dropped it from 100% to
+0% — `model_invoked` catches it (`input_tokens=0`), confirming the
+scenario fails exactly when A0.2's fix is absent, as its acceptance
+criterion requires.
 
 ## Headline numbers (current — 27 scenarios, 81 trials)
 

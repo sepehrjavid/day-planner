@@ -283,6 +283,23 @@ def zone_anchored_sessions_match_zone_times(
     return InvariantResult(not violations, "; ".join(violations))
 
 
+def no_events_actually_placed(
+    world: World, placed_events: list[dict], tool_calls: list[dict]
+) -> InvariantResult:
+    """A3.2's own three failure-mode scenarios (zone fetch failing,
+    needs_auth, a read-only calendar) all cash out to the same correct
+    behaviour: nothing actually gets written to the calendar. Checking
+    tool-call counts alone isn't enough for the not_writable case —
+    add_calendar_event still gets *called*, it just comes back with
+    status "not_writable"; what must not happen is a successful insert,
+    which is exactly what placed_events reflects (see conftest.py's
+    FakeCalendarService.placed_events)."""
+    if placed_events:
+        summaries = ", ".join(repr(e.get("summary")) for e in placed_events)
+        return InvariantResult(False, f"expected nothing placed, got: {summaries}")
+    return InvariantResult(True)
+
+
 TIER1_INVARIANTS = {
     "no_session_overlaps_any_zone": no_session_overlaps_any_zone,
     "no_session_overlaps_sleep_or_cooldown": no_session_overlaps_sleep_or_cooldown,
@@ -290,6 +307,7 @@ TIER1_INVARIANTS = {
     "no_habit_id_on_plain_appointment": no_habit_id_on_plain_appointment,
     "placed_minutes_meets_target": placed_minutes_meets_target,
     "zone_anchored_sessions_match_zone_times": zone_anchored_sessions_match_zone_times,
+    "no_events_actually_placed": no_events_actually_placed,
 }
 
 

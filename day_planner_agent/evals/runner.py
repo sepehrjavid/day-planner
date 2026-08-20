@@ -100,7 +100,16 @@ class TrialResult:
 
     @property
     def passed(self) -> bool:
-        return self.exception is None and all(c.passed for c in self.checks)
+        # Deliberately does NOT require exception is None — a scenario
+        # can assert exactly one property (e.g. no_events_actually_placed
+        # for A3.2's failure-injection scenarios) and that property can
+        # hold even when the run also raised partway through (the model
+        # re-checking a still-broken backend mid-turn, say). The
+        # exception is never hidden either way — it's always in the
+        # report — but whether it makes the trial *fail* is up to
+        # whether it's reflected in a check the scenario actually
+        # declared, not an automatic blanket rule.
+        return all(c.passed for c in self.checks)
 
 
 @dataclass
@@ -136,6 +145,9 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
         sleep_schedule=scenario.given.sleep_schedule,
         habits=scenario.given.habits,
         calendar_events=scenario.given.calendar_events,
+        zones_fetch_fails=scenario.given.zones_fetch_fails,
+        needs_auth=scenario.given.needs_auth,
+        calendar_access_role=scenario.given.calendar_access_role,
     )
     fixture.install(_PlainPatcher())
     agent_module._now = lambda: datetime.strptime(scenario.given.today, "%Y-%m-%d")
@@ -150,6 +162,7 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
     tool_calls: list[dict] = []
     input_tokens = output_tokens = thinking_tokens = 0
     started = time.monotonic()
+    exception_repr: str | None = None
     message = genai_types.Content(role="user", parts=[genai_types.Part(text=scenario.user_says)])
     try:
         async for event in runner.run_async(
@@ -167,18 +180,33 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
                 call = getattr(part, "function_call", None)
                 if call is not None:
                     tool_calls.append({"name": call.name, "args": dict(call.args or {})})
-    except Exception as exc:  # noqa: BLE001 — a scenario run failing outright is a result, not a crash
-        return TrialResult(
-            tool_calls=tool_calls,
-            placed_events=[],
-            checks=[],
-            exception=repr(exc),
-            wall_s=time.monotonic() - started,
-        )
+    except Exception as exc:  # noqa: BLE001
+        # Recorded, not swallowed — but deliberately doesn't bail out of
+        # checking whatever the run did manage to do before it broke
+        # (see TrialResult.passed's own docstring on why an exception
+        # doesn't automatically fail a trial).
+        exception_repr = repr(exc)
     wall_s = time.monotonic() - started
 
     placed_events = fixture.calendar_service.placed_events()
     checks: list[Check] = []
+
+    if scenario.expect.model_invoked:
+        # input_tokens only accumulates from usage_metadata events the
+        # model actually produced — a turn that crashes at the preload
+        # callback, before the model is ever called, never yields one,
+        # regardless of what tool_calls/placed_events end up being (see
+        # A3.2's zone_fetch_fails scenario, where "nothing was placed"
+        # is true both when the agent correctly declines and when the
+        # turn crashes before ever starting — this is what tells them
+        # apart).
+        checks.append(
+            Check(
+                "model was invoked (produced token usage) before any exception",
+                input_tokens > 0,
+                f"input_tokens={input_tokens}, exception={exception_repr!r}",
+            )
+        )
 
     for expectation in scenario.expect.tool_calls:
         count = sum(1 for c in tool_calls if c["name"] == expectation.name)
@@ -219,6 +247,7 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
         tool_calls,
         placed_events,
         checks,
+        exception=exception_repr,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         thinking_tokens=thinking_tokens,
@@ -261,8 +290,10 @@ def format_report(results: list[ScenarioResult]) -> str:
         lines.append(f"{r.scenario.name} [{r.scenario.tier}] — {r.pass_rate:.0%} ({len(r.trials)} trials)")
         for i, trial in enumerate(r.trials, start=1):
             if trial.exception:
-                lines.append(f"  trial {i}: EXCEPTION {trial.exception}")
-                continue
+                # Still shown, never instead of the checks below — see
+                # TrialResult.passed's docstring on why an exception
+                # doesn't automatically fail a trial.
+                lines.append(f"  trial {i}: EXCEPTION (informational) {trial.exception}")
             for c in trial.checks:
                 mark = "OK" if c.passed else "FAIL"
                 lines.append(f"  trial {i}: [{mark}] {c.description}" + (f" — {c.detail}" if c.detail and not c.passed else ""))

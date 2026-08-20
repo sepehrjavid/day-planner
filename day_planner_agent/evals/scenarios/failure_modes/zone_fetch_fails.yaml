@@ -1,0 +1,14 @@
+name: does not place a habit session when the zone/sleep fetch fails
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  zones_fetch_fails: true
+  habits:
+    - {label: Gym, goal: "180 min/week, sessions 30-60 minutes"}
+  calendar_events: []
+when:
+  user_says: "Plan my gym sessions for this week."
+expect:
+  model_invoked: true
+  invariants:
+    - no_events_actually_placed

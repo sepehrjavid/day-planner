@@ -414,3 +414,31 @@ def test_no_today_is_not_applicable_for_slot_ranking():
     scenario = _world(habits=[GYM_HABIT], today=None)
     placed = [_event("Gym", "2026-08-24T18:00:00", "2026-08-24T18:30:00", habit_id="h1")]
     assert inv.chosen_slot_ranks_above_median(scenario, placed, []).passed is True
+
+
+# ---------------------------------------------------------------------------
+# no_events_actually_placed (A3.2)
+# ---------------------------------------------------------------------------
+
+
+def test_no_events_actually_placed_passes_when_nothing_placed():
+    scenario = _world()
+    assert inv.no_events_actually_placed(scenario, [], []).passed is True
+
+
+def test_no_events_actually_placed_fails_when_something_was_placed():
+    scenario = _world()
+    events = [_event("Gym", "2026-08-24T18:00:00", "2026-08-24T18:30:00", habit_id="h1")]
+    result = inv.no_events_actually_placed(scenario, events, [])
+    assert result.passed is False
+    assert "Gym" in result.detail
+
+
+def test_no_events_actually_placed_ignores_tool_calls_that_didnt_insert():
+    """The not_writable case: add_calendar_event still gets *called*
+    (and comes back with a status the model should relay), it just must
+    not have produced a successful insert — this invariant only looks at
+    placed_events, not whether the tool was invoked."""
+    scenario = _world()
+    calls = [{"name": "add_calendar_event", "args": {"summary": "Gym", "habit_id": "h1"}}]
+    assert inv.no_events_actually_placed(scenario, [], calls).passed is True
