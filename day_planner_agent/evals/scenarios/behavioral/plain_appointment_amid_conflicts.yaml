@@ -1,0 +1,17 @@
+name: a plain appointment is still created and untagged even with other events that day
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  zones:
+    - {label: Work, start: "09:00", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits: []
+  calendar_events:
+    - {summary: "Team sync", start: "2026-08-25T14:00:00", end: "2026-08-25T14:30:00"}
+when:
+  user_says: "I have a dentist appointment tomorrow at 6pm."
+expect:
+  tool_calls:
+    - {name: add_calendar_event, min_count: 1}
+  invariants:
+    - no_habit_id_on_plain_appointment

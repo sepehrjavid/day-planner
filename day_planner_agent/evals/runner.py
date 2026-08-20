@@ -62,7 +62,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from google.adk.runners import InMemoryRunner  # noqa: E402
 from google.genai import types as genai_types  # noqa: E402
 
-from day_planner_agent.evals.invariants import TIER1_INVARIANTS, World  # noqa: E402
+from day_planner_agent.evals.invariants import ALL_INVARIANTS, World  # noqa: E402
 from day_planner_agent.evals.scenario import Scenario, load_scenarios  # noqa: E402
 
 DEFAULT_SCENARIO_DIR = Path(__file__).parent / "scenarios"
@@ -200,9 +200,15 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
     # given.habits would fail every such scenario for a reason that has
     # nothing to do with whether the agent behaved correctly (see
     # invariants.py's own module docstring).
-    world = World(zones=fixture.zones, sleep_schedule=fixture.sleep_schedule, habits=fixture.habits)
+    world = World(
+        zones=fixture.zones,
+        sleep_schedule=fixture.sleep_schedule,
+        habits=fixture.habits,
+        calendar_events=scenario.given.calendar_events,
+        today=scenario.given.today,
+    )
     for name in scenario.expect.invariants:
-        fn = TIER1_INVARIANTS.get(name)
+        fn = ALL_INVARIANTS.get(name)
         if fn is None:
             checks.append(Check(name, False, "unknown invariant name"))
             continue

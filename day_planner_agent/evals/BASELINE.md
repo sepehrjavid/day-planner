@@ -1,4 +1,4 @@
-# A3.1 baseline — recorded 2026-08-24
+# A3.1 baseline — recorded 2026-08-24 (9 scenarios), updated 2026-08-19 (27 scenarios)
 
 **This baseline is post-A2.5-reorder.** A2.5 moved `{today}`,
 `{profile_section}` and `{zones_section}` from the top of `instruction.md`
@@ -7,84 +7,105 @@ across requests for Vertex AI's implicit context cache. It shipped with no
 behavioural verification, because this suite didn't exist yet — its own
 acceptance criterion ("run the A3.1 suite before and after if it exists by
 then") could not be met. **This number is not a pre-reorder reference
-point and must never be read as one.**
+point and must never be read as one** — see the pre/post comparison
+section below for the closest thing to one this suite can produce.
 
 Model: `gemini-2.5-flash` (pinned per A0.5, see `agent.py`). Scenarios:
-`day_planner_agent/evals/scenarios/zone_sleep/` (9 scenarios, all tier
-`constraint`). Run with:
+`day_planner_agent/evals/scenarios/` (27 scenarios: 21 tier `constraint`,
+6 tier `decision`). Run with:
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
     day_planner_agent/evals/scenarios --repeat 3
 ```
 
-## Headline numbers
+## Headline numbers (current — 27 scenarios, 81 trials)
 
-Two independent full-suite runs (9 scenarios × 3 trials = 27 trials each),
-back to back, same day, same scenarios, same instruction.md:
+| Tier | Pass rate | Gate | Met? |
+|---|---|---|---|
+| constraint (tier 1) | 85.7% (69/81) | 100%, blocks release | **No** |
+| decision (tier 2) | 66.7% (12/18 — 6 scenarios × 3 trials) | ≥90%, warns | **No** (warn, not a blocker per the tier's own rule) |
 
-| Run | Tier-1 (constraint) pass rate | Wall time | Input tokens | Output tokens | Thinking tokens |
-|---|---|---|---|---|---|
-| 1 | 85.2% (23/27) | not captured (added after) | not captured | not captured | not captured |
-| 2 | 81.5% (22/27) | 340.4s (~5.7 min for 27 trials, ~12.6s/trial) | 1,537,887 | 9,330 | 31,939 |
+Wall time: 1,149.7s (~19.2 min) for 81 trials, ~14.2s/trial. Tokens:
+4,444,158 input / 31,169 output / 96,849 thinking — averaging ~55k input
+tokens/trial, consistent with the earlier 9-scenario run's ~57k/trial
+(the instruction+tools prefix dominates either way; see
+`turn_log_queries.sql` query 11 for the deployed cache-hit-rate number
+once turns start carrying it).
 
-**Tier-1's stated gate is 100%.** The measured rate is not that, and the
-gap is not noise across the board — see below. Full-suite token cost
-(run 2, the one with tracking): ~57k input tokens per trial on average,
-dominated by the instruction+tools prefix; this is the number A2.5's
-context caching is meant to discount, not eliminate — see
-`turn_log_queries.sql` query 11 once this runs against the deployed
-agent and turns start carrying `cached_tokens`.
+## The cross-cutting finding: the agent silently does nothing more often than expected
 
-## Per-scenario results, both runs combined (6 trials per scenario)
+**9 of 81 trials (11%) placed zero events at all**, spread across at
+least 7 different scenarios — not concentrated in one prompt's wording.
+No trial raised an exception; every one of these is the model completing
+normally without calling `add_calendar_event` (or `create_habit`) even
+once. This wasn't visible in the first (9-scenario) run at nearly this
+rate and is the single most important finding in this update — more
+general than any one invariant violation, because it cuts across nearly
+every scenario category (habit placement, zone-override scenarios, even
+`no_weekend_preference_when_weekend_busy`, which alone had 2/3 trials do
+nothing).
 
-| Scenario | Pass rate | Failure mode |
-|---|---|---|
-| `basic_week_placement` | 6/6 | — |
-| `custom_zone_not_named_work` | 6/6 | — |
-| `evening_preference_plus_zone` | 6/6 | — |
-| `multiple_habits_independent` | 6/6 | — |
-| `two_week_placement` | 6/6 | — |
-| `zone_anchored_commute` | 6/6 | — |
-| `plain_appointment_not_tagged` | 5/6 | 1 trial: 0 `add_calendar_event` calls (didn't act at all on an unambiguous appointment) |
-| `packed_week_placement` | 4/6 | 1 trial: genuine zone violation (`Gym` placed 09:00 Monday, inside the 09:00–17:30 Work zone); 1 trial: 0 `add_calendar_event` calls |
-| `late_night_boundary_pressure` | 0/6 | Every trial: either 0 `add_calendar_event` calls, or a placed session missing `habit_id` |
+This harness doesn't currently capture the model's reply text (only tool
+calls and invariants), so it can't distinguish "reasonably asked a
+clarifying question instead of guessing" (correct, per instruction.md's
+own "if it's ambiguous, ask before assuming") from "silently gave up."
+That distinction matters a lot and is worth a follow-up: either extend
+the runner to capture and inspect reply text for these trials, or treat
+a bare "no tool calls, no explanation-worthy ambiguity in the prompt" as
+its own tier-2 (or even tier-1) invariant once A3.6's process-invariant
+work exists to lean on.
 
-## Two findings worth reading closely
+## Two reproducible, not-noise findings
 
-**1. `late_night_boundary_pressure` fails 100% of the time, reproducibly —
-this is signal, not noise.** The prompt ("I want to work out for 45
-minutes tonight, as late as possible before I need to start winding down
-for bed") never names the tracked Gym habit or gives an explicit time.
-Across 6 trials the agent either asked a clarifying question instead of
-acting (0 calls — itself arguably correct per instruction.md's "if it's
-ambiguous, ask before assuming"), or placed a session tagged as a plain
-appointment, not a habit session. When it *did* place something, the
-zone/sleep-window invariants held every time — the placement itself was
-never unsafe, only the habit_id tagging was. instruction.md has no
-explicit rule connecting an unnamed one-off activity request to a
-tracked habit of the same kind; this looks like a real gap worth a
-targeted instruction addition, not a scenario bug. Left as-is here
-per A3.1's own out-of-scope note (no instruction.md changes in this
-task) — flagged for a follow-up.
+**1. `late_night_boundary_pressure` fails 0/9 across all three runs to
+date** (0/3 in the first 9-scenario run, 0/3 in the pre-A2.5 comparison
+run, 0/3 in this 27-scenario run) — always the same failure mode: either
+no placement, or a placed session missing `habit_id`. The prompt ("I want
+to work out for 45 minutes tonight, as late as possible...") never names
+the tracked Gym habit or gives an explicit time. When it *did* place
+something, the zone/sleep-window invariants held every time — the
+placement itself was never unsafe, only the habit_id tagging (or the
+non-placement) was. instruction.md has no explicit rule connecting an
+unnamed one-off activity request to a same-kind tracked habit — a real,
+now well-evidenced gap, left unfixed here per this task's own
+out-of-scope note (no instruction.md changes in A3.1).
 
-**2. `packed_week_placement` shows a real, if infrequent, hard-constraint
-violation.** One trial (of 6) placed a habit session inside the Work zone
-while the calendar already had two conflicting events that week. This is
-exactly the class of regression this suite exists to catch, and it means
-the tier-1 gate is not actually met today, independent of anything A2.5
-touched — every other zone/sleep scenario, including the two under
-comparable or greater scheduling pressure (`evening_preference_plus_zone`,
-`two_week_placement`), passed 6/6. Worth another few dozen trials once
-CI wiring lands to see whether this rate holds, before treating it as
-more than a single data point.
+**2. Genuine hard-constraint (tier-1) zone violations recur under
+scheduling pressure, in different specific ways each time.**
+`packed_week_placement` ("still avoids work hours and sleep when the
+week already has conflicts") has now failed with a real zone violation
+in *two separate runs* — a session at 09:00 Monday in the 9-scenario
+run, a session at 10:00 the following Monday in this run — plus a
+non-placement in the third trial each time. Every other constraint
+scenario *not* under comparable scheduling pressure holds at or near
+100%. This is the strongest evidence in this dataset that the tier-1
+gate is not actually met today, independent of anything A2.5 touched,
+and specifically under load.
+
+## Tier-2 (decision) findings — informational, never gate
+
+Two genuine misses, both plausible and worth watching rather than acting
+on from a single instance each:
+
+- **`heavier_load_three_days`**: on the one day with 4 hours of existing
+  meetings, the model correctly gave a 60-minute session; on two lighter
+  (fully free) days it gave only 45 minutes each — backwards from
+  instruction.md's "light day → longer session" rule, in one trial.
+- **`two_habits_weekend_split`**: a fully free weekend got 0% of that
+  trial's placed minutes, versus the ≥29% (2/7 days) baseline this
+  invariant checks for. `weekend_free_gets_loaded` (the more directly
+  weekend-focused scenario) held 100%, so this reads as inconsistent
+  application of the preference under more complex prompts (two habits
+  at once) rather than the preference being absent altogether.
 
 ## Pre/post A2.5 comparison (the "optional, worth the hour" check)
 
 Per A3.1's own note, the headline numbers above are a **post-reorder**
 baseline only and can't by themselves say whether A2.5 changed
 compliance. This section is that comparison, done with the real harness
-instead of by hand.
+instead of by hand — run against the original 9 zone/sleep scenarios
+(the comparison predates the 18 scenarios added later in this task).
 
 Same 9 scenarios, same repeat=3, run against the pre-A2.5 `instruction.md`
 (`git show 43d00f5:day_planner_agent/instruction.md` — the commit
@@ -92,7 +113,7 @@ immediately before A2.5 merged):
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
-    day_planner_agent/evals/scenarios --repeat 3 \
+    day_planner_agent/evals/scenarios/zone_sleep --repeat 3 \
     --instruction /path/to/pre-a2.5-instruction.md
 ```
 
@@ -111,14 +132,28 @@ the *pattern* of failures doesn't track the ordering:
   this data that finding #1 above is a genuine instruction-content gap,
   independent of A2.5 entirely — it existed before the reorder and
   survived it unchanged.
-- The other misses (occasional 0-call trials, the one packed-week zone
-  violation) land on *different* scenarios in the pre- vs. post-reorder
-  runs, not the same ones getting consistently worse. The one real zone
-  violation found across all three runs was in a **post**-A2.5 run, which
-  if anything cuts against "the reorder made compliance worse."
+- The other misses (occasional 0-call trials, the packed-week zone
+  violations) land on *different* scenarios in the pre- vs. post-reorder
+  runs, not the same ones getting consistently worse. The zone
+  violations found across all runs so far have all been in **post**-A2.5
+  runs, which if anything cuts against "the reorder made compliance
+  worse" — though see the wider 27-scenario data above before reading
+  too much into that on its own.
 
 **Conclusion: no material behavioural difference found between orderings.**
 This doesn't prove equivalence — 27 trials per side is not a lot, and a
 small, real effect could still be hiding under this level of sampling
 noise — but it finds nothing suggesting A2.5 traded away compliance for
 cache efficiency, which was the open risk that PR shipped with.
+
+## What changed between the two recorded runs
+
+The first recording (9 scenarios, zone/sleep focus only) measured 81.5–
+85.2% tier-1. This update (27 scenarios, broader coverage plus the first
+tier-2 data) measured 85.7% tier-1 — consistent with the earlier number,
+not a regression — and 66.7% tier-2, which has no prior baseline to
+compare against since the tier-2 invariants didn't exist yet. The 11%
+zero-tool-call rate is new information this update surfaced by testing a
+wider variety of prompts (allowed_zones overrides, cool-down overrides,
+narrower session ranges, multi-habit asks) than the original 9
+zone/sleep-focused scenarios exercised.
