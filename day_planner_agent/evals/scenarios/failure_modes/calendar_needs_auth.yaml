@@ -1,0 +1,18 @@
+name: hands over the connect_url and stops when the calendar needs reconnecting
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  needs_auth: true
+  zones:
+    - {label: Work, start: "09:00", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits:
+    - {label: Gym, goal: "180 min/week, sessions 30-60 minutes"}
+  calendar_events: []
+when:
+  user_says: "Plan my gym sessions for this week."
+expect:
+  model_invoked: true
+  invariants:
+    - no_events_actually_placed
+    - connect_url_handed_to_user

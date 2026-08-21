@@ -136,3 +136,80 @@ def test_habit_id_tagged_calendar_event(tmp_path):
 
     event = scenario.given.calendar_events[0]
     assert event["extendedProperties"]["private"]["day_planner_habit_id"] == "h1"
+
+
+def test_failure_injection_fields_default_to_off(tmp_path):
+    yaml_text = textwrap.dedent(
+        """\
+        name: no failure injection here
+        given:
+          today: "2026-08-17"
+        when:
+          user_says: "irrelevant"
+        """
+    )
+    path = tmp_path / "scenario.yaml"
+    path.write_text(yaml_text)
+    scenario = load_scenario_file(path)
+
+    assert scenario.given.zones_fetch_fails is False
+    assert scenario.given.needs_auth is False
+    assert scenario.given.calendar_access_role == "owner"
+
+
+def test_failure_injection_fields_parse_when_set(tmp_path):
+    yaml_text = textwrap.dedent(
+        """\
+        name: zone fetch fails
+        given:
+          today: "2026-08-17"
+          zones_fetch_fails: true
+          needs_auth: true
+          calendar_access_role: reader
+        when:
+          user_says: "irrelevant"
+        """
+    )
+    path = tmp_path / "scenario.yaml"
+    path.write_text(yaml_text)
+    scenario = load_scenario_file(path)
+
+    assert scenario.given.zones_fetch_fails is True
+    assert scenario.given.needs_auth is True
+    assert scenario.given.calendar_access_role == "reader"
+
+
+def test_model_invoked_defaults_to_false(tmp_path):
+    yaml_text = textwrap.dedent(
+        """\
+        name: no model_invoked expectation here
+        given:
+          today: "2026-08-17"
+        when:
+          user_says: "irrelevant"
+        """
+    )
+    path = tmp_path / "scenario.yaml"
+    path.write_text(yaml_text)
+    scenario = load_scenario_file(path)
+
+    assert scenario.expect.model_invoked is False
+
+
+def test_model_invoked_parses_when_set(tmp_path):
+    yaml_text = textwrap.dedent(
+        """\
+        name: model_invoked expectation set
+        given:
+          today: "2026-08-17"
+        when:
+          user_says: "irrelevant"
+        expect:
+          model_invoked: true
+        """
+    )
+    path = tmp_path / "scenario.yaml"
+    path.write_text(yaml_text)
+    scenario = load_scenario_file(path)
+
+    assert scenario.expect.model_invoked is True

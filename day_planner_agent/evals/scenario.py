@@ -94,6 +94,11 @@ class Given:
     sleep_schedule: dict | None = None
     habits: list[dict] = field(default_factory=list)
     calendar_events: list[dict] = field(default_factory=list)
+    # A3.2 failure injection — see conftest.py's ScenarioFixture for what
+    # each of these actually does to the fixture's backend_client fakes.
+    zones_fetch_fails: bool = False
+    needs_auth: bool = False
+    calendar_access_role: str = "owner"
 
 
 @dataclass
@@ -107,6 +112,13 @@ class ToolCallExpectation:
 class Expect:
     tool_calls: list[ToolCallExpectation] = field(default_factory=list)
     invariants: list[str] = field(default_factory=list)
+    # A3.2: distinguishes "the model was actually invoked and responded
+    # (possibly then hitting a later, separate error)" from "the turn
+    # crashed before the model ever ran at all" — no_events_actually_placed
+    # alone can't tell these apart (both place nothing), but they're very
+    # different agent behaviours. See evals/runner.py's use of
+    # trial.input_tokens as the signal.
+    model_invoked: bool = False
 
 
 @dataclass
@@ -136,6 +148,9 @@ def _parse_scenario(raw: dict, source_file: Path) -> Scenario:
             normalize_calendar_event(e, event_id=f"evt{i + 1}")
             for i, e in enumerate(given_raw.get("calendar_events", []))
         ],
+        zones_fetch_fails=given_raw.get("zones_fetch_fails", False),
+        needs_auth=given_raw.get("needs_auth", False),
+        calendar_access_role=given_raw.get("calendar_access_role", "owner"),
     )
     expect_raw = raw.get("expect", {})
     expect = Expect(
@@ -146,6 +161,7 @@ def _parse_scenario(raw: dict, source_file: Path) -> Scenario:
             for tc in expect_raw.get("tool_calls", [])
         ],
         invariants=list(expect_raw.get("invariants", [])),
+        model_invoked=expect_raw.get("model_invoked", False),
     )
     return Scenario(
         name=raw["name"],

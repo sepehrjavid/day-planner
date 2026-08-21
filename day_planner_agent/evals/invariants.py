@@ -23,7 +23,11 @@ FakeEventsResource) reflecting everything add_calendar_event actually
 inserted during the run — not what the model *said* it would do, per
 A3.1's "assert on tool calls and arguments, never on wording." tool_calls
 is the ordered list of {"name", "args"} dicts collected from the ADK
-event stream for this run.
+event stream for this run. reply_text (A3.2) is the model's concatenated
+visible text for the run — most invariants ignore it, but a few (e.g.
+connect_url_handed_to_user) check for a specific, deterministic string a
+tool actually returned, which is checking a fact the tool asserted, not
+phrasing — consistent with A3.1's wording ban, not an exception to it.
 
 Tier-2 invariants need a day-load notion the real scheduling engine
 (A4.1) doesn't exist yet to supply — see chosen_slot_ranks_above_median's
@@ -129,7 +133,7 @@ def _habit_tagged_events(placed_events: list[dict]) -> list[tuple[dict, str]]:
 
 
 def no_session_overlaps_any_zone(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     violations = []
     for event, habit_id in _habit_tagged_events(placed_events):
@@ -164,7 +168,7 @@ def _effective_sleep_times(schedule: dict, day_key: str) -> tuple[dtime, dtime]:
 
 
 def no_session_overlaps_sleep_or_cooldown(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     schedule = world.sleep_schedule
     if not schedule:
@@ -199,7 +203,7 @@ def no_session_overlaps_sleep_or_cooldown(
 
 
 def every_habit_session_passes_habit_id(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     known_ids = {h["habit_id"] for h in world.habits}
     violations = []
@@ -215,7 +219,7 @@ def every_habit_session_passes_habit_id(
 
 
 def no_habit_id_on_plain_appointment(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     violations = [
         f"add_calendar_event({call['args'].get('summary')!r}) unexpectedly tagged habit_id="
@@ -230,7 +234,7 @@ _WEEKLY_TARGET_RE = re.compile(r"(\d+)\s*min(?:ute)?s?\s*/\s*week")
 
 
 def placed_minutes_meets_target(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     shortfalls = []
     totals: dict[str, int] = {}
@@ -253,7 +257,7 @@ def placed_minutes_meets_target(
 
 
 def zone_anchored_sessions_match_zone_times(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     zones_by_label = {z["label"]: z for z in world.zones}
     violations = []
@@ -283,6 +287,65 @@ def zone_anchored_sessions_match_zone_times(
     return InvariantResult(not violations, "; ".join(violations))
 
 
+def no_events_actually_placed(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """A3.2's own three failure-mode scenarios (zone fetch failing,
+    needs_auth, a read-only calendar) all cash out to the same correct
+    behaviour: nothing actually gets written to the calendar. Checking
+    tool-call counts alone isn't enough for the not_writable case —
+    add_calendar_event still gets *called*, it just comes back with
+    status "not_writable"; what must not happen is a successful insert,
+    which is exactly what placed_events reflects (see conftest.py's
+    FakeCalendarService.placed_events)."""
+    if placed_events:
+        summaries = ", ".join(repr(e.get("summary")) for e in placed_events)
+        return InvariantResult(False, f"expected nothing placed, got: {summaries}")
+    return InvariantResult(True)
+
+
+# Fixed strings the fixture's fakes actually produce (see conftest.py's
+# ScenarioFixture.list_calendars and FakeCalendarListResource) — shared
+# so the invariant and the fixture that must match it can't silently
+# drift apart. Not scenario-configurable: these are two specific
+# failure-mode fixtures, not a general "assert this string" mechanism.
+NEEDS_AUTH_CONNECT_URL = "https://connect.example/start"
+READ_ONLY_CALENDAR_SUMMARY = "Personal"
+
+
+def connect_url_handed_to_user(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """A3.2's calendar_needs_auth scenario: "hands over the connect_url
+    and stops" has two halves, and no_events_actually_placed only covers
+    the second one. This checks the first — the specific URL string
+    backend_client.NeedsAuth carries must actually reach the user, not
+    just that nothing got written. Checking for this exact string (not
+    phrasing) stays within A3.1's "never assert on wording" rule."""
+    if NEEDS_AUTH_CONNECT_URL in reply_text:
+        return InvariantResult(True)
+    return InvariantResult(
+        False, f"connect_url {NEEDS_AUTH_CONNECT_URL!r} not found in reply: {reply_text!r}"
+    )
+
+
+def reply_reports_readonly_calendar(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """A3.2's calendar_not_writable scenario: "reports a read-only
+    calendar" means the user actually learns which calendar and why, not
+    just that nothing got placed. Checks for the calendar's own summary
+    string (what add_calendar_event's not_writable message names), the
+    same entity-matching idea A3.6 will later formalise more generally —
+    a fixed, deterministic string a tool returned, not phrasing."""
+    if READ_ONLY_CALENDAR_SUMMARY in reply_text:
+        return InvariantResult(True)
+    return InvariantResult(
+        False,
+        f"calendar summary {READ_ONLY_CALENDAR_SUMMARY!r} not found in reply: {reply_text!r}",
+    )
+
+
 TIER1_INVARIANTS = {
     "no_session_overlaps_any_zone": no_session_overlaps_any_zone,
     "no_session_overlaps_sleep_or_cooldown": no_session_overlaps_sleep_or_cooldown,
@@ -290,6 +353,9 @@ TIER1_INVARIANTS = {
     "no_habit_id_on_plain_appointment": no_habit_id_on_plain_appointment,
     "placed_minutes_meets_target": placed_minutes_meets_target,
     "zone_anchored_sessions_match_zone_times": zone_anchored_sessions_match_zone_times,
+    "no_events_actually_placed": no_events_actually_placed,
+    "connect_url_handed_to_user": connect_url_handed_to_user,
+    "reply_reports_readonly_calendar": reply_reports_readonly_calendar,
 }
 
 
@@ -325,7 +391,7 @@ def _week_days(today: str) -> list[date]:
 
 
 def heavier_load_on_lighter_days(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     """For the same habit, a day with less pre-existing calendar load
     must not get a *shorter* session than a heavier day also got — see
@@ -357,7 +423,7 @@ def heavier_load_on_lighter_days(
 
 
 def weekend_preferred_when_weekend_is_free(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     """When the week's weekend has no pre-existing commitments at all,
     instruction.md's own stated preference is to load a larger share of
@@ -402,7 +468,7 @@ def weekend_preferred_when_weekend_is_free(
 
 
 def chosen_slot_ranks_above_median(
-    world: World, placed_events: list[dict], tool_calls: list[dict]
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
     """A3.1's own documented fallback for this invariant, verbatim: until
     A4.1's real scorer exists, assert the weaker property that the

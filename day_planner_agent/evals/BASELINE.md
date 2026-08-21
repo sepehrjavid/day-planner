@@ -11,13 +11,72 @@ point and must never be read as one** — see the pre/post comparison
 section below for the closest thing to one this suite can produce.
 
 Model: `gemini-2.5-flash` (pinned per A0.5, see `agent.py`). Scenarios:
-`day_planner_agent/evals/scenarios/` (27 scenarios: 21 tier `constraint`,
-6 tier `decision`). Run with:
+`day_planner_agent/evals/scenarios/` (30 scenarios: 24 tier `constraint`,
+6 tier `decision`, including A3.2's 3 failure-mode scenarios). Run with:
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
     day_planner_agent/evals/scenarios --repeat 3
 ```
+
+## A3.2 — clean fixtures hide failure modes
+
+Added `day_planner_agent/evals/scenarios/failure_modes/`: zone fetch
+failing, calendar `needs_auth`, and a read-only (`not_writable`)
+calendar — the three A0.2/A3.2 explicitly ask for.
+
+**Review caught a real gap in the first version of this PR**: two of the
+three scenarios asserted less than their names claimed.
+`calendar_needs_auth` ("hands over the connect_url and stops") and
+`calendar_not_writable` ("reports a read-only calendar") both only
+checked `no_events_actually_placed` — the stopping half, never the
+reporting half. An agent that silently did nothing, or crashed, would
+have passed either one. Fixed by capturing the model's reply text in the
+runner and adding two entity-matching invariants that check for a
+specific, deterministic string a tool actually returned (not phrasing,
+per A3.1's own rule): `connect_url_handed_to_user` (the exact
+`connect_url` string from `NeedsAuth`) and `reply_reports_readonly_calendar`
+(the calendar's own `summary`, "Personal"). Also added `model_invoked` to
+all three scenarios, not just zone-fetch-fails, for the same reason it
+was added there.
+
+Current results: `calendar_needs_auth` 100% (3/3). `zone_fetch_fails`
+100% (3/3, with the informational re-check crash still present in every
+trial — see below). `calendar_not_writable` 67% (2/3) — the one miss is
+a genuine, different finding: in that trial the model responded "I don't
+see a 'gym' habit in your tracked habits, would you like to create one?"
+instead of ever reaching the not-writable calendar path, despite Gym
+being in the scenario's `given.habits`. `no_events_actually_placed` still
+passed for that trial (nothing was placed, coincidentally, for an
+unrelated reason) — exactly the ambiguity `reply_reports_readonly_calendar`
+exists to catch, and did.
+
+**A real, unplanned finding surfaced while building the zone-fetch-fails
+scenario, unrelated to A0.2 itself**: when the model re-checks zones mid-
+conversation (as instruction.md explicitly invites after a preload
+failure — "call list_zones yourself to re-check") and that re-check also
+fails, the exception isn't caught anywhere in zone_tools.py (or
+calendar_tool.py/habit_tools.py/memory_tools.py, by the same pattern) —
+it propagates uncaught through ADK's tool-calling machinery and crashes
+the whole turn, instead of returning a `{"status": "error"}` the model
+could react to. This happened in 2-3 of 3 real trials once the initial
+preload was made to fail persistently. Flagged as its own follow-up
+task (not fixed here — out of scope for a scenarios-only task) rather
+than silently worked around.
+
+This also meant `no_events_actually_placed` alone couldn't distinguish
+"the agent correctly declined to place anything" from "the turn crashed
+before the agent did anything at all" — both produce zero placed events.
+The zone-fetch-fails scenario adds a second check, `model_invoked`
+(`expect.model_invoked: true`), which asserts the model actually
+produced token usage before any exception — true whether or not a later
+re-check crash occurs, false only when the turn dies at the preload
+callback itself. **Verified as a genuine A0.2 regression test**: reverting
+`_preload_zones` to the pre-A0.2 ordering (flag set before fetch, no
+try/except) and re-running this one scenario dropped it from 100% to
+0% — `model_invoked` catches it (`input_tokens=0`), confirming the
+scenario fails exactly when A0.2's fix is absent, as its acceptance
+criterion requires.
 
 ## Headline numbers (current — 27 scenarios, 81 trials)
 
