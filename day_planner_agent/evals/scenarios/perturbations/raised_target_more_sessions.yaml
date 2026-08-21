@@ -1,0 +1,23 @@
+name: "perturbation: raising the habit's weekly target produces more or longer sessions"
+tier: decision
+given:
+  today: "2026-08-24"  # a Monday
+  zones:
+    - {label: Work, start: "09:00", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  # The perturbation: 300 min/week with a 60-minute session cap forces at
+  # least 5 sessions — an agent that places a fixed, habitual amount
+  # regardless of the stated target would fall short here.
+  habits:
+    - {label: Gym, goal: "300 min/week, sessions 30-60 minutes"}
+  calendar_events: []
+when:
+  user_says: "Plan my gym sessions for this week."
+expect:
+  tool_calls:
+    - {name: add_calendar_event, min_count: 5}
+  invariants:
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id
+    - placed_minutes_meets_target

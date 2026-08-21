@@ -78,6 +78,103 @@ try/except) and re-running this one scenario dropped it from 100% to
 scenario fails exactly when A0.2's fix is absent, as its acceptance
 criterion requires.
 
+## A3.5 — perturbation scenarios (does a single input change move the decision the way it should?)
+
+Added `day_planner_agent/evals/scenarios/perturbations/` (7 scenarios,
+21 trials): each one changes exactly one input from what would otherwise
+produce an "obvious" placement, and checks the model's decision actually
+moves in response — `conflicting_event_at_obvious_slot`,
+`new_zone_over_obvious_slot`, `extended_cooldown_over_obvious_slot`,
+`no_physical_activity_after_8pm`, `weekend_filled_calendar_wins`,
+`raised_target_more_sessions`, `allowed_zones_lets_placement_into_work`.
+Built as **static, single-run scenarios** (engineered so the base case is
+near-certain by construction) rather than a dynamic base-then-perturb
+harness, per explicit direction — each asserts the perturbed run's
+*directional property* via existing/new invariants, never an exact
+replacement slot.
+
+**Current results: 81.0% (17/21)**. Every miss across all 21 trials was
+non-placement (`add_calendar_event` called 0 times) — **zero genuine
+constraint violations** (no zone/sleep/existing-event overlap, no bad
+`habit_id` tagging) anywhere in this run. This matches the "declines
+rather than violates" pattern already noted in the 27-scenario run above
+— the recurring failure mode across this whole suite continues to be the
+model doing nothing, not doing something unsafe.
+
+### Meta-test: does each perturbation actually fail without its rule?
+
+The acceptance criterion ("each perturbation is verified to fail when its
+corresponding rule is removed from `instruction.md`") was run for all 7,
+using the same `--instruction <path>` swap-in technique from A2.5's old/
+new comparison: surgically remove the exact governing substring from a
+scratch copy of `instruction.md` (never the real file), re-run that one
+scenario, and check for degradation. Three different outcomes turned up:
+
+**Clean degradation (4/7)** — removing the rule measurably hurt the
+scenario:
+
+- `no_physical_activity_after_8pm`: 100% → 33%, both misses non-placement.
+- `extended_cooldown_over_obvious_slot`: 100% → 67% (see redesign note
+  below), the miss non-placement.
+- `new_zone_over_obvious_slot`: needed escalation — a single targeted
+  clause removal alone showed no degradation, because instruction.md
+  reinforces zone-avoidance with two independent general "hard
+  constraint" sentences elsewhere. Removing all three together dropped it
+  100% → 33%, the misses again non-placement rather than a genuine
+  violation — consistent with the rest of this suite's pattern, and
+  notable input for A4.3's eventual instruction-trimming work: this rule
+  is currently stated three times over, not once.
+- `weekend_filled_calendar_wins`: noisier to read — the scenario's own
+  real baseline sits around 80% at n=5 (non-placement is common here even
+  with the rule present), so a same-size n=3 comparison isn't clean on
+  pass rate alone. The tell was qualitative instead: with the
+  weekend-preference sentence removed, 1 of 3 trials produced an actual
+  `no_session_overlaps_existing_events` violation (a session placed on
+  top of the "Wedding" event) — a failure mode that never once appeared
+  across 8 total baseline trials (n=3 + n=5) with the rule present.
+
+**Scenario needed redesigning, not just more removal (1/7)** —
+`extended_cooldown_over_obvious_slot`'s original design (Work zone
+starting at 09:00, "this week" phrasing) left a free 07:15-09:00 morning
+gap and a whole-week fallback, so the model could always dodge the
+perturbation entirely regardless of how much cooldown-related instruction
+text was removed — even the escalated removal left it at 100%. Fixed by
+tightening the fixture itself: Work now starts at 07:15 (exactly when
+`wake_up_buffer_minutes` ends, closing the morning gap) and the prompt
+asks for "tonight" (closing the whole-week escape). Re-verified at 100%
+against the real instruction before re-running the meta-test, which then
+showed the expected 100% → 67% drop.
+
+**No degradation found even after maximal removal (2/7)** — genuine
+findings about what these two scenarios can and can't test, not
+methodology failures:
+
+- `raised_target_more_sessions`: removing the "add up to the period's
+  target" clause — and, escalating, the surrounding "your job is to
+  actually place the sessions" and "primary job is helping the user
+  follow through" framing too — left this at 100% regardless. Read
+  together with the scenario's design: the habit's own goal text already
+  states the numeric target directly (`"300 min/week, sessions 30-60
+  minutes"`), so the model appears to satisfy it as a direct instruction
+  from the data itself, largely independent of the system instruction's
+  own accumulation language. This rule may simply be restating something
+  the model already does from the habit goal text alone.
+- `allowed_zones_lets_placement_into_work`: removing the override clause
+  showed no degradation, for a structural reason rather than a behavioral
+  one — `no_session_overlaps_any_zone` reads `allowed_zones` off the
+  fixture's static habit record (set up in `given.habits`, not decided by
+  the model at runtime), so it cannot register a violation here
+  regardless of whether the model's own reasoning used the documented
+  override mechanism. The user's turn also states the exception
+  explicitly ("they happen during my work day, that's expected"), which
+  the model may simply be honoring on its own per the separate
+  "conversational one-off override" rule. This scenario can't currently
+  distinguish "correctly applied the documented `allowed_zones`
+  mechanism" from "just complied with an explicit in-conversation
+  statement" — worth revisiting once A3.6's entity-matching work can
+  check what mechanism the model actually invoked rather than only the
+  outcome.
+
 ## Headline numbers (current — 27 scenarios, 81 trials)
 
 | Tier | Pass rate | Gate | Met? |

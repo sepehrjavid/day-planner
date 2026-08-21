@@ -1,0 +1,27 @@
+name: "perturbation: an extended cool-down over the obvious slot moves the session"
+tier: decision
+given:
+  today: "2026-08-24"  # a Monday
+  # The perturbation: cool_down stretched from a normal 30 minutes to 240
+  # (4 hours), so the unavailable wind-down window is 19:00-23:00 instead
+  # of 22:30-23:00. "Tonight" (not "this week") removes the weekend/other-
+  # weekday escape a wider period would offer, and Work running right up
+  # to wake_up_buffer's own end leaves no morning gap either — the only
+  # room left tonight is a narrow 17:30-19:00 slot, which the perturbation
+  # exists to test whether the agent still finds rather than spilling into
+  # the now-blocked 19:00-23:00 window that still looks calendar-free.
+  zones:
+    - {label: Work, start: "07:15", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 240, wake_up_buffer: 15}
+  habits:
+    - {label: Gym, goal: "45 min/week, sessions 45 minutes"}
+  calendar_events: []
+when:
+  user_says: "Plan my gym session for tonight."
+expect:
+  tool_calls:
+    - {name: add_calendar_event, min_count: 1}
+  invariants:
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id
