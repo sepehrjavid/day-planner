@@ -551,10 +551,212 @@ def chosen_slot_ranks_above_median(
     return InvariantResult(not violations, "; ".join(violations))
 
 
+# ---------------------------------------------------------------------------
+# A3.6 — explanation consistency and process invariants (tier 2).
+#
+# Constraint invariants (tier 1) check *what* the agent did to the
+# calendar; these check *how it got there* — whether its stated reasons
+# are actually true of the fixture, and whether the reads its decision
+# should rest on actually happened before the write. Both are
+# deliberately structural, not semantic: entity-string matching against
+# known fixture values and tool-call-trace ordering, never an LLM judging
+# whether an explanation "sounds right" — that stays out of scope per
+# A3.6's own note, and belongs in tier 3 if it's ever built at all.
+# ---------------------------------------------------------------------------
+
+# Common words that can immediately precede "zone"/"habit" in ordinary
+# English without naming one — capitalized only at a sentence boundary,
+# not because they're a fixture entity. A citation regex this simple
+# can't tell the two apart any other way; this is a known, accepted
+# false-negative source (a real zone label that happens to collide with
+# one of these would be missed) rather than one worth a heavier parser.
+_GENERIC_ENTITY_PREFIXES = {
+    "This", "That", "The", "A", "An", "Any", "No", "Every", "Each",
+    "Your", "Its", "New", "Time", "Some", "One", "Another",
+}
+
+
+def _entity_citations(reply_text: str, real_labels: set[str], suffix: str) -> list[str]:
+    """Find "<label> {suffix}" citations in reply_text, preferring the
+    longest real label that matches immediately before the suffix word.
+    Labels aren't always one word ("Deep Work"), so a naive single-word
+    capture right before "zone"/"habit" would grab only "Work" out of
+    "your Deep Work zone" — a real, existing zone — and wrongly flag it
+    as fabricated. Real multi-word citations are matched and excluded
+    first; only a citation no real label accounts for falls through to
+    the single-capitalized-word heuristic that actually flags something."""
+    known_spans: list[tuple[int, int]] = []
+    if real_labels:
+        alternation = "|".join(re.escape(label) for label in sorted(real_labels, key=len, reverse=True))
+        known_re = re.compile(rf"\b(?:{alternation})\s+{suffix}\b")
+        known_spans = [m.span() for m in known_re.finditer(reply_text)]
+
+    def _covered(pos: int) -> bool:
+        return any(start <= pos < end for start, end in known_spans)
+
+    generic_re = re.compile(rf"\b([A-Z][a-zA-Z]*)\s+{suffix}\b")
+    citations = []
+    for match in generic_re.finditer(reply_text):
+        if _covered(match.start()):
+            continue
+        word = match.group(1)
+        if word in _GENERIC_ENTITY_PREFIXES:
+            continue
+        citations.append(word)
+    return citations
+
+
+def explanation_cites_real_entities(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """instruction.md requires the agent to explain why it placed each
+    session — this checks that the explanation's named entities are real,
+    not that the explanation is well-formed or persuasive. Scans
+    reply_text for "<label> zone" / "<label> habit" citations and flags
+    any that isn't an actual zone or habit label in this fixture (nor
+    "cool-down"/"wake-up", the two sleep-derived windows that behave like
+    zones — see instruction.md's placement paragraph). A cheap,
+    deterministic catch for blatant confabulation — "I avoided your
+    Evening zone" when no such zone exists — not a semantic check of
+    whether the cited entity actually covers the slot in question."""
+    real_zone_labels = {z["label"] for z in world.zones} | {"cool-down", "wake-up"}
+    real_habit_labels = {h["label"] for h in world.habits}
+
+    violations = []
+    for word in _entity_citations(reply_text, real_zone_labels, "zone"):
+        violations.append(f"reply cites {word!r} zone, which does not exist in this fixture")
+    for word in _entity_citations(reply_text, real_habit_labels, "habit"):
+        violations.append(f"reply cites {word!r} habit, which does not exist in this fixture")
+    return InvariantResult(not violations, "; ".join(violations))
+
+
+def _habit_tagged_add_indices(tool_calls: list[dict]) -> list[int]:
+    return [
+        i
+        for i, c in enumerate(tool_calls)
+        if c["name"] == "add_calendar_event" and c["args"].get("habit_id")
+    ]
+
+
+def calendar_checked_before_habit_placement(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """instruction.md's placement paragraph: "call get_calendar_events for
+    that period first, look at what's already committed each day" —
+    before any of it is placed. Checks a get_calendar_events call appears
+    earlier in the trace than the first habit-tagged add_calendar_event,
+    with a [date_from, date_to) range that fully covers every date a
+    habit session actually landed on — not merely that the tool was
+    called at all."""
+    add_indices = _habit_tagged_add_indices(tool_calls)
+    if not add_indices:
+        return InvariantResult(True, "no habit-tagged placement in this trial — not applicable")
+    first_add_index = min(add_indices)
+
+    placed_dates = []
+    for i in add_indices:
+        start_time = tool_calls[i]["args"].get("start_time")
+        if start_time:
+            placed_dates.append(_parse_wall_clock(start_time).date())
+    if not placed_dates:
+        return InvariantResult(True, "no start_time on any habit-tagged add_calendar_event call")
+    period_start, period_end = min(placed_dates), max(placed_dates)
+
+    for call in tool_calls[:first_add_index]:
+        if call["name"] != "get_calendar_events":
+            continue
+        try:
+            date_from = date.fromisoformat(call["args"]["date_from"])
+            date_to = date.fromisoformat(call["args"]["date_to"])
+        except (KeyError, ValueError):
+            continue
+        if date_from <= period_start and date_to > period_end:
+            return InvariantResult(True)
+    return InvariantResult(
+        False,
+        f"no get_calendar_events call before the first habit placement (index "
+        f"{first_add_index}) covers the placed period {period_start}..{period_end}",
+    )
+
+
+def list_habits_precedes_placement(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """instruction.md: "call list_habits explicitly whenever you're
+    deciding what to schedule, rather than assuming get_profile already
+    covers them" — habits aren't preloaded, so relying on the preloaded
+    profile instead of calling this tool is exactly the mistake this rule
+    exists to catch."""
+    add_indices = _habit_tagged_add_indices(tool_calls)
+    if not add_indices:
+        return InvariantResult(True, "no habit-tagged placement in this trial — not applicable")
+    first_add_index = min(add_indices)
+    if any(c["name"] == "list_habits" for c in tool_calls[:first_add_index]):
+        return InvariantResult(True)
+    return InvariantResult(
+        False,
+        f"list_habits not called before the first habit placement (index {first_add_index})",
+    )
+
+
+def review_habit_week_precedes_replan(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """instruction.md: call review_habit_week for the period immediately
+    preceding the one about to be planned, for any habit that already has
+    prior sessions — "every time, not only when you already suspect it
+    went badly." "Prior sessions" here means calendar_events (the
+    fixture's static given state) tagged with a habit_id and dated before
+    `today`. Checks the call precedes the first new placement for that
+    habit and covers a period ending at or before today — "genuinely
+    preceding," not merely called at some point."""
+    if not world.today:
+        return InvariantResult(True, "no `today` on this scenario — not applicable")
+    today = date.fromisoformat(world.today)
+
+    prior_habit_ids = set()
+    for event in world.calendar_events:
+        habit_id = _habit_id_of(event)
+        start = event.get("start", {}).get("dateTime")
+        if habit_id and start and _parse_wall_clock(start).date() < today:
+            prior_habit_ids.add(habit_id)
+    if not prior_habit_ids:
+        return InvariantResult(True, "no habit in this fixture has prior sessions — not applicable")
+
+    replanned_habit_ids = prior_habit_ids & {hid for _, hid in _habit_tagged_events(placed_events)}
+    if not replanned_habit_ids:
+        return InvariantResult(True, "no habit with prior sessions was replanned this trial")
+
+    relevant_add_indices = [
+        i for i in _habit_tagged_add_indices(tool_calls)
+        if tool_calls[i]["args"].get("habit_id") in replanned_habit_ids
+    ]
+    first_add_index = min(relevant_add_indices)
+
+    for call in tool_calls[:first_add_index]:
+        if call["name"] != "review_habit_week":
+            continue
+        try:
+            date_to = date.fromisoformat(call["args"]["date_to"])
+        except (KeyError, ValueError):
+            continue
+        if date_to <= today:
+            return InvariantResult(True)
+    return InvariantResult(
+        False,
+        f"no review_habit_week call for a period ending by {today} found before the "
+        f"first replacement of {replanned_habit_ids} (index {first_add_index})",
+    )
+
+
 TIER2_INVARIANTS = {
     "heavier_load_on_lighter_days": heavier_load_on_lighter_days,
     "weekend_preferred_when_weekend_is_free": weekend_preferred_when_weekend_is_free,
     "chosen_slot_ranks_above_median": chosen_slot_ranks_above_median,
+    "explanation_cites_real_entities": explanation_cites_real_entities,
+    "calendar_checked_before_habit_placement": calendar_checked_before_habit_placement,
+    "list_habits_precedes_placement": list_habits_precedes_placement,
+    "review_habit_week_precedes_replan": review_habit_week_precedes_replan,
 }
 
 ALL_INVARIANTS = {**TIER1_INVARIANTS, **TIER2_INVARIANTS}

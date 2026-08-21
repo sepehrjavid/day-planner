@@ -11,8 +11,9 @@ point and must never be read as one** — see the pre/post comparison
 section below for the closest thing to one this suite can produce.
 
 Model: `gemini-2.5-flash` (pinned per A0.5, see `agent.py`). Scenarios:
-`day_planner_agent/evals/scenarios/` (30 scenarios: 24 tier `constraint`,
-6 tier `decision`, including A3.2's 3 failure-mode scenarios). Run with:
+`day_planner_agent/evals/scenarios/` (39 scenarios: 24 tier `constraint`,
+15 tier `decision`, including A3.2's 3 failure-mode scenarios, A3.5's 7
+perturbations, and A3.6's 2 process scenarios). Run with:
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
@@ -174,6 +175,77 @@ methodology failures:
   statement" — worth revisiting once A3.6's entity-matching work can
   check what mechanism the model actually invoked rather than only the
   outcome.
+
+## A3.6 — explanations and process go unchecked
+
+Added four tier-2 invariants: `explanation_cites_real_entities` (checks
+"<label> zone"/"<label> habit" citations in the reply against the
+fixture's real zone/habit labels — matching the longest real label first
+so a multi-word one, e.g. "Deep Work", isn't mistaken for a fabrication
+when only its last word gets checked; a cheap, structural confabulation
+catch, not a semantic check of whether the cited constraint actually
+covers the slot), `calendar_checked_before_habit_placement`,
+`list_habits_precedes_placement`, and `review_habit_week_precedes_replan`
+(the last two operate on `tool_calls`' ordering and arguments, checking
+the read that should inform a decision happened, with the right date
+range, before the write it informs).
+
+**Review caught a real false-positive in the first version of this PR**:
+the entity-citation regex captured only the single word immediately
+before "zone"/"habit", so "your Deep Work zone" captured `"Work"` alone
+— not in `real_zone_labels` (which held the full `"Deep Work"` string) —
+and would have flagged a real, existing zone as fabricated. Fixed by
+matching known multi-word labels first (longest first) and only falling
+through to the single-word heuristic for text no real label accounts
+for. Covered by two new regression tests (multi-word real label passes,
+multi-word-adjacent fabrication still fails).
+
+Per the task's own acceptance criteria, both new-invariant families are
+verified with unit tests rather than live scenarios — "cites a
+non-existent zone" and "ordering scrambled" both describe conditions no
+live scenario can reliably force out of a real, nondeterministic model,
+so `test_eval_invariants.py` exercises each invariant directly against a
+synthetic `reply_text` / `tool_calls` fixture, the same way A3.2's
+`connect_url_handed_to_user` was tested. All pass, including the
+scrambled-order case for each process invariant and the fabricated-zone/
+fabricated-habit case for the entity check.
+
+Two new scenarios in `day_planner_agent/evals/scenarios/process/` wire
+these into real model runs. Numbers below are **n=10** — review flagged
+the first version's n=3 as too small to record ("33% from three trials
+could be anything from 15% to 60%"):
+
+- `habit_placement_checks_calendar_and_habits_first` (ordinary habit
+  placement, no prior sessions): **90% (9/10)** — the one miss was an
+  unrelated non-placement (`add_calendar_event` called 0 times, the
+  familiar pattern from elsewhere in this suite), not a process-invariant
+  failure. `calendar_checked_before_habit_placement`,
+  `list_habits_precedes_placement`, and `explanation_cites_real_entities`
+  all held 10/10.
+- `replan_reviews_prior_week_first` (same habit, but with one prior
+  session already on the calendar from the preceding week):
+  `review_habit_week_precedes_replan` held **60% (6/10)** in this run.
+  A second independent n=10 run, captured with full tool-call traces
+  specifically to root-cause the miss per review's request, held **40%
+  (4/10)** — combined, **50% (10/20)**, a stable enough number to record.
+  Every other invariant (`calendar_checked_before_habit_placement`,
+  `list_habits_precedes_placement`, `explanation_cites_real_entities`)
+  held at or near 100% across both runs — this is an isolated gap in one
+  specific behaviour, not a general process-compliance failure.
+
+**Root cause, from the traced run's full tool-call dump**: every single
+failure (6 of 6 in the traced batch) was `review_habit_week` **never
+called at all** before the new sessions went on the calendar — zero
+instances of it being called with an incorrect date range. Every trial
+that did call it used exactly the right range (`date_from` the start of
+the prior week, `date_to` today) — when the model calls the tool, it
+gets the period right every time; the failure mode is entirely about
+*whether* it calls it, not the range it passes. This rules out "the
+invariant is too strict about what counts as preceding" and confirms a
+genuine instruction-following gap: instruction.md says to do this "every
+time, not only when you already suspect it went badly," and the model
+does it around half the time. Real, reproducible evidence for A4.3 that
+this specific rule is present in the prompt but doesn't reliably fire.
 
 ## Headline numbers (current — 27 scenarios, 81 trials)
 
