@@ -12,5 +12,7 @@ given:
 when:
   user_says: "Plan my gym sessions for this week."
 expect:
+  model_invoked: true
   invariants:
     - no_events_actually_placed
+    - connect_url_handed_to_user

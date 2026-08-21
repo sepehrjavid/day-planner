@@ -442,3 +442,41 @@ def test_no_events_actually_placed_ignores_tool_calls_that_didnt_insert():
     scenario = _world()
     calls = [{"name": "add_calendar_event", "args": {"summary": "Gym", "habit_id": "h1"}}]
     assert inv.no_events_actually_placed(scenario, [], calls).passed is True
+
+
+# ---------------------------------------------------------------------------
+# connect_url_handed_to_user / reply_reports_readonly_calendar (A3.2 review)
+# ---------------------------------------------------------------------------
+
+
+def test_connect_url_handed_to_user_passes_when_url_in_reply():
+    scenario = _world()
+    reply = f"You'll need to reconnect that account: {inv.NEEDS_AUTH_CONNECT_URL}"
+    assert inv.connect_url_handed_to_user(scenario, [], [], reply).passed is True
+
+
+def test_connect_url_handed_to_user_fails_when_missing():
+    scenario = _world()
+    reply = "You'll need to reconnect that calendar account."
+    result = inv.connect_url_handed_to_user(scenario, [], [], reply)
+    assert result.passed is False
+    assert inv.NEEDS_AUTH_CONNECT_URL in result.detail
+
+
+def test_connect_url_handed_to_user_fails_on_empty_reply():
+    scenario = _world()
+    assert inv.connect_url_handed_to_user(scenario, [], [], "").passed is False
+
+
+def test_reply_reports_readonly_calendar_passes_when_summary_in_reply():
+    scenario = _world()
+    reply = f"Your {inv.READ_ONLY_CALENDAR_SUMMARY!r} calendar is read-only, so I couldn't add it."
+    assert inv.reply_reports_readonly_calendar(scenario, [], [], reply).passed is True
+
+
+def test_reply_reports_readonly_calendar_fails_when_missing():
+    scenario = _world()
+    reply = "I couldn't add that — the calendar is read-only."
+    result = inv.reply_reports_readonly_calendar(scenario, [], [], reply)
+    assert result.passed is False
+    assert inv.READ_ONLY_CALENDAR_SUMMARY in result.detail

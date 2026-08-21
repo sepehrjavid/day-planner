@@ -160,6 +160,7 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
     )
 
     tool_calls: list[dict] = []
+    reply_texts: list[str] = []
     input_tokens = output_tokens = thinking_tokens = 0
     started = time.monotonic()
     exception_repr: str | None = None
@@ -180,6 +181,9 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
                 call = getattr(part, "function_call", None)
                 if call is not None:
                     tool_calls.append({"name": call.name, "args": dict(call.args or {})})
+                text = getattr(part, "text", None)
+                if text:
+                    reply_texts.append(text)
     except Exception as exc:  # noqa: BLE001
         # Recorded, not swallowed — but deliberately doesn't bail out of
         # checking whatever the run did manage to do before it broke
@@ -187,6 +191,7 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
         # doesn't automatically fail a trial).
         exception_repr = repr(exc)
     wall_s = time.monotonic() - started
+    reply_text = "".join(reply_texts)
 
     placed_events = fixture.calendar_service.placed_events()
     checks: list[Check] = []
@@ -240,7 +245,7 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
         if fn is None:
             checks.append(Check(name, False, "unknown invariant name"))
             continue
-        result = fn(world, placed_events, tool_calls)
+        result = fn(world, placed_events, tool_calls, reply_text)
         checks.append(Check(name, result.passed, result.detail))
 
     return TrialResult(

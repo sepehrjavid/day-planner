@@ -114,15 +114,31 @@ class FakeEventsResource:
 
 
 class FakeCalendarListResource:
-    def __init__(self, access_role: str = "owner", time_zone: str = "America/Los_Angeles") -> None:
+    def __init__(
+        self,
+        access_role: str = "owner",
+        time_zone: str = "America/Los_Angeles",
+        summary: str | None = None,
+    ) -> None:
+        if summary is None:
+            # Deferred to call time, not a plain default value, so this
+            # can import from evals/invariants.py without triggering
+            # day_planner_agent/__init__.py's eager agent.py import at
+            # conftest.py's own module-load time (see this file's env
+            # var setup at the top, and evals/runner.py's own docstring
+            # on the same ordering hazard).
+            from day_planner_agent.evals.invariants import READ_ONLY_CALENDAR_SUMMARY
+
+            summary = READ_ONLY_CALENDAR_SUMMARY
         self._access_role = access_role
         self._time_zone = time_zone
+        self._summary = summary
 
     def get(self, **kwargs):
         return self
 
     def execute(self):
-        return {"accessRole": self._access_role, "timeZone": self._time_zone}
+        return {"accessRole": self._access_role, "timeZone": self._time_zone, "summary": self._summary}
 
 
 class FakeCalendarService:
@@ -188,9 +204,10 @@ class ScenarioFixture:
     async def list_calendars(self, user_id):
         if self.needs_auth:
             from day_planner_agent import backend_client
+            from day_planner_agent.evals.invariants import NEEDS_AUTH_CONNECT_URL
 
             raise backend_client.NeedsAuth(
-                "https://connect.example/start", "That calendar's account needs reconnecting."
+                NEEDS_AUTH_CONNECT_URL, "That calendar's account needs reconnecting."
             )
         return {
             "connected": True,

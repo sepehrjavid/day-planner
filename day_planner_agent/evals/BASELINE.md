@@ -23,8 +23,33 @@ day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
 
 Added `day_planner_agent/evals/scenarios/failure_modes/`: zone fetch
 failing, calendar `needs_auth`, and a read-only (`not_writable`)
-calendar — the three A0.2/A3.2 explicitly ask for. All three pass at
-100% today.
+calendar — the three A0.2/A3.2 explicitly ask for.
+
+**Review caught a real gap in the first version of this PR**: two of the
+three scenarios asserted less than their names claimed.
+`calendar_needs_auth` ("hands over the connect_url and stops") and
+`calendar_not_writable` ("reports a read-only calendar") both only
+checked `no_events_actually_placed` — the stopping half, never the
+reporting half. An agent that silently did nothing, or crashed, would
+have passed either one. Fixed by capturing the model's reply text in the
+runner and adding two entity-matching invariants that check for a
+specific, deterministic string a tool actually returned (not phrasing,
+per A3.1's own rule): `connect_url_handed_to_user` (the exact
+`connect_url` string from `NeedsAuth`) and `reply_reports_readonly_calendar`
+(the calendar's own `summary`, "Personal"). Also added `model_invoked` to
+all three scenarios, not just zone-fetch-fails, for the same reason it
+was added there.
+
+Current results: `calendar_needs_auth` 100% (3/3). `zone_fetch_fails`
+100% (3/3, with the informational re-check crash still present in every
+trial — see below). `calendar_not_writable` 67% (2/3) — the one miss is
+a genuine, different finding: in that trial the model responded "I don't
+see a 'gym' habit in your tracked habits, would you like to create one?"
+instead of ever reaching the not-writable calendar path, despite Gym
+being in the scenario's `given.habits`. `no_events_actually_placed` still
+passed for that trial (nothing was placed, coincidentally, for an
+unrelated reason) — exactly the ambiguity `reply_reports_readonly_calendar`
+exists to catch, and did.
 
 **A real, unplanned finding surfaced while building the zone-fetch-fails
 scenario, unrelated to A0.2 itself**: when the model re-checks zones mid-
