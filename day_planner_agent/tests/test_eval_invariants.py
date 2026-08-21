@@ -480,3 +480,55 @@ def test_reply_reports_readonly_calendar_fails_when_missing():
     result = inv.reply_reports_readonly_calendar(scenario, [], [], reply)
     assert result.passed is False
     assert inv.READ_ONLY_CALENDAR_SUMMARY in result.detail
+
+
+# ---------------------------------------------------------------------------
+# no_session_overlaps_existing_events / no_physical_session_after_8pm (A3.5)
+# ---------------------------------------------------------------------------
+
+
+EXISTING_CONFLICT = {
+    "summary": "Team dinner",
+    "start": {"dateTime": "2026-08-24T18:00:00"},
+    "end": {"dateTime": "2026-08-24T19:00:00"},
+}
+
+
+def test_overlaps_existing_event_detected():
+    scenario = _world(calendar_events=[EXISTING_CONFLICT], habits=[GYM_HABIT])
+    events = [_event("Gym", "2026-08-24T18:30:00", "2026-08-24T19:30:00", habit_id="h1")]
+    result = inv.no_session_overlaps_existing_events(scenario, events, [])
+    assert result.passed is False
+    assert "Team dinner" in result.detail
+
+
+def test_no_overlap_with_existing_event_passes():
+    scenario = _world(calendar_events=[EXISTING_CONFLICT], habits=[GYM_HABIT])
+    events = [_event("Gym", "2026-08-24T19:30:00", "2026-08-24T20:00:00", habit_id="h1")]
+    assert inv.no_session_overlaps_existing_events(scenario, events, []).passed is True
+
+
+def test_overlaps_existing_event_ignores_plain_appointments():
+    scenario = _world(calendar_events=[EXISTING_CONFLICT], habits=[GYM_HABIT])
+    events = [_event("Dentist", "2026-08-24T18:30:00", "2026-08-24T19:00:00")]
+    assert inv.no_session_overlaps_existing_events(scenario, events, []).passed is True
+
+
+def test_overlaps_existing_event_ignores_all_day_events():
+    all_day = {"summary": "Birthday", "start": {"date": "2026-08-24"}, "end": {"date": "2026-08-25"}}
+    scenario = _world(calendar_events=[all_day], habits=[GYM_HABIT])
+    events = [_event("Gym", "2026-08-24T18:00:00", "2026-08-24T18:30:00", habit_id="h1")]
+    assert inv.no_session_overlaps_existing_events(scenario, events, []).passed is True
+
+
+def test_no_physical_session_after_8pm_detects_violation():
+    scenario = _world(habits=[GYM_HABIT])
+    events = [_event("Gym", "2026-08-24T20:00:00", "2026-08-24T20:30:00", habit_id="h1")]
+    result = inv.no_physical_session_after_8pm(scenario, events, [])
+    assert result.passed is False
+
+
+def test_no_physical_session_after_8pm_passes_for_earlier_time():
+    scenario = _world(habits=[GYM_HABIT])
+    events = [_event("Gym", "2026-08-24T19:00:00", "2026-08-24T19:30:00", habit_id="h1")]
+    assert inv.no_physical_session_after_8pm(scenario, events, []).passed is True

@@ -287,6 +287,55 @@ def zone_anchored_sessions_match_zone_times(
     return InvariantResult(not violations, "; ".join(violations))
 
 
+def no_session_overlaps_existing_events(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """A3.5's "conflicting event" perturbation: a pre-existing event
+    placed at what would otherwise be the obvious slot must actually be
+    avoided. "Look at what's already committed each day" (instruction.md's
+    placement paragraph) is baseline competence rather than a
+    zone/sleep-specific guardrail, but nothing in the tier-1 library
+    checked it before this — the other invariants only compare against
+    zones/sleep, never against ordinary existing calendar events."""
+    violations = []
+    for event, habit_id in _habit_tagged_events(placed_events):
+        start = _parse_wall_clock(event["start"]["dateTime"])
+        end = _parse_wall_clock(event["end"]["dateTime"])
+        for existing in world.calendar_events:
+            e_start = existing.get("start", {}).get("dateTime")
+            e_end = existing.get("end", {}).get("dateTime")
+            if not e_start or not e_end:
+                continue  # an all-day event (date, not dateTime) isn't a timed conflict
+            es = _parse_wall_clock(e_start)
+            ee = _parse_wall_clock(e_end)
+            if start < ee and end > es:
+                violations.append(
+                    f"{event.get('summary')!r} at {event['start']['dateTime']} overlaps "
+                    f"existing event {existing.get('summary')!r}"
+                )
+    return InvariantResult(not violations, "; ".join(violations))
+
+
+_AFTER_8PM = _time_of("20:00")
+
+
+def no_physical_session_after_8pm(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """A3.5's "no physical activity after 8pm" perturbation — a profile
+    preference (instruction.md's own example of a blackout window) must
+    rule out evening candidate times outright, the same as a zone would.
+    Fixed at 20:00 rather than scenario-configurable — this checks one
+    specific, literal instruction.md example, not a general cutoff
+    mechanism."""
+    violations = [
+        f"{event.get('summary')!r} placed at {event['start']['dateTime']}, at/after 8pm"
+        for event, _habit_id in _habit_tagged_events(placed_events)
+        if _parse_wall_clock(event["start"]["dateTime"]).time() >= _AFTER_8PM
+    ]
+    return InvariantResult(not violations, "; ".join(violations))
+
+
 def no_events_actually_placed(
     world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
 ) -> InvariantResult:
@@ -356,6 +405,8 @@ TIER1_INVARIANTS = {
     "no_events_actually_placed": no_events_actually_placed,
     "connect_url_handed_to_user": connect_url_handed_to_user,
     "reply_reports_readonly_calendar": reply_reports_readonly_calendar,
+    "no_session_overlaps_existing_events": no_session_overlaps_existing_events,
+    "no_physical_session_after_8pm": no_physical_session_after_8pm,
 }
 
 
