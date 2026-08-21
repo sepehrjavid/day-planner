@@ -11,8 +11,9 @@ point and must never be read as one** — see the pre/post comparison
 section below for the closest thing to one this suite can produce.
 
 Model: `gemini-2.5-flash` (pinned per A0.5, see `agent.py`). Scenarios:
-`day_planner_agent/evals/scenarios/` (30 scenarios: 24 tier `constraint`,
-6 tier `decision`, including A3.2's 3 failure-mode scenarios). Run with:
+`day_planner_agent/evals/scenarios/` (39 scenarios: 24 tier `constraint`,
+15 tier `decision`, including A3.2's 3 failure-mode scenarios, A3.5's 7
+perturbations, and A3.6's 2 process scenarios). Run with:
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
@@ -174,6 +175,46 @@ methodology failures:
   statement" — worth revisiting once A3.6's entity-matching work can
   check what mechanism the model actually invoked rather than only the
   outcome.
+
+## A3.6 — explanations and process go unchecked
+
+Added four tier-2 invariants: `explanation_cites_real_entities` (checks
+"<Word> zone"/"<Word> habit" citations in the reply against the
+fixture's real zone/habit labels — a cheap, structural confabulation
+catch, not a semantic check of whether the cited constraint actually
+covers the slot), `calendar_checked_before_habit_placement`,
+`list_habits_precedes_placement`, and `review_habit_week_precedes_replan`
+(the last two operate on `tool_calls`' ordering and arguments, checking
+the read that should inform a decision happened, with the right date
+range, before the write it informs).
+
+Per the task's own acceptance criteria, both new-invariant families are
+verified with unit tests rather than live scenarios — "cites a
+non-existent zone" and "ordering scrambled" both describe conditions no
+live scenario can reliably force out of a real, nondeterministic model,
+so `test_eval_invariants.py` exercises each invariant directly against a
+synthetic `reply_text` / `tool_calls` fixture, the same way A3.2's
+`connect_url_handed_to_user` was tested. All pass, including the
+scrambled-order case for each process invariant and the fabricated-zone/
+fabricated-habit case for the entity check.
+
+Two new scenarios in `day_planner_agent/evals/scenarios/process/` wire
+these into real model runs:
+
+- `habit_placement_checks_calendar_and_habits_first` (ordinary habit
+  placement, no prior sessions): **100% (3/3)** — the model reliably
+  reads the calendar and habit list before writing, on this fixture.
+- `replan_reviews_prior_week_first` (same habit, but with one prior
+  session already on the calendar from the preceding week): **33%
+  (1/3)** — `review_habit_week_precedes_replan` failed in 2 of 3 trials.
+  The model placed the new week's sessions without ever calling
+  `review_habit_week` for the week that just ended, despite
+  instruction.md's explicit "every time, not only when you already
+  suspect it went badly." Every other invariant (including
+  `calendar_checked_before_habit_placement` and
+  `list_habits_precedes_placement`) held 3/3 — this is a real,
+  isolated gap in one specific proactive-review behaviour, not a
+  general process-compliance failure.
 
 ## Headline numbers (current — 27 scenarios, 81 trials)
 

@@ -532,3 +532,190 @@ def test_no_physical_session_after_8pm_passes_for_earlier_time():
     scenario = _world(habits=[GYM_HABIT])
     events = [_event("Gym", "2026-08-24T19:00:00", "2026-08-24T19:30:00", habit_id="h1")]
     assert inv.no_physical_session_after_8pm(scenario, events, []).passed is True
+
+
+# ---------------------------------------------------------------------------
+# explanation_cites_real_entities (A3.6)
+# ---------------------------------------------------------------------------
+
+
+def test_explanation_cites_real_entities_passes_for_real_zone():
+    scenario = _world(zones=[WORK_ZONE], habits=[GYM_HABIT])
+    reply = "I avoided your Work zone and placed the Gym habit session in the evening instead."
+    assert inv.explanation_cites_real_entities(scenario, [], [], reply).passed is True
+
+
+def test_explanation_cites_real_entities_fails_for_fabricated_zone():
+    scenario = _world(zones=[WORK_ZONE], habits=[GYM_HABIT])
+    reply = "I avoided your Evening zone and placed the session at 6pm instead."
+    result = inv.explanation_cites_real_entities(scenario, [], [], reply)
+    assert result.passed is False
+    assert "Evening" in result.detail
+
+
+def test_explanation_cites_real_entities_fails_for_fabricated_habit():
+    scenario = _world(zones=[WORK_ZONE], habits=[GYM_HABIT])
+    reply = "I planned your Yoga habit for Tuesday."
+    result = inv.explanation_cites_real_entities(scenario, [], [], reply)
+    assert result.passed is False
+    assert "Yoga" in result.detail
+
+
+def test_explanation_cites_real_entities_allows_cooldown_and_wakeup():
+    scenario = _world(habits=[GYM_HABIT])
+    reply = "I kept it out of your cool-down zone and the wake-up zone."
+    assert inv.explanation_cites_real_entities(scenario, [], [], reply).passed is True
+
+
+def test_explanation_cites_real_entities_ignores_generic_prefixes():
+    scenario = _world(habits=[GYM_HABIT])
+    reply = "This zone is unavailable, so I picked another time."
+    assert inv.explanation_cites_real_entities(scenario, [], [], reply).passed is True
+
+
+def test_explanation_cites_real_entities_passes_with_no_reply():
+    scenario = _world(zones=[WORK_ZONE], habits=[GYM_HABIT])
+    assert inv.explanation_cites_real_entities(scenario, [], []).passed is True
+
+
+# ---------------------------------------------------------------------------
+# calendar_checked_before_habit_placement (A3.6)
+# ---------------------------------------------------------------------------
+
+
+def _call(name, **args):
+    return {"name": name, "args": args}
+
+
+def test_calendar_checked_before_habit_placement_passes_when_covering_call_precedes():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    tool_calls = [
+        _call("get_calendar_events", date_from="2026-08-24", date_to="2026-08-31"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    assert inv.calendar_checked_before_habit_placement(scenario, [], tool_calls).passed is True
+
+
+def test_calendar_checked_before_habit_placement_fails_when_missing():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    tool_calls = [
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    result = inv.calendar_checked_before_habit_placement(scenario, [], tool_calls)
+    assert result.passed is False
+
+
+def test_calendar_checked_before_habit_placement_fails_when_ordering_scrambled():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    tool_calls = [
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+        _call("get_calendar_events", date_from="2026-08-24", date_to="2026-08-31"),
+    ]
+    result = inv.calendar_checked_before_habit_placement(scenario, [], tool_calls)
+    assert result.passed is False
+
+
+def test_calendar_checked_before_habit_placement_fails_when_range_too_narrow():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    tool_calls = [
+        _call("get_calendar_events", date_from="2026-08-24", date_to="2026-08-26"),
+        _call("add_calendar_event", start_time="2026-08-28T18:00:00", habit_id="h1"),
+    ]
+    result = inv.calendar_checked_before_habit_placement(scenario, [], tool_calls)
+    assert result.passed is False
+
+
+def test_calendar_checked_before_habit_placement_not_applicable_with_no_placement():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    assert inv.calendar_checked_before_habit_placement(scenario, [], []).passed is True
+
+
+# ---------------------------------------------------------------------------
+# list_habits_precedes_placement (A3.6)
+# ---------------------------------------------------------------------------
+
+
+def test_list_habits_precedes_placement_passes_when_called_first():
+    scenario = _world(habits=[GYM_HABIT])
+    tool_calls = [
+        _call("list_habits"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    assert inv.list_habits_precedes_placement(scenario, [], tool_calls).passed is True
+
+
+def test_list_habits_precedes_placement_fails_when_missing():
+    scenario = _world(habits=[GYM_HABIT])
+    tool_calls = [
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    assert inv.list_habits_precedes_placement(scenario, [], tool_calls).passed is False
+
+
+def test_list_habits_precedes_placement_fails_when_ordering_scrambled():
+    scenario = _world(habits=[GYM_HABIT])
+    tool_calls = [
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+        _call("list_habits"),
+    ]
+    assert inv.list_habits_precedes_placement(scenario, [], tool_calls).passed is False
+
+
+# ---------------------------------------------------------------------------
+# review_habit_week_precedes_replan (A3.6)
+# ---------------------------------------------------------------------------
+
+
+PRIOR_GYM_SESSION = _event("Gym", "2026-08-17T18:00:00", "2026-08-17T18:30:00", habit_id="h1")
+
+
+def test_review_habit_week_precedes_replan_passes_when_covering_call_precedes():
+    scenario = _world(habits=[GYM_HABIT], calendar_events=[PRIOR_GYM_SESSION], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    tool_calls = [
+        _call("review_habit_week", date_from="2026-08-17", date_to="2026-08-24"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is True
+
+
+def test_review_habit_week_precedes_replan_fails_when_missing():
+    scenario = _world(habits=[GYM_HABIT], calendar_events=[PRIOR_GYM_SESSION], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    tool_calls = [
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is False
+
+
+def test_review_habit_week_precedes_replan_fails_when_ordering_scrambled():
+    scenario = _world(habits=[GYM_HABIT], calendar_events=[PRIOR_GYM_SESSION], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    tool_calls = [
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+        _call("review_habit_week", date_from="2026-08-17", date_to="2026-08-24"),
+    ]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is False
+
+
+def test_review_habit_week_precedes_replan_fails_when_period_not_preceding():
+    scenario = _world(habits=[GYM_HABIT], calendar_events=[PRIOR_GYM_SESSION], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    # date_to is in the future relative to today — not a "preceding" period.
+    tool_calls = [
+        _call("review_habit_week", date_from="2026-08-24", date_to="2026-08-31"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is False
+
+
+def test_review_habit_week_precedes_replan_not_applicable_with_no_prior_sessions():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    tool_calls = [_call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1")]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is True
