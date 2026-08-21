@@ -124,7 +124,12 @@ class ScenarioResult:
         return sum(1 for t in self.trials if t.passed) / len(self.trials)
 
 
-async def run_trial(scenario: Scenario, *, instruction_template: str | None = None) -> TrialResult:
+async def run_trial(
+    scenario: Scenario,
+    *,
+    instruction_template: str | None = None,
+    model: str | None = None,
+) -> TrialResult:
     # Imported lazily (after _configure_environment has run) rather than
     # at module scope — agent.py resolves Vertex AI project/credentials
     # at import time, so it must not be imported before the environment
@@ -139,6 +144,14 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
         # scenario against a different instruction.md without touching
         # the file on disk or reconstructing the Agent.
         agent_module._INSTRUCTION_TEMPLATE = instruction_template
+
+    if model is not None:
+        # A3.3: LlmAgent.model is a plain, uncached pydantic field —
+        # canonical_model re-resolves it via LLMRegistry on every access
+        # (see google.adk.agents.llm_agent.LlmAgent.canonical_model), so
+        # reassigning it here is enough to run the same scenario against
+        # a different model without reconstructing the Agent.
+        agent_module._llm_agent.model = model
 
     fixture = ScenarioFixture(
         zones=scenario.given.zones,
@@ -261,22 +274,34 @@ async def run_trial(scenario: Scenario, *, instruction_template: str | None = No
 
 
 async def run_scenario(
-    scenario: Scenario, *, repeat: int, instruction_template: str | None = None
+    scenario: Scenario,
+    *,
+    repeat: int,
+    instruction_template: str | None = None,
+    model: str | None = None,
 ) -> ScenarioResult:
     result = ScenarioResult(scenario=scenario)
     for _ in range(repeat):
-        result.trials.append(await run_trial(scenario, instruction_template=instruction_template))
+        result.trials.append(
+            await run_trial(scenario, instruction_template=instruction_template, model=model)
+        )
     return result
 
 
 async def run_suite(
-    scenario_dir: Path, *, repeat: int = DEFAULT_REPEAT, instruction_template: str | None = None
+    scenario_dir: Path,
+    *,
+    repeat: int = DEFAULT_REPEAT,
+    instruction_template: str | None = None,
+    model: str | None = None,
 ) -> list[ScenarioResult]:
     scenarios = load_scenarios(scenario_dir)
     results = []
     for scenario in scenarios:
         results.append(
-            await run_scenario(scenario, repeat=repeat, instruction_template=instruction_template)
+            await run_scenario(
+                scenario, repeat=repeat, instruction_template=instruction_template, model=model
+            )
         )
     return results
 
@@ -316,6 +341,95 @@ def format_report(results: list[ScenarioResult]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# A3.3 — model comparison matrix.
+#
+# Pricing is standard (non-batch, non-priority) pay-as-you-go, USD per 1M
+# tokens, from https://ai.google.dev/gemini-api/docs/pricing, fetched
+# 2026-08-21. Gemini list pricing is unified across the Gemini Developer
+# API and Vertex AI for standard-tier usage; this deployment's own
+# prompts are far under the 200k-token tier boundary Pro's pricing has
+# (see BASELINE.md — tens of thousands of tokens per trial, not
+# hundreds of thousands), so only the <=200k row is included here.
+# **Verify against Vertex AI's own current pricing page before trusting
+# this for a real budget decision** — same "verify, don't assume"
+# discipline A0.5 already applied to the model-version string itself;
+# this table is a snapshot, not a live source.
+# ---------------------------------------------------------------------------
+MODEL_PRICING_USD_PER_1M_TOKENS = {
+    # (input, output — thinking tokens are billed at the output rate,
+    # per Google's pricing page: "includes thinking tokens")
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
+}
+
+
+def estimate_cost_usd(trial: TrialResult, model: str) -> float | None:
+    pricing = MODEL_PRICING_USD_PER_1M_TOKENS.get(model)
+    if pricing is None:
+        return None
+    input_rate, output_rate = pricing
+    # Thinking tokens are billed at the output rate — see the pricing
+    # note above — so they're added to output, not tracked separately.
+    return (
+        trial.input_tokens * input_rate
+        + (trial.output_tokens + trial.thinking_tokens) * output_rate
+    ) / 1_000_000
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round(pct * (len(ordered) - 1))))
+    return ordered[index]
+
+
+async def run_comparison(
+    scenario_dir: Path, *, models: list[str], repeat: int = DEFAULT_REPEAT
+) -> dict[str, list[ScenarioResult]]:
+    """A3.3 scope item 1+2: the same suite, run once per candidate model,
+    for the comparison matrix in format_comparison_matrix. Scenarios are
+    reloaded per model rather than shared — cheap, and avoids any risk of
+    one model's run mutating Scenario objects the next model's run reads."""
+    results_by_model: dict[str, list[ScenarioResult]] = {}
+    for model in models:
+        results_by_model[model] = await run_suite(scenario_dir, repeat=repeat, model=model)
+    return results_by_model
+
+
+def format_comparison_matrix(results_by_model: dict[str, list[ScenarioResult]]) -> str:
+    lines = ["model comparison matrix (A3.3)", ""]
+    header = f"{'model':<20}{'tier1':>8}{'tier2':>8}{'p50 wall_s':>12}{'p95 wall_s':>12}{'$/scenario':>14}{'total $':>12}"
+    lines.append(header)
+    lines.append("-" * len(header))
+    for model, results in results_by_model.items():
+        all_trials = [t for r in results for t in r.trials]
+        wall_times = [t.wall_s for t in all_trials]
+        costs = [estimate_cost_usd(t, model) for t in all_trials]
+        known_costs = [c for c in costs if c is not None]
+        total_cost = sum(known_costs) if known_costs else None
+        per_scenario = total_cost / len(results) if total_cost is not None and results else None
+        tier1 = tier_pass_rate(results, "constraint")
+        tier2 = tier_pass_rate(results, "decision")
+        lines.append(
+            f"{model:<20}"
+            f"{(f'{tier1:.1%}' if tier1 is not None else 'n/a'):>8}"
+            f"{(f'{tier2:.1%}' if tier2 is not None else 'n/a'):>8}"
+            f"{_percentile(wall_times, 0.50):>12.1f}"
+            f"{_percentile(wall_times, 0.95):>12.1f}"
+            f"{(f'${per_scenario:.4f}' if per_scenario is not None else 'unknown'):>14}"
+            f"{(f'${total_cost:.4f}' if total_cost is not None else 'unknown'):>12}"
+        )
+    lines.append("")
+    lines.append(
+        "cost = input_tokens*input_rate + (output_tokens+thinking_tokens)*output_rate, "
+        "per MODEL_PRICING_USD_PER_1M_TOKENS above — verify against current Vertex AI "
+        "pricing before treating this as a budget figure, not just a relative comparison."
+    )
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario_dir", nargs="?", default=str(DEFAULT_SCENARIO_DIR))
@@ -330,11 +444,47 @@ def main() -> int:
             "the old-vs-new comparison A3.1's own notes suggest."
         ),
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Run the suite against this model instead of agent.py's pinned one (A3.3).",
+    )
+    parser.add_argument(
+        "--compare-models",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated model names — runs the full suite once per model and "
+            "prints a comparison matrix (pass rate x latency x cost) instead of the "
+            "normal per-scenario report (A3.3). Mutually exclusive with --model."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.compare_models:
+        if args.model:
+            print("--model and --compare-models are mutually exclusive", file=sys.stderr)
+            return 2
+        models = [m.strip() for m in args.compare_models.split(",") if m.strip()]
+        results_by_model = asyncio.run(
+            run_comparison(Path(args.scenario_dir), models=models, repeat=args.repeat)
+        )
+        for model, results in results_by_model.items():
+            print(f"=== {model} ===")
+            print(format_report(results))
+            print()
+        print(format_comparison_matrix(results_by_model))
+        return 0
 
     instruction_template = Path(args.instruction).read_text() if args.instruction else None
     results = asyncio.run(
-        run_suite(Path(args.scenario_dir), repeat=args.repeat, instruction_template=instruction_template)
+        run_suite(
+            Path(args.scenario_dir),
+            repeat=args.repeat,
+            instruction_template=instruction_template,
+            model=args.model,
+        )
     )
     print(format_report(results))
 
