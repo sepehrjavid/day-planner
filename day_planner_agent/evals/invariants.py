@@ -574,8 +574,36 @@ _GENERIC_ENTITY_PREFIXES = {
     "This", "That", "The", "A", "An", "Any", "No", "Every", "Each",
     "Your", "Its", "New", "Time", "Some", "One", "Another",
 }
-_ZONE_CITATION_RE = re.compile(r"\b([A-Z][a-zA-Z]*)\s+zone\b")
-_HABIT_CITATION_RE = re.compile(r"\b([A-Z][a-zA-Z]*)\s+habit\b")
+
+
+def _entity_citations(reply_text: str, real_labels: set[str], suffix: str) -> list[str]:
+    """Find "<label> {suffix}" citations in reply_text, preferring the
+    longest real label that matches immediately before the suffix word.
+    Labels aren't always one word ("Deep Work"), so a naive single-word
+    capture right before "zone"/"habit" would grab only "Work" out of
+    "your Deep Work zone" — a real, existing zone — and wrongly flag it
+    as fabricated. Real multi-word citations are matched and excluded
+    first; only a citation no real label accounts for falls through to
+    the single-capitalized-word heuristic that actually flags something."""
+    known_spans: list[tuple[int, int]] = []
+    if real_labels:
+        alternation = "|".join(re.escape(label) for label in sorted(real_labels, key=len, reverse=True))
+        known_re = re.compile(rf"\b(?:{alternation})\s+{suffix}\b")
+        known_spans = [m.span() for m in known_re.finditer(reply_text)]
+
+    def _covered(pos: int) -> bool:
+        return any(start <= pos < end for start, end in known_spans)
+
+    generic_re = re.compile(rf"\b([A-Z][a-zA-Z]*)\s+{suffix}\b")
+    citations = []
+    for match in generic_re.finditer(reply_text):
+        if _covered(match.start()):
+            continue
+        word = match.group(1)
+        if word in _GENERIC_ENTITY_PREFIXES:
+            continue
+        citations.append(word)
+    return citations
 
 
 def explanation_cites_real_entities(
@@ -584,29 +612,21 @@ def explanation_cites_real_entities(
     """instruction.md requires the agent to explain why it placed each
     session — this checks that the explanation's named entities are real,
     not that the explanation is well-formed or persuasive. Scans
-    reply_text for "<Word> zone" / "<Word> habit" citations and flags any
-    captured word that isn't an actual zone or habit label in this
-    fixture (nor "cool-down"/"wake-up", the two sleep-derived windows
-    that behave like zones — see instruction.md's placement paragraph).
-    A cheap, deterministic catch for blatant confabulation — "I avoided
-    your Evening zone" when no such zone exists — not a semantic check of
+    reply_text for "<label> zone" / "<label> habit" citations and flags
+    any that isn't an actual zone or habit label in this fixture (nor
+    "cool-down"/"wake-up", the two sleep-derived windows that behave like
+    zones — see instruction.md's placement paragraph). A cheap,
+    deterministic catch for blatant confabulation — "I avoided your
+    Evening zone" when no such zone exists — not a semantic check of
     whether the cited entity actually covers the slot in question."""
     real_zone_labels = {z["label"] for z in world.zones} | {"cool-down", "wake-up"}
     real_habit_labels = {h["label"] for h in world.habits}
 
     violations = []
-    for match in _ZONE_CITATION_RE.finditer(reply_text):
-        word = match.group(1)
-        if word in _GENERIC_ENTITY_PREFIXES:
-            continue
-        if word not in real_zone_labels:
-            violations.append(f"reply cites {word!r} zone, which does not exist in this fixture")
-    for match in _HABIT_CITATION_RE.finditer(reply_text):
-        word = match.group(1)
-        if word in _GENERIC_ENTITY_PREFIXES:
-            continue
-        if word not in real_habit_labels:
-            violations.append(f"reply cites {word!r} habit, which does not exist in this fixture")
+    for word in _entity_citations(reply_text, real_zone_labels, "zone"):
+        violations.append(f"reply cites {word!r} zone, which does not exist in this fixture")
+    for word in _entity_citations(reply_text, real_habit_labels, "habit"):
+        violations.append(f"reply cites {word!r} habit, which does not exist in this fixture")
     return InvariantResult(not violations, "; ".join(violations))
 
 

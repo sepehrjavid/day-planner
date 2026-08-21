@@ -578,6 +578,25 @@ def test_explanation_cites_real_entities_passes_with_no_reply():
     assert inv.explanation_cites_real_entities(scenario, [], []).passed is True
 
 
+def test_explanation_cites_real_entities_passes_for_multiword_zone_label():
+    # Regression: a naive single-word capture right before "zone" would
+    # grab only "Work" out of "Deep Work zone" and wrongly flag a real,
+    # existing multi-word label as fabricated.
+    deep_work_zone = {**WORK_ZONE, "label": "Deep Work"}
+    scenario = _world(zones=[deep_work_zone], habits=[GYM_HABIT])
+    reply = "I avoided your Deep Work zone and placed the session in the evening."
+    assert inv.explanation_cites_real_entities(scenario, [], [], reply).passed is True
+
+
+def test_explanation_cites_real_entities_still_fails_for_fabricated_multiword_zone():
+    deep_work_zone = {**WORK_ZONE, "label": "Deep Work"}
+    scenario = _world(zones=[deep_work_zone], habits=[GYM_HABIT])
+    reply = "I avoided your Evening Focus zone entirely."
+    result = inv.explanation_cites_real_entities(scenario, [], [], reply)
+    assert result.passed is False
+    assert "Focus" in result.detail
+
+
 # ---------------------------------------------------------------------------
 # calendar_checked_before_habit_placement (A3.6)
 # ---------------------------------------------------------------------------
