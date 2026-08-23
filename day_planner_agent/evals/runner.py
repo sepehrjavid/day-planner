@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import subprocess
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -430,6 +432,55 @@ def format_comparison_matrix(results_by_model: dict[str, list[ScenarioResult]]) 
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# A3.4 (rescoped) — a committed, append-only run history.
+#
+# Not BigQuery — that's explicitly deferred until there's enough history
+# to want querying rather than reading (see the roadmap's own note).
+# Version control gives history, diffs and blame for free, which is the
+# whole requirement at this stage: catch a model alias silently moving
+# underneath the pin, or slow erosion across A4.3's rule-by-rule cuts,
+# by comparing rows over time rather than only against the immediately
+# preceding run.
+# ---------------------------------------------------------------------------
+HISTORY_PATH = Path(__file__).parent / "history.jsonl"
+
+
+def _git_commit_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=_REPO_ROOT, text=True
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return "unknown"
+
+
+def append_history_record(
+    results: list[ScenarioResult], *, repeat: int, scenario_dir: Path, model: str
+) -> dict:
+    """One line per eval run, appended never rewritten — see this
+    module's own note on why a committed file rather than BigQuery. The
+    model string is the one field this exists specifically to capture:
+    it's the only signal that would ever distinguish a moved model alias
+    from a genuine prompt regression (see A0.5, A3.3's own retirement-date
+    comment on `agent.py`'s pinned model)."""
+    record = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "commit_sha": _git_commit_sha(),
+        "model": model,
+        "repeat": repeat,
+        "scenario_dir": str(scenario_dir),
+        "tier_pass_rates": {
+            tier: rate
+            for tier in ("constraint", "decision", "quality")
+            if (rate := tier_pass_rate(results, tier)) is not None
+        },
+    }
+    with HISTORY_PATH.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario_dir", nargs="?", default=str(DEFAULT_SCENARIO_DIR))
@@ -487,6 +538,22 @@ def main() -> int:
         )
     )
     print(format_report(results))
+
+    if instruction_template is None:
+        # An --instruction override is a deliberate what-if (a meta-test
+        # rule removal, an old-vs-new comparison) against text that isn't
+        # the real, deployed instruction.md — recording it here would
+        # make a genuine regression indistinguishable from an
+        # intentional experiment in the same trend line.
+        from day_planner_agent import agent as agent_module
+
+        record = append_history_record(
+            results,
+            repeat=args.repeat,
+            scenario_dir=Path(args.scenario_dir),
+            model=agent_module._llm_agent.model,
+        )
+        print(f"appended to {HISTORY_PATH}: {json.dumps(record)}")
 
     constraint_rate = tier_pass_rate(results, "constraint")
     return 0 if constraint_rate is None or constraint_rate >= 1.0 else 1
