@@ -2,7 +2,7 @@
 /agent/zones (A6.2), including the DELETE that has no /agent equivalent
 (see routes/zones.py's own docstring for why deletion is /me-only).
 
-test_zones.py already covers Store.create_zone/list_zones/update_zone
+test_zones.py already covers store.zones.create/list/update
 directly; these exercise the same store methods through the route, so
 what's new here is auth scoping and HTTP status mapping, plus delete_zone
 itself (new in A6.3, no A6.1 predecessor to already be covered).

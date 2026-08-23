@@ -48,7 +48,7 @@ async def create_habit(
     store: Store = Depends(get_store),
 ):
     """Track a new recurring goal for the signed-in user."""
-    habit = await store.create_habit(user_id=user_id, label=body.label, goal=body.goal)
+    habit = await store.habits.create(user_id=user_id, label=body.label, goal=body.goal)
     return _to_habit_out(habit)
 
 
@@ -60,7 +60,7 @@ async def list_habits(
 ):
     """Every tracked habit for the signed-in user, optionally filtered to
     one status."""
-    habits = await store.list_habits(user_id, status=status)
+    habits = await store.habits.list(user_id, status=status)
     return HabitsResponse(habits=[_to_habit_out(h) for h in habits])
 
 
@@ -72,7 +72,7 @@ async def update_habit(
 ):
     """Partial update of a tracked habit, e.g. to change its goal or
     retire it (status="paused"/"archived")."""
-    habit = await store.update_habit(
+    habit = await store.habits.update(
         user_id=user_id,
         habit_id=body.habit_id,
         label=body.label,

@@ -12,7 +12,7 @@ from app.schemas.zones import CreateZoneRequest
 
 
 async def test_create_zone_returns_a_stable_id(store):
-    zone = await store.create_zone(
+    zone = await store.zones.create(
         user_id="u1",
         label="Work",
         start_time="09:00",
@@ -32,24 +32,24 @@ def test_create_zone_request_rejects_malformed_time():
 
 
 async def test_list_zones_empty_by_default(store):
-    assert await store.list_zones("u1") == []
+    assert await store.zones.list("u1") == []
 
 
 async def test_list_zones_returns_created_and_scopes_by_user(store):
-    await store.create_zone(
+    await store.zones.create(
         user_id="u1", label="Work", start_time="09:00", end_time="17:00", days_of_week=["mon"]
     )
     # A different user's zones must never show up in this list.
-    await store.create_zone(
+    await store.zones.create(
         user_id="u2", label="Commute", start_time="08:00", end_time="09:00", days_of_week=["mon"]
     )
 
-    zones = await store.list_zones("u1")
+    zones = await store.zones.list("u1")
     assert {z.label for z in zones} == {"Work"}
 
 
 async def test_update_zone_changes_fields(store):
-    created = await store.create_zone(
+    created = await store.zones.create(
         user_id="u1",
         label="Work",
         start_time="09:00",
@@ -57,20 +57,20 @@ async def test_update_zone_changes_fields(store):
         days_of_week=["mon", "tue", "wed", "thu", "fri"],
     )
 
-    updated = await store.update_zone(user_id="u1", zone_id=created.zone_id, end_time="18:00")
+    updated = await store.zones.update(user_id="u1", zone_id=created.zone_id, end_time="18:00")
     assert updated.end_time == "18:00"
     assert updated.start_time == "09:00"  # untouched field survives a partial update
 
 
 async def test_update_zone_unknown_returns_none(store):
-    assert await store.update_zone(user_id="u1", zone_id="ghost", end_time="18:00") is None
+    assert await store.zones.update(user_id="u1", zone_id="ghost", end_time="18:00") is None
 
 
 async def test_update_zone_wrong_user_returns_none(store):
-    created = await store.create_zone(
+    created = await store.zones.create(
         user_id="u1", label="Work", start_time="09:00", end_time="17:00", days_of_week=["mon"]
     )
 
     assert (
-        await store.update_zone(user_id="u2", zone_id=created.zone_id, end_time="18:00") is None
+        await store.zones.update(user_id="u2", zone_id=created.zone_id, end_time="18:00") is None
     )

@@ -43,6 +43,7 @@ from app.db.models import (  # noqa: E402
     HABIT_SESSION_STATUS_PENDING,
     HABIT_STATUS_ACTIVE,
     STATUS_ACTIVE,
+    STATUS_NEEDS_REAUTH,
     Calendar,
     ConnectedAccount,
     EmailAlreadyRegistered,
@@ -67,74 +68,56 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-class FakeStore:
-    """In-memory stand-in for Firestore, mirroring the real document shape."""
+class _FakeUsers:
+    """Mirrors app/db/repositories/users.py's UserRepository (A6.5)."""
 
-    def __init__(self) -> None:
-        self.users: dict[str, dict] = {}
-        self.emails: dict[str, str] = {}
-        self.sessions: dict[str, dict] = {}
-        self.throttle: dict[str, dict] = {}
-        self.password_resets: dict[str, dict] = {}
-        self.reset_throttle: dict[str, dict] = {}
-        self.states: dict[str, OAuthState] = {}
-        self.accounts: dict[str, dict[str, dict]] = {}
-        self.habits: dict[str, dict[str, dict]] = {}
-        self.habit_sessions: dict[str, dict[str, dict]] = {}
-        self.zones: dict[str, dict[str, dict]] = {}
-        self.sleep_schedules: dict[str, dict] = {}
-        self._seq = 0
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
 
-    def _next(self, prefix: str) -> str:
-        self._seq += 1
-        return f"{prefix}-{self._seq}"
-
-    # --- users ---
-    async def create_user(self, *, email, password_hash):
+    async def create(self, *, email, password_hash):
+        store = self._store
         normalized = normalize_email(email)
-        if normalized in self.emails:
+        if normalized in store._emails:
             raise EmailAlreadyRegistered(normalized)
-        user_id = self._next("user")
-        self.emails[normalized] = user_id
-        self.users[user_id] = {
+        user_id = store._next("user")
+        store._emails[normalized] = user_id
+        store._users[user_id] = {
             "email": normalized,
             "password_hash": password_hash,
             "email_verified": False,
             "default_account_id": None,
         }
-        self.accounts[user_id] = {}
+        store._accounts[user_id] = {}
         return user_id
 
-    async def get_user(self, user_id):
-        user = self.users.get(user_id)
+    async def get(self, user_id):
+        user = self._store._users.get(user_id)
         return None if user is None else {"user_id": user_id, **user}
 
-    async def get_user_by_email(self, email):
-        user_id = self.emails.get(normalize_email(email))
-        return None if user_id is None else await self.get_user(user_id)
+    async def get_by_email(self, email):
+        user_id = self._store._emails.get(normalize_email(email))
+        return None if user_id is None else await self.get(user_id)
 
     async def update_password_hash(self, *, user_id, password_hash):
-        self.users[user_id]["password_hash"] = password_hash
+        self._store._users[user_id]["password_hash"] = password_hash
 
-    # --- agent session ---
     async def get_agent_session(self, user_id):
-        user = self.users.get(user_id, {})
+        user = self._store._users.get(user_id, {})
         return user.get("agent_session_id"), user.get("agent_session_last_active_at")
 
     async def set_agent_session(self, *, user_id, session_id):
-        self.users[user_id]["agent_session_id"] = session_id
-        self.users[user_id]["agent_session_last_active_at"] = _now()
+        self._store._users[user_id]["agent_session_id"] = session_id
+        self._store._users[user_id]["agent_session_last_active_at"] = _now()
 
     async def clear_agent_session(self, user_id):
-        self.users[user_id]["agent_session_id"] = None
-        self.users[user_id]["agent_session_last_active_at"] = None
+        self._store._users[user_id]["agent_session_id"] = None
+        self._store._users[user_id]["agent_session_last_active_at"] = None
 
-    # --- chat quota ---
     async def check_and_consume_quota(self, user_id, *, daily_limit):
         now = _now()
         today = now.date().isoformat()
         reset_at = next_utc_midnight(now)
-        user = self.users[user_id]
+        user = self._store._users[user_id]
         count = user.get("quota_count", 0) if user.get("quota_date") == today else 0
 
         if count >= daily_limit:
@@ -152,30 +135,45 @@ class FakeStore:
             reset_at=reset_at,
         )
 
-    # --- sessions ---
-    async def create_session(self, *, user_id, ttl_seconds):
-        token = self._next("session-token")
+
+class _FakeSessions:
+    """Mirrors app/db/repositories/sessions.py's SessionRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def create(self, *, user_id, ttl_seconds):
+        store = self._store
+        token = store._next("session-token")
         expires_at = _now() + timedelta(seconds=ttl_seconds)
-        self.sessions[token] = {"user_id": user_id, "expires_at": expires_at}
+        store._sessions[token] = {"user_id": user_id, "expires_at": expires_at}
         return token, expires_at
 
-    async def resolve_session(self, token):
-        session = self.sessions.get(token)
+    async def resolve(self, token):
+        session = self._store._sessions.get(token)
         if session is None or _now() >= session["expires_at"]:
             return None
         return session["user_id"]
 
-    async def delete_session(self, token):
-        self.sessions.pop(token, None)
+    async def delete(self, token):
+        self._store._sessions.pop(token, None)
 
-    async def delete_sessions(self, *, user_id, except_token=None):
-        for token, session in list(self.sessions.items()):
+    async def delete_all_for_user(self, *, user_id, except_token=None):
+        sessions = self._store._sessions
+        for token, session in list(sessions.items()):
             if session["user_id"] == user_id and token != except_token:
-                del self.sessions[token]
+                del sessions[token]
 
-    # --- login throttle ---
-    async def check_login_throttle(self, email, *, max_attempts, lockout_seconds):
-        record = self.throttle.get(normalize_email(email))
+
+class _FakeLoginThrottle:
+    """Mirrors app/db/repositories/login_throttle.py's
+    LoginThrottleRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def check(self, email, *, max_attempts, lockout_seconds):
+        record = self._store._login_throttle.get(normalize_email(email))
         if record and record.get("locked_until", _now()) > _now():
             return ThrottleState(
                 locked=True,
@@ -186,34 +184,50 @@ class FakeStore:
             )
         return ThrottleState(locked=False)
 
-    async def record_login_failure(self, email, *, max_attempts, lockout_seconds):
+    async def record_failure(self, email, *, max_attempts, lockout_seconds):
         key = normalize_email(email)
-        record = self.throttle.setdefault(key, {"failed_count": 0})
+        record = self._store._login_throttle.setdefault(key, {"failed_count": 0})
         record["failed_count"] += 1
         if record["failed_count"] >= max_attempts:
             record["locked_until"] = _now() + timedelta(seconds=lockout_seconds)
             record["failed_count"] = 0
 
-    async def clear_login_failures(self, email):
-        self.throttle.pop(normalize_email(email), None)
+    async def clear(self, email):
+        self._store._login_throttle.pop(normalize_email(email), None)
 
-    # --- password reset (A6.4) ---
-    async def create_password_reset_token(self, *, user_id, ttl_seconds):
-        token = self._next("reset-token")
+
+class _FakePasswordResets:
+    """Mirrors app/db/repositories/password_resets.py's
+    PasswordResetRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def create(self, *, user_id, ttl_seconds):
+        store = self._store
+        token = store._next("reset-token")
         expires_at = _now() + timedelta(seconds=ttl_seconds)
-        self.password_resets[token] = {"user_id": user_id, "expires_at": expires_at}
+        store._password_resets[token] = {"user_id": user_id, "expires_at": expires_at}
         return token, expires_at
 
-    async def consume_password_reset_token(self, token):
-        data = self.password_resets.pop(token, None)
+    async def consume(self, token):
+        data = self._store._password_resets.pop(token, None)
         if data is None:
             return None
         if _now() >= data["expires_at"]:
             return None
         return data["user_id"]
 
-    async def check_reset_throttle(self, key, *, max_attempts, lockout_seconds):
-        record = self.reset_throttle.get(key)
+
+class _FakePasswordResetThrottle:
+    """Mirrors app/db/repositories/password_reset_throttle.py's
+    PasswordResetThrottleRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def check(self, key, *, max_attempts, lockout_seconds):
+        record = self._store._password_reset_throttle.get(key)
         if record and record.get("locked_until", _now()) > _now():
             return ThrottleState(
                 locked=True,
@@ -224,33 +238,48 @@ class FakeStore:
             )
         return ThrottleState(locked=False)
 
-    async def record_reset_attempt(self, key, *, max_attempts, lockout_seconds):
-        record = self.reset_throttle.setdefault(key, {"attempt_count": 0})
+    async def record_attempt(self, key, *, max_attempts, lockout_seconds):
+        record = self._store._password_reset_throttle.setdefault(
+            key, {"attempt_count": 0}
+        )
         record["attempt_count"] += 1
         if record["attempt_count"] >= max_attempts:
             record["locked_until"] = _now() + timedelta(seconds=lockout_seconds)
             record["attempt_count"] = 0
 
-    # --- oauth state ---
-    async def create_oauth_state(self, *, user_id, provider, code_verifier, ttl_seconds):
+
+class _FakeOAuthStates:
+    """Mirrors app/db/repositories/oauth_states.py's
+    OAuthStateRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def create(self, *, user_id, provider, code_verifier, ttl_seconds):
         state = OAuthState(
-            nonce=self._next("nonce"),
+            nonce=self._store._next("nonce"),
             user_id=user_id,
             provider=provider,
             code_verifier=code_verifier,
             expires_at=_now() + timedelta(seconds=ttl_seconds),
         )
-        self.states[state.nonce] = state
+        self._store._oauth_states[state.nonce] = state
         return state
 
-    async def peek_oauth_state(self, nonce):
-        return self.states.get(nonce)
+    async def peek(self, nonce):
+        return self._store._oauth_states.get(nonce)
 
-    async def consume_oauth_state(self, nonce):
-        return self.states.pop(nonce, None)
+    async def consume(self, nonce):
+        return self._store._oauth_states.pop(nonce, None)
 
-    # --- connected accounts ---
-    async def save_account(
+
+class _FakeAccounts:
+    """Mirrors app/db/repositories/accounts.py's AccountRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def save(
         self,
         *,
         user_id,
@@ -263,8 +292,9 @@ class FakeStore:
         scopes,
         calendars,
     ):
+        store = self._store
         account_id = account_id_for(provider, provider_account_id)
-        owned = self.accounts.setdefault(user_id, {})
+        owned = store._accounts.setdefault(user_id, {})
         previous = owned.get(account_id)
 
         previously_selected = (
@@ -298,8 +328,8 @@ class FakeStore:
             "calendars": merged,
             "last_error": None,
         }
-        if not self.users[user_id].get("default_account_id"):
-            self.users[user_id]["default_account_id"] = account_id
+        if not store._users[user_id].get("default_account_id"):
+            store._users[user_id]["default_account_id"] = account_id
         return account_id
 
     def _to_account(self, account_id, data):
@@ -317,18 +347,18 @@ class FakeStore:
             last_error=data.get("last_error"),
         )
 
-    async def list_accounts(self, user_id):
+    async def list(self, user_id):
         return [
             self._to_account(aid, data)
-            for aid, data in self.accounts.get(user_id, {}).items()
+            for aid, data in self._store._accounts.get(user_id, {}).items()
         ]
 
-    async def get_account(self, *, user_id, account_id):
-        data = self.accounts.get(user_id, {}).get(account_id)
+    async def get(self, *, user_id, account_id):
+        data = self._store._accounts.get(user_id, {}).get(account_id)
         return None if data is None else self._to_account(account_id, data)
 
     async def set_calendar_selection(self, *, user_id, account_id, selected_calendar_ids):
-        data = self.accounts.get(user_id, {}).get(account_id)
+        data = self._store._accounts.get(user_id, {}).get(account_id)
         if data is None:
             return None
         data["calendars"] = [
@@ -342,17 +372,33 @@ class FakeStore:
         ]
         return self._to_account(account_id, data)
 
-    async def delete_account(self, *, user_id, account_id):
-        self.accounts.get(user_id, {}).pop(account_id, None)
-        if self.users[user_id].get("default_account_id") == account_id:
-            remaining = list(self.accounts.get(user_id, {}))
-            self.users[user_id]["default_account_id"] = (
+    async def mark_needs_reauth(self, *, user_id, account_id, reason):
+        data = self._store._accounts.get(user_id, {}).get(account_id)
+        if data is None:
+            return
+        data["status"] = STATUS_NEEDS_REAUTH
+        data["encrypted_refresh_token"] = None
+        data["last_error"] = reason
+
+    async def delete(self, *, user_id, account_id):
+        store = self._store
+        store._accounts.get(user_id, {}).pop(account_id, None)
+        if store._users[user_id].get("default_account_id") == account_id:
+            remaining = list(store._accounts.get(user_id, {}))
+            store._users[user_id]["default_account_id"] = (
                 remaining[0] if remaining else None
             )
 
-    # --- habits (A6.1: moved from day_planner_backend_internal) ---
-    async def create_habit(self, *, user_id, label, goal):
-        habit_id = self._next("habit")
+
+class _FakeHabits:
+    """Mirrors app/db/repositories/habits.py's HabitRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def create(self, *, user_id, label, goal):
+        store = self._store
+        habit_id = store._next("habit")
         now = _now()
         data = {
             "label": label,
@@ -361,21 +407,21 @@ class FakeStore:
             "created_at": now,
             "updated_at": now,
         }
-        self.habits.setdefault(user_id, {})[habit_id] = data
+        store._habits.setdefault(user_id, {})[habit_id] = data
         return Habit.from_dict(habit_id, data)
 
-    async def list_habits(self, user_id, *, status=None):
-        items = self.habits.get(user_id, {})
+    async def list(self, user_id, *, status=None):
+        items = self._store._habits.get(user_id, {})
         return [
             Habit.from_dict(habit_id, data)
             for habit_id, data in items.items()
             if status is None or data["status"] == status
         ]
 
-    async def update_habit(
+    async def update(
         self, *, user_id, habit_id, label=None, goal=None, status=None, allowed_zones=None
     ):
-        data = self.habits.get(user_id, {}).get(habit_id)
+        data = self._store._habits.get(user_id, {}).get(habit_id)
         if data is None:
             return None
         if label is not None:
@@ -389,12 +435,19 @@ class FakeStore:
         data["updated_at"] = _now()
         return Habit.from_dict(habit_id, data)
 
-    # --- habit sessions ---
-    async def upsert_habit_session(
+
+class _FakeHabitSessions:
+    """Mirrors app/db/repositories/habit_sessions.py's
+    HabitSessionRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def upsert(
         self, *, user_id, habit_id, event_id, calendar_id, planned_start, planned_end
     ):
+        bucket = self._store._habit_sessions.setdefault(user_id, {})
         session_id = habit_session_id_for(calendar_id, event_id)
-        bucket = self.habit_sessions.setdefault(user_id, {})
         existing = bucket.get(session_id)
         now = _now()
         data = {
@@ -416,11 +469,9 @@ class FakeStore:
         bucket[session_id] = data
         return HabitSession.from_dict(session_id, data)
 
-    async def set_habit_session_status(
-        self, *, user_id, calendar_id, event_id, status, marked_by
-    ):
+    async def set_status(self, *, user_id, calendar_id, event_id, status, marked_by):
         session_id = habit_session_id_for(calendar_id, event_id)
-        bucket = self.habit_sessions.get(user_id, {})
+        bucket = self._store._habit_sessions.get(user_id, {})
         data = bucket.get(session_id)
         if data is None:
             return None
@@ -432,16 +483,23 @@ class FakeStore:
         data["completed_at"] = _now() if status == HABIT_SESSION_STATUS_COMPLETED else None
         return HabitSession.from_dict(session_id, data)
 
-    async def list_habit_sessions(self, user_id, *, planned_from, planned_to):
+    async def list(self, user_id, *, planned_from, planned_to):
         return [
             HabitSession.from_dict(session_id, data)
-            for session_id, data in self.habit_sessions.get(user_id, {}).items()
+            for session_id, data in self._store._habit_sessions.get(user_id, {}).items()
             if planned_from <= data["planned_start"] < planned_to
         ]
 
-    # --- zones ---
-    async def create_zone(self, *, user_id, label, start_time, end_time, days_of_week):
-        zone_id = self._next("zone")
+
+class _FakeZones:
+    """Mirrors app/db/repositories/zones.py's ZoneRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def create(self, *, user_id, label, start_time, end_time, days_of_week):
+        store = self._store
+        zone_id = store._next("zone")
         now = _now()
         data = {
             "label": label,
@@ -451,19 +509,19 @@ class FakeStore:
             "created_at": now,
             "updated_at": now,
         }
-        self.zones.setdefault(user_id, {})[zone_id] = data
+        store._zones.setdefault(user_id, {})[zone_id] = data
         return Zone.from_dict(zone_id, data)
 
-    async def list_zones(self, user_id):
+    async def list(self, user_id):
         return [
             Zone.from_dict(zone_id, data)
-            for zone_id, data in self.zones.get(user_id, {}).items()
+            for zone_id, data in self._store._zones.get(user_id, {}).items()
         ]
 
-    async def update_zone(
+    async def update(
         self, *, user_id, zone_id, label=None, start_time=None, end_time=None, days_of_week=None
     ):
-        data = self.zones.get(user_id, {}).get(zone_id)
+        data = self._store._zones.get(user_id, {}).get(zone_id)
         if data is None:
             return None
         if label is not None:
@@ -477,19 +535,26 @@ class FakeStore:
         data["updated_at"] = _now()
         return Zone.from_dict(zone_id, data)
 
-    async def delete_zone(self, *, user_id, zone_id):
-        bucket = self.zones.get(user_id, {})
+    async def delete(self, *, user_id, zone_id):
+        bucket = self._store._zones.get(user_id, {})
         if zone_id not in bucket:
             return False
         del bucket[zone_id]
         return True
 
-    # --- sleep schedule ---
-    async def get_sleep_schedule(self, user_id):
-        data = self.sleep_schedules.get(user_id)
+
+class _FakeSleepSchedule:
+    """Mirrors app/db/repositories/sleep_schedule.py's
+    SleepScheduleRepository (A6.5)."""
+
+    def __init__(self, store: "FakeStore") -> None:
+        self._store = store
+
+    async def get(self, user_id):
+        data = self._store._sleep_schedules.get(user_id)
         return None if data is None else SleepSchedule.from_dict(data)
 
-    async def set_sleep_schedule(
+    async def set(
         self,
         *,
         user_id,
@@ -499,11 +564,12 @@ class FakeStore:
         wake_up_buffer_minutes=None,
         day_overrides=None,
     ):
-        data = self.sleep_schedules.get(user_id)
+        store = self._store
+        data = store._sleep_schedules.get(user_id)
         now = _now()
         if data is None:
             data = {"created_at": now}
-            self.sleep_schedules[user_id] = data
+            store._sleep_schedules[user_id] = data
         if sleep_time is not None:
             data["sleep_time"] = sleep_time
         if wake_time is not None:
@@ -516,6 +582,52 @@ class FakeStore:
             data["day_overrides"] = day_overrides
         data["updated_at"] = now
         return SleepSchedule.from_dict(data)
+
+
+class FakeStore:
+    """In-memory stand-in for Firestore, mirroring the real document shape.
+
+    Restructured in lockstep with the real Store's A6.5 repository split —
+    `store.habits.create(...)`, `store.zones.list(...)`, etc. — since route
+    code under test calls exactly that shape. The underlying dicts
+    (`_users`, `_sessions`, ...) are private to this class; a handful of
+    tests reach into them directly for setup/assertions that have no
+    public-API equivalent (expiring a session early, reading a raw
+    password hash) — that's why they're still plain dicts and not hidden
+    behind the fakes above, just no longer named the same as the public
+    repository attributes.
+    """
+
+    def __init__(self) -> None:
+        self._users: dict[str, dict] = {}
+        self._emails: dict[str, str] = {}
+        self._sessions: dict[str, dict] = {}
+        self._login_throttle: dict[str, dict] = {}
+        self._password_resets: dict[str, dict] = {}
+        self._password_reset_throttle: dict[str, dict] = {}
+        self._oauth_states: dict[str, OAuthState] = {}
+        self._accounts: dict[str, dict[str, dict]] = {}
+        self._habits: dict[str, dict[str, dict]] = {}
+        self._habit_sessions: dict[str, dict[str, dict]] = {}
+        self._zones: dict[str, dict[str, dict]] = {}
+        self._sleep_schedules: dict[str, dict] = {}
+        self._seq = 0
+
+        self.users = _FakeUsers(self)
+        self.sessions = _FakeSessions(self)
+        self.login_throttle = _FakeLoginThrottle(self)
+        self.password_resets = _FakePasswordResets(self)
+        self.password_reset_throttle = _FakePasswordResetThrottle(self)
+        self.oauth_states = _FakeOAuthStates(self)
+        self.accounts = _FakeAccounts(self)
+        self.habits = _FakeHabits(self)
+        self.habit_sessions = _FakeHabitSessions(self)
+        self.zones = _FakeZones(self)
+        self.sleep_schedule = _FakeSleepSchedule(self)
+
+    def _next(self, prefix: str) -> str:
+        self._seq += 1
+        return f"{prefix}-{self._seq}"
 
 
 @pytest.fixture

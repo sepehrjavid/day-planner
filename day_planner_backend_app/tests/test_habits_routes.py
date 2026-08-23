@@ -2,7 +2,7 @@
 /agent/habits (A6.2), reachable via a session token instead of an OIDC
 service identity.
 
-test_habits.py already covers Store.create_habit/list_habits/update_habit
+test_habits.py already covers store.habits.create/list/update
 directly; these exercise the same store methods through the route, so
 what's new here is auth scoping (current_user_id, never a body field)
 and the HTTP status mapping (404 on an unknown or cross-user habit_id).

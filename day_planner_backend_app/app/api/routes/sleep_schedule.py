@@ -39,7 +39,7 @@ async def get_sleep_schedule(
     user_id: str = Depends(current_user_id), store: Store = Depends(get_store)
 ):
     """The signed-in user's sleep schedule, if they've ever set one."""
-    schedule = await store.get_sleep_schedule(user_id)
+    schedule = await store.sleep_schedule.get(user_id)
     if schedule is None:
         return SleepScheduleResponse(exists=False)
     return SleepScheduleResponse(exists=True, schedule=_to_sleep_schedule_out(schedule))
@@ -58,7 +58,7 @@ async def set_sleep_schedule(
             day: override.model_dump(exclude_none=True)
             for day, override in body.day_overrides.items()
         }
-    schedule = await store.set_sleep_schedule(
+    schedule = await store.sleep_schedule.set(
         user_id=user_id,
         sleep_time=body.sleep_time,
         wake_time=body.wake_time,

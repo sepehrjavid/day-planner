@@ -17,7 +17,7 @@ rollover loses conversational continuity but not anything the agent decided
 was worth remembering. See AgentClient.archive_session.
 
 Quota: every message first spends one of settings.chat_daily_quota for the
-day, checked and consumed atomically in Store.check_and_consume_quota. A
+day, checked and consumed atomically in store.users.check_and_consume_quota. A
 caller past their limit gets a 429 before the agent is ever touched.
 """
 
@@ -45,7 +45,7 @@ async def chat(
 ) -> ChatResponse:
     # Checked (and consumed) before touching the agent, so a caller over
     # quota never costs a model call.
-    quota = await store.check_and_consume_quota(
+    quota = await store.users.check_and_consume_quota(
         user_id, daily_limit=settings.chat_daily_quota
     )
     if not quota.allowed:
@@ -55,7 +55,7 @@ async def chat(
             headers={"Retry-After": str(quota.retry_after_seconds)},
         )
 
-    session_id, last_active_at = await store.get_agent_session(user_id)
+    session_id, last_active_at = await store.users.get_agent_session(user_id)
 
     if session_id is not None and _is_idle(
         last_active_at, settings.agent_session_idle_timeout_seconds
@@ -67,7 +67,7 @@ async def chat(
         user_id=user_id, session_id=session_id, message=body.message
     )
 
-    await store.set_agent_session(user_id=user_id, session_id=resolved_session_id)
+    await store.users.set_agent_session(user_id=user_id, session_id=resolved_session_id)
 
     return ChatResponse(reply=reply, new_session=resolved_session_id != session_id)
 
@@ -81,10 +81,10 @@ async def reset_chat(
     """Start fresh on demand — the manual counterpart to the idle rollover
     above, for when a conversation has gone stale before the timeout would
     have caught it (or the user just wants a clean slate right now)."""
-    session_id, _ = await store.get_agent_session(user_id)
+    session_id, _ = await store.users.get_agent_session(user_id)
     if session_id is not None:
         await agent_client.archive_session(user_id=user_id, session_id=session_id)
-    await store.clear_agent_session(user_id)
+    await store.users.clear_agent_session(user_id)
 
 
 def _is_idle(last_active_at, timeout_seconds: int) -> bool:

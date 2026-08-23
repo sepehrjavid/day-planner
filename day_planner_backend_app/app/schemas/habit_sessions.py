@@ -7,7 +7,7 @@ same as any other transition. marked_by is not a field MarkHabitSessionRequest
 lets a client set — the route hardcodes "user", since this is the human
 directly marking their own session, mirroring day_planner_agent's
 mark_habit_session tool hardcoding "agent" on its side of the same
-underlying Store.set_habit_session_status call.
+underlying store.habit_sessions.set_status call.
 
 UpsertHabitSessionRequest was moved here from day_planner_backend_internal
 by A6.1 alongside the store logic it backs; no /me route uses it (only

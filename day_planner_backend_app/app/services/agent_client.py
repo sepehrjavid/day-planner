@@ -6,7 +6,7 @@ concept of "who is allowed to claim to be user X" — whatever `user_id` this
 process hands it is trusted completely, and whatever `session_id` this
 process hands it resumes that session's full history. So `user_id` here
 must always come from `current_user_id` (the caller's session token), and
-`session_id` must always come from `Store.get_agent_session` (looked up
+`session_id` must always come from `store.users.get_agent_session` (looked up
 server-side, keyed by that same `user_id`) — never from a request body. See
 ../api/routes/chat.py, the only caller.
 """

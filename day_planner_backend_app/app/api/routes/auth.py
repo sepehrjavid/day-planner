@@ -34,7 +34,7 @@ async def signup(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
-        user_id = await store.create_user(
+        user_id = await store.users.create(
             email=body.email,
             password_hash=security.hash_password(body.password),
         )
@@ -48,7 +48,7 @@ async def signup(
             detail="that email is already registered",
         ) from None
 
-    token, expires_at = await store.create_session(
+    token, expires_at = await store.sessions.create(
         user_id=user_id, ttl_seconds=settings.session_ttl_seconds
     )
     return SessionResponse(access_token=token, expires_at=expires_at, user_id=user_id)
@@ -60,7 +60,7 @@ async def login(
     store: Store = Depends(get_store),
     settings: Settings = Depends(get_settings),
 ):
-    throttle = await store.check_login_throttle(
+    throttle = await store.login_throttle.check(
         body.email,
         max_attempts=settings.login_max_attempts,
         lockout_seconds=settings.login_lockout_seconds,
@@ -72,7 +72,7 @@ async def login(
             headers={"Retry-After": str(throttle.retry_after_seconds)},
         )
 
-    user = await store.get_user_by_email(body.email)
+    user = await store.users.get_by_email(body.email)
     # verify_password runs its dummy comparison when user is None, so an
     # unregistered address costs the same time as a wrong password.
     valid, needs_rehash = security.verify_password(
@@ -80,7 +80,7 @@ async def login(
     )
 
     if not valid:
-        await store.record_login_failure(
+        await store.login_throttle.record_failure(
             body.email,
             max_attempts=settings.login_max_attempts,
             lockout_seconds=settings.login_lockout_seconds,
@@ -96,13 +96,13 @@ async def login(
     if needs_rehash:
         # Argon2 parameters were raised since this user last logged in; upgrade
         # transparently now that we hold the plaintext.
-        await store.update_password_hash(
+        await store.users.update_password_hash(
             user_id=user["user_id"],
             password_hash=security.hash_password(body.password),
         )
 
-    await store.clear_login_failures(body.email)
-    token, expires_at = await store.create_session(
+    await store.login_throttle.clear(body.email)
+    token, expires_at = await store.sessions.create(
         user_id=user["user_id"], ttl_seconds=settings.session_ttl_seconds
     )
     return SessionResponse(
@@ -116,7 +116,7 @@ async def logout(
 ):
     """Deleting the session server-side is what makes logout real — the reason
     these are opaque tokens rather than JWTs."""
-    await store.delete_session(token)
+    await store.sessions.delete(token)
 
 
 def _client_ip(request: Request) -> str:
@@ -153,7 +153,7 @@ async def request_password_reset(
     is fire-and-forget (email_service.schedule_password_reset_email) so
     it no longer sits on the request path at all — both branches return
     right after their last Firestore call — but a registered address
-    still costs one extra Firestore write (create_password_reset_token)
+    still costs one extra Firestore write (store.password_resets.create)
     that a non-existent one doesn't, so a sufficiently precise timing
     measurement could still distinguish the two. Login's dummy-hash
     comparison solves the equivalent problem there because Argon2
@@ -165,12 +165,12 @@ async def request_password_reset(
     email_key = f"email:{normalize_email(body.email)}"
     ip_key = f"ip:{_client_ip(request)}"
 
-    email_throttle = await store.check_reset_throttle(
+    email_throttle = await store.password_reset_throttle.check(
         email_key,
         max_attempts=settings.password_reset_max_attempts,
         lockout_seconds=settings.password_reset_lockout_seconds,
     )
-    ip_throttle = await store.check_reset_throttle(
+    ip_throttle = await store.password_reset_throttle.check(
         ip_key,
         max_attempts=settings.password_reset_max_attempts,
         lockout_seconds=settings.password_reset_lockout_seconds,
@@ -178,22 +178,22 @@ async def request_password_reset(
     if email_throttle.locked or ip_throttle.locked:
         return
 
-    await store.record_reset_attempt(
+    await store.password_reset_throttle.record_attempt(
         email_key,
         max_attempts=settings.password_reset_max_attempts,
         lockout_seconds=settings.password_reset_lockout_seconds,
     )
-    await store.record_reset_attempt(
+    await store.password_reset_throttle.record_attempt(
         ip_key,
         max_attempts=settings.password_reset_max_attempts,
         lockout_seconds=settings.password_reset_lockout_seconds,
     )
 
-    user = await store.get_user_by_email(body.email)
+    user = await store.users.get_by_email(body.email)
     if user is None:
         return
 
-    token, _ = await store.create_password_reset_token(
+    token, _ = await store.password_resets.create(
         user_id=user["user_id"], ttl_seconds=settings.password_reset_ttl_seconds
     )
     # There is no /reset-password page yet — A6.4 explicitly scopes out
@@ -224,14 +224,14 @@ async def confirm_password_reset(
     except security.PasswordPolicyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    user_id = await store.consume_password_reset_token(body.token)
+    user_id = await store.password_resets.consume(body.token)
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid or expired reset token",
         )
 
-    await store.update_password_hash(
+    await store.users.update_password_hash(
         user_id=user_id, password_hash=security.hash_password(body.new_password)
     )
-    await store.delete_sessions(user_id=user_id)
+    await store.sessions.delete_all_for_user(user_id=user_id)

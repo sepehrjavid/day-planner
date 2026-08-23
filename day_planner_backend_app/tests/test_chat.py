@@ -2,7 +2,7 @@
 
 Two things worth pinning down: the trust boundary (user_id and session_id
 are never anything other than what current_user_id and
-Store.get_agent_session resolve them to, regardless of what a client puts in
+store.users.get_agent_session resolve them to, regardless of what a client puts in
 the request body — see app/services/agent_client.py and
 app/api/routes/chat.py), and the session lifecycle (idle sessions get
 archived and rolled over automatically; a user can also force it via
@@ -74,15 +74,15 @@ def test_identity_comes_from_session_token_not_body(anon_client, user, agent_cli
 
 def test_first_message_creates_and_persists_a_session(anon_client, user, agent_client, store):
     user_id, headers = user
-    assert "agent_session_id" not in store.users[user_id]
+    assert "agent_session_id" not in store._users[user_id]
 
     response = anon_client.post("/me/chat", json={"message": "hi"}, headers=headers)
 
     assert response.status_code == 200, response.text
     assert response.json() == {"reply": "echo: hi", "new_session": True}
     assert agent_client.calls[0]["session_id"] is None
-    assert store.users[user_id]["agent_session_id"] == "session-1"
-    assert store.users[user_id]["agent_session_last_active_at"] is not None
+    assert store._users[user_id]["agent_session_id"] == "session-1"
+    assert store._users[user_id]["agent_session_last_active_at"] is not None
 
 
 def test_second_message_reuses_the_persisted_session(anon_client, user, agent_client):
@@ -124,10 +124,10 @@ def test_two_users_never_share_a_session(anon_client, agent_client):
 def test_idle_session_is_archived_and_replaced(anon_client, user, agent_client, store):
     user_id, headers = user
     anon_client.post("/me/chat", json={"message": "hi"}, headers=headers)
-    assert store.users[user_id]["agent_session_id"] == "session-1"
+    assert store._users[user_id]["agent_session_id"] == "session-1"
 
     # Backdate last activity past the default 6h timeout (core/config.py).
-    store.users[user_id]["agent_session_last_active_at"] = _now() - timedelta(hours=7)
+    store._users[user_id]["agent_session_last_active_at"] = _now() - timedelta(hours=7)
 
     response = anon_client.post("/me/chat", json={"message": "again"}, headers=headers)
 
@@ -136,13 +136,13 @@ def test_idle_session_is_archived_and_replaced(anon_client, user, agent_client, 
     assert agent_client.archived == [{"user_id": user_id, "session_id": "session-1"}]
     # The archived session is never handed back to send_message.
     assert agent_client.calls[1]["session_id"] is None
-    assert store.users[user_id]["agent_session_id"] == "session-2"
+    assert store._users[user_id]["agent_session_id"] == "session-2"
 
 
 def test_recent_session_is_reused_without_archiving(anon_client, user, agent_client, store):
     user_id, headers = user
     anon_client.post("/me/chat", json={"message": "hi"}, headers=headers)
-    store.users[user_id]["agent_session_last_active_at"] = _now() - timedelta(hours=1)
+    store._users[user_id]["agent_session_last_active_at"] = _now() - timedelta(hours=1)
 
     response = anon_client.post("/me/chat", json={"message": "again"}, headers=headers)
 
@@ -160,7 +160,7 @@ def test_reset_archives_and_clears_the_session(anon_client, user, agent_client, 
 
     assert response.status_code == 204
     assert agent_client.archived == [{"user_id": user_id, "session_id": "session-1"}]
-    assert store.users[user_id]["agent_session_id"] is None
+    assert store._users[user_id]["agent_session_id"] is None
 
     # The next message starts clean rather than reusing the archived id.
     follow_up = anon_client.post("/me/chat", json={"message": "again"}, headers=headers)

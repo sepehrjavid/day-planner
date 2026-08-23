@@ -57,7 +57,7 @@ async def list_habit_sessions(
     """Every session for the signed-in user planned to start in
     [planned_from, planned_to) — the same range query /agent/habit-sessions
     (A6.2) uses, scoped here to current_user_id instead of a body field."""
-    sessions = await store.list_habit_sessions(
+    sessions = await store.habit_sessions.list(
         user_id, planned_from=planned_from, planned_to=planned_to
     )
     return HabitSessionsResponse(sessions=[_to_habit_session_out(s) for s in sessions])
@@ -77,10 +77,10 @@ async def mark_habit_session(
     marked_by is hardcoded "user" here — never something the client
     supplies — since this route is specifically the human directly
     marking their own session; day_planner_agent's mark_habit_session tool
-    calls Store.set_habit_session_status with "agent" instead, via its
+    calls store.habit_sessions.set_status with "agent" instead, via its
     own path to this data (A6.2).
     """
-    session = await store.set_habit_session_status(
+    session = await store.habit_sessions.set_status(
         user_id=user_id,
         calendar_id=body.calendar_id,
         event_id=body.event_id,

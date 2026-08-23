@@ -29,7 +29,7 @@ router = APIRouter(prefix="/me", tags=["me"])
 async def read_me(
     user_id: str = Depends(current_user_id), store: Store = Depends(get_store)
 ):
-    user = await store.get_user(user_id)
+    user = await store.users.get(user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
@@ -37,7 +37,7 @@ async def read_me(
         user_id=user_id,
         email=user["email"],
         default_account_id=user.get("default_account_id"),
-        accounts=[AccountOut.of(a) for a in await store.list_accounts(user_id)],
+        accounts=[AccountOut.of(a) for a in await store.accounts.list(user_id)],
     )
 
 
@@ -57,7 +57,7 @@ async def change_password(
     password without evicting other sessions provides much less than it
     appears to.
     """
-    user = await store.get_user(user_id)
+    user = await store.users.get(user_id)
     assert user is not None  # current_user_id already resolved this user_id
 
     valid, _ = security.verify_password(user.get("password_hash"), body.current_password)
@@ -72,10 +72,10 @@ async def change_password(
     except security.PasswordPolicyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    await store.update_password_hash(
+    await store.users.update_password_hash(
         user_id=user_id, password_hash=security.hash_password(body.new_password)
     )
-    await store.delete_sessions(user_id=user_id, except_token=token)
+    await store.sessions.delete_all_for_user(user_id=user_id, except_token=token)
 
 
 @router.post("/calendar-accounts/connect-link", response_model=ConnectLinkResponse)
@@ -103,7 +103,7 @@ async def select_calendars(
     store: Store = Depends(get_store),
 ):
     """Choose which of this account's calendars the planner should consider."""
-    updated = await store.set_calendar_selection(
+    updated = await store.accounts.set_calendar_selection(
         user_id=user_id,
         account_id=account_id,
         selected_calendar_ids=set(body.selected_calendar_ids),

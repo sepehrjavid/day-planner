@@ -116,7 +116,7 @@ def test_start_requests_offline_access_and_pkce(anon_client, user, store):
     assert params["code_challenge_method"] == ["S256"]
     assert params["state"] == [nonce]
     assert params["code_challenge"] == [
-        pkce.code_challenge_for(store.states[nonce].code_verifier)
+        pkce.code_challenge_for(store._oauth_states[nonce].code_verifier)
     ]
     # The write scope is requested up front so add_calendar_event doesn't need
     # a second consent screen mid-conversation.
