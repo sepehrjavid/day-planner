@@ -164,6 +164,11 @@ class FakeStore:
     async def delete_session(self, token):
         self.sessions.pop(token, None)
 
+    async def delete_sessions(self, *, user_id, except_token=None):
+        for token, session in list(self.sessions.items()):
+            if session["user_id"] == user_id and token != except_token:
+                del self.sessions[token]
+
     # --- login throttle ---
     async def check_login_throttle(self, email, *, max_attempts, lockout_seconds):
         record = self.throttle.get(normalize_email(email))

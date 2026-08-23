@@ -1,4 +1,5 @@
-"""Routes for the signed-in user managing their own calendar accounts.
+"""Routes for the signed-in user managing their own account and calendar
+accounts.
 
 Every handler here takes user_id from `current_user_id` (the session token) and
 never from the request. That's what makes `account_id` safe to accept as a path
@@ -8,8 +9,10 @@ another user's id is simply a 404.
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from ...core import security
 from ...core.config import Settings, get_settings
 from ...db.store import Store
+from ...schemas.auth import ChangePasswordRequest
 from ...schemas.calendars import (
     AccountOut,
     CalendarSelectionRequest,
@@ -17,7 +20,7 @@ from ...schemas.calendars import (
     MeResponse,
 )
 from ...services import connections
-from ..deps import current_user_id, get_store, provider_factory, require_known_provider
+from ..deps import bearer_token, current_user_id, get_store, provider_factory, require_known_provider
 
 router = APIRouter(prefix="/me", tags=["me"])
 
@@ -36,6 +39,43 @@ async def read_me(
         default_account_id=user.get("default_account_id"),
         accounts=[AccountOut.of(a) for a in await store.list_accounts(user_id)],
     )
+
+
+@router.post("/password", status_code=204)
+async def change_password(
+    body: ChangePasswordRequest,
+    user_id: str = Depends(current_user_id),
+    token: str = Depends(bearer_token),
+    store: Store = Depends(get_store),
+):
+    """Change the signed-in user's password (A6.4).
+
+    Requires the *current* password in the body — session possession
+    alone (e.g. a borrowed unlocked laptop) must never be enough to take
+    over the account. On success, every other session for this user is
+    evicted, keeping only the one making this request: changing a
+    password without evicting other sessions provides much less than it
+    appears to.
+    """
+    user = await store.get_user(user_id)
+    assert user is not None  # current_user_id already resolved this user_id
+
+    valid, _ = security.verify_password(user.get("password_hash"), body.current_password)
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="current password is incorrect",
+        )
+
+    try:
+        security.validate_password_strength(body.new_password)
+    except security.PasswordPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await store.update_password_hash(
+        user_id=user_id, password_hash=security.hash_password(body.new_password)
+    )
+    await store.delete_sessions(user_id=user_id, except_token=token)
 
 
 @router.post("/calendar-accounts/connect-link", response_model=ConnectLinkResponse)

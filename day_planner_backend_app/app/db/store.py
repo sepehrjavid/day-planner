@@ -338,6 +338,25 @@ class Store:
             hash_session_token(token)
         ).delete()
 
+    async def delete_sessions(self, *, user_id: str, except_token: str | None = None) -> None:
+        """Evict every session for this user, optionally keeping the one
+        whose raw token is except_token. Called after a password change
+        (keeping the caller's own session) and after a password reset
+        (keeping none — A6.4's "I lost control of this account" case).
+
+        sessions/{token_hash} has no user_id-scoped subcollection (see
+        create_session's own docstring for why session tokens are opaque
+        and unkeyed by account), so this queries the flat `sessions`
+        collection by its user_id field. Firestore indexes every field
+        for single-field equality queries by default, so this needs no
+        Terraform change to work."""
+        keep = hash_session_token(except_token) if except_token is not None else None
+        async for doc in self._db.collection(SESSIONS).where(
+            "user_id", "==", user_id
+        ).stream():
+            if doc.id != keep:
+                await doc.reference.delete()
+
     # ------------------------------------------------------------------
     # Login throttling
     # ------------------------------------------------------------------

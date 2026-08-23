@@ -15,6 +15,16 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    # No length/policy validation on current_password here — it's checked
+    # against the stored hash, not the policy; a too-short current_password
+    # would already have been rejected at signup or a prior change.
+    # new_password goes through the same validate_password_strength()
+    # signup uses, at the route (A6.4).
+    current_password: str
+    new_password: str
+
+
 class SessionResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
