@@ -20,6 +20,7 @@ os.environ.setdefault(
     str(Path(__file__).parent / "fixtures" / "fake_service_account.json"),
 )
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -178,6 +179,14 @@ class ScenarioFixture:
     would never have caught A0.2 (the preload-fail-open bug): the agent
     looks perfectly behaved in every scenario while failing open in
     production, because nothing ever exercises the failure path at all.
+
+    habits_fetch_fails (A2.6) is the same idea for a call that's never
+    part of preload at all — habits aren't preloaded the way zones and
+    the profile are (see habit_tools.py's own list_habits docstring), so
+    every list_habits call is inherently a live, mid-conversation one.
+    This is what lets a failure-mode scenario exercise "a backend call
+    fails mid-conversation" distinctly from A3.2's zone_fetch_fails,
+    which is about the preload path specifically.
     """
 
     def __init__(
@@ -188,6 +197,7 @@ class ScenarioFixture:
         habits: list[dict] | None = None,
         calendar_events: list[dict] | None = None,
         zones_fetch_fails: bool = False,
+        habits_fetch_fails: bool = False,
         needs_auth: bool = False,
         calendar_access_role: str = "owner",
     ) -> None:
@@ -197,6 +207,7 @@ class ScenarioFixture:
         self.calendar_service = FakeCalendarService(calendar_events, access_role=calendar_access_role)
         self.habit_sessions: list[dict] = []
         self.zones_fetch_fails = zones_fetch_fails
+        self.habits_fetch_fails = habits_fetch_fails
         self.needs_auth = needs_auth
 
     # -- backend_client fakes --------------------------------------------
@@ -227,13 +238,22 @@ class ScenarioFixture:
 
     async def list_zones(self, user_id):
         if self.zones_fetch_fails:
-            raise RuntimeError("simulated backend failure fetching zones")
+            # A2.6: must be something backend_client.BACKEND_ERROR actually
+            # catches (httpx.HTTPError / GoogleAuthError) — a real backend
+            # outage surfaces as one of these, never a bare RuntimeError, so
+            # simulating anything else would let a scenario "pass" the
+            # no_exception check for the wrong reason (the fixture's own
+            # exception type happening not to match what production code
+            # would ever actually see, not because the fix genuinely works).
+            raise httpx.ConnectError("simulated backend failure fetching zones")
         return list(self.zones)
 
     async def get_sleep_schedule(self, user_id):
         return dict(self.sleep_schedule) if self.sleep_schedule else None
 
     async def list_habits(self, user_id, status=None):
+        if self.habits_fetch_fails:
+            raise httpx.ConnectError("simulated backend failure fetching habits")
         if status is None:
             return list(self.habits)
         return [h for h in self.habits if h.get("status") == status]

@@ -11,9 +11,10 @@ point and must never be read as one** — see the pre/post comparison
 section below for the closest thing to one this suite can produce.
 
 Model: `gemini-2.5-flash` (pinned per A0.5, see `agent.py`). Scenarios:
-`day_planner_agent/evals/scenarios/` (39 scenarios: 24 tier `constraint`,
-15 tier `decision`, including A3.2's 3 failure-mode scenarios, A3.5's 7
-perturbations, and A3.6's 2 process scenarios). Run with:
+`day_planner_agent/evals/scenarios/` (40 scenarios: 25 tier `constraint`,
+15 tier `decision`, including A3.2's 3 failure-mode scenarios (one
+extended by A2.6), A2.6's own new one, A3.5's 7 perturbations, and A3.6's
+2 process scenarios). Run with:
 
 ```
 day_planner_agent/.venv/bin/python day_planner_agent/evals/runner.py \
@@ -246,6 +247,110 @@ genuine instruction-following gap: instruction.md says to do this "every
 time, not only when you already suspect it went badly," and the model
 does it around half the time. Real, reproducible evidence for A4.3 that
 this specific rule is present in the prompt but doesn't reliably fire.
+
+## A2.6 — a backend failure mid-conversation crashes the turn
+
+Fixed the defect A3.2 found empirically: every ADK-registered tool that
+calls `backend_client` (`zone_tools.py`'s five, `habit_tools.py`'s
+`create_habit`/`list_habits`/`update_habit`/`review_habit_week`/
+`mark_habit_session`, `calendar_tool.py`'s `backend_client` call paths)
+or Memory Bank's SDK (`memory_tools.py`'s `get_profile`, plus the
+synchronous client-construction path in `update_profile`/`save_memory`)
+now catches the failure and returns `{"status": "error", ...}` instead
+of letting it propagate and kill the turn. `mark_habit_session` wasn't
+in the roadmap task's own Files list, but it's an ADK-registered tool
+hitting the identical `backend_client` gap, so it got the same fix —
+scope item 1 ("every ADK-registered tool returns a dict... none
+raises") is unqualified, and leaving one out would have defeated the
+task's own stated purpose.
+
+**Only HTTP/network/auth classes are caught** — `backend_client.
+BACKEND_ERROR = (httpx.HTTPError, google.auth.exceptions.GoogleAuthError)`,
+and the Memory Bank equivalent, `_MEMORY_BANK_ERROR = (google.genai.
+errors.APIError, google.auth.exceptions.GoogleAuthError)` — never a
+blanket `except Exception`. A `TypeError`/`KeyError` still propagates,
+confirmed with a dedicated test per module.
+
+**Review caught a real defect in the first version of this PR**: the
+Memory Bank tuple originally used `google.api_core.exceptions.
+GoogleAPIError`, reasoned by analogy ("Google Cloud client libraries
+raise GoogleAPIError") rather than verified — and `memory_tools.py`
+doesn't use that SDK family at all. It goes through `vertexai.
+Client(...).aio` and ADK's `VertexAiMemoryBankService`, both built on
+the newer `google-genai` client. The `except _MEMORY_BANK_ERROR` clauses
+would never have fired; every test passed anyway, because nothing raised
+a realistic exception type — the identical shape of bug already caught
+once in this PR (`conftest.py`'s bare `RuntimeError`), just not yet
+applied to Memory Bank. Fixed empirically, not by re-reading docs: forced
+four real failures against the live API (a malformed reasoning engine
+id, a nonexistent one, an unresolvable region, a missing credentials
+file) and captured the actual exception types —
+`google.genai.errors.ClientError`/`ServerError` (both `APIError`
+subclasses) for API-level failures, `google.auth.exceptions.
+DefaultCredentialsError` (a `GoogleAuthError` subclass, confirming that
+half of the original tuple was already right) for credential
+resolution. `_MEMORY_BANK_ERROR` now reflects what was actually
+observed. Confirmed the new tests catch the regression: reverting the
+tuple to `(GoogleAuthError,)` alone made both `get_profile` tests fail
+immediately.
+
+**Checked the A2.4 interaction directly, per review**: the synchronous
+`try/except` this task added only wraps `vertexai.Client(...)`
+construction in `update_profile`/`save_memory` — the write itself
+executes later, inside the detached background task A2.4 already
+schedules, a different code path with its own pre-existing (and
+already-broad, `except Exception`) error handling. Added a test per
+write path raising the real `ClientError` type from inside that
+background execution, confirming it's retried and logged without
+escaping — the equivalent backend_client already had, now covering
+Memory Bank's async write path too, not just the synchronous
+construction line.
+
+**Error text was checked, not just written, to never read as "no data
+exists"** — the single most important line in the task, per its own
+framing. `get_sleep_schedule`'s failure path omits the `"exists"` key
+entirely rather than returning `{"status": "error", "exists": False}`,
+which would have been indistinguishable from "no schedule is set."
+`get_profile` omits `"profile"` the same way. `list_zones`/`list_habits`
+return no empty list at all on failure. Each has a test asserting the
+key is actually absent, not just that `status == "error"`.
+
+**A real fixture bug surfaced while building the new failure-mode
+scenario**: `conftest.py`'s `zones_fetch_fails`/`habits_fetch_fails`
+simulated failures by raising a bare `RuntimeError` — which isn't in
+`BACKEND_ERROR`, so the new `except backend_client.BACKEND_ERROR` clauses
+never actually caught it, and the turn kept crashing exactly as before
+even with the fix applied. Confirmed by running the new scenario for
+real: it failed cleanly (`no_exception` check failing every trial) with
+the fix both applied and — checked deliberately — with `habit_tools.
+list_habits` reverted to no error handling at all, ruling out a false
+pass either way. Fixed by having the fixture raise `httpx.ConnectError`
+instead, a real subclass of what `BACKEND_ERROR` actually catches — this
+also retroactively fixes `zone_fetch_fails.yaml`'s own re-check-path
+coverage, which had the identical mismatch since A3.2.
+
+**New scenario-format capability**: `expect.no_exception: true`, checked
+against `TrialResult.exception`. Needed because `model_invoked` alone
+can't tell "crashed" from "correctly declined" apart — both place zero
+events and both produce token usage before failing — the same ambiguity
+A3.2 solved for the preload path with `model_invoked`, now solved for
+"did it crash at all" specifically. Added to both the new
+`habits_fetch_fails_mid_conversation.yaml` and, retroactively,
+`zone_fetch_fails.yaml` (whose mid-conversation re-check crash was the
+original, empirical discovery this whole task traces back to).
+
+**Real-run confirmation, full 40-scenario suite, `--repeat 3` (120
+trials)**: `list_habits failing mid-conversation does not crash the
+turn` and `does not place a habit session when the zone/sleep fetch
+fails` — the pre-existing A3.2 scenario, now also asserting
+`no_exception` — both **100% (3/3)**, zero exceptions anywhere in the
+120-trial run. `habits_fetch_fails` chooses `list_habits` specifically
+because it's the one call that's *never* part of preload at all — habits
+aren't preloaded the way zones and the profile are (see
+`habit_tools.py`'s own `list_habits` docstring) — so every call is
+inherently live and mid-conversation, making this scenario distinct from
+`zone_fetch_fails.yaml`'s preload-adjacent one rather than a duplicate
+of it.
 
 ## Headline numbers (current — 27 scenarios, 81 trials)
 

@@ -8,6 +8,9 @@ day_planner_backend_internal's own test suite already covers
 /internal/habits* directly.
 """
 
+import httpx
+import pytest
+
 from day_planner_agent import backend_client, calendar_tool, habit_tools, zone_tools
 
 
@@ -765,3 +768,127 @@ def test_hash_session_ref_is_deterministic():
     a = habit_tools._hash_session_ref("me@gmail.com", "e1")
     b = habit_tools._hash_session_ref("me@gmail.com", "e1")
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# A2.6: backend failures return {"status": "error", ...} instead of
+# crashing the turn — never a shape that reads as "nothing exists".
+# ---------------------------------------------------------------------------
+
+
+async def test_create_habit_backend_failure_returns_error(tool_context, monkeypatch):
+    async def create_habit(user_id, *, label, goal):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "create_habit", create_habit)
+
+    result = await habit_tools.create_habit(tool_context, "Gym", "180 min/week")
+    assert result["status"] == "error"
+
+
+async def test_list_habits_backend_failure_does_not_read_as_empty(tool_context, monkeypatch):
+    async def list_habits(user_id, *, status=None):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+
+    result = await habit_tools.list_habits(tool_context)
+    assert result["status"] == "error"
+    assert "habits" not in result
+    assert "does not mean" in result["message"]
+
+
+async def test_update_habit_backend_failure_returns_error(tool_context, monkeypatch):
+    async def update_habit(user_id, habit_id, **kwargs):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+
+    result = await habit_tools.update_habit(tool_context, "h1", label="Gym 2.0")
+    assert result["status"] == "error"
+
+
+async def test_review_habit_week_list_habit_sessions_failure_returns_error(
+    tool_context, monkeypatch
+):
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        raise httpx.ConnectError("boom")
+
+    async def get_calendar_events(*args, **kwargs):
+        raise AssertionError("should not be called if the session fetch itself failed")
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    assert result["status"] == "error"
+    assert "sessions" not in result
+    assert "does not mean" in result["message"]
+
+
+async def test_review_habit_week_list_habits_failure_degrades_to_habit_id_label(
+    tool_context, monkeypatch
+):
+    """The habit_labels lookup is best-effort enrichment, not essential —
+    a failure there degrades display quality (falls back to habit_id)
+    rather than failing the whole review."""
+
+    async def list_habit_sessions(user_id, *, planned_from, planned_to):
+        return [
+            {
+                "habit_id": "h1",
+                "event_id": "e1",
+                "calendar_id": "me@gmail.com",
+                "planned_start": "2026-08-04T07:00:00-07:00",
+                "planned_end": "2026-08-04T07:30:00-07:00",
+            }
+        ]
+
+    async def get_calendar_events(tool_context, date_from, date_to):
+        return {
+            "status": "success",
+            "events": [
+                {
+                    "event_id": "e1",
+                    "calendar_id": "me@gmail.com",
+                    "title": "Gym",
+                    "start_time": "2026-08-04T07:00:00-07:00",
+                    "end_time": "2026-08-04T07:30:00-07:00",
+                }
+            ],
+        }
+
+    async def list_habits(user_id, *, status=None):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
+    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+
+    result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
+    assert result["status"] == "success"
+    assert result["sessions"][0]["habit_label"] == "h1"
+
+
+async def test_mark_habit_session_backend_failure_returns_error(tool_context, monkeypatch):
+    async def set_habit_session_status(user_id, **kwargs):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+
+    result = await habit_tools.mark_habit_session(tool_context, "me@gmail.com", "e1", "completed")
+    assert result["status"] == "error"
+
+
+async def test_list_habits_programming_error_still_propagates(tool_context, monkeypatch):
+    """A2.6's scope item 3: only HTTP/network/auth classes are caught —
+    a real bug must keep surfacing loudly rather than being reported to
+    the model as a backend hiccup."""
+
+    async def list_habits(user_id, *, status=None):
+        raise KeyError("not a backend failure")
+
+    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+
+    with pytest.raises(KeyError):
+        await habit_tools.list_habits(tool_context)

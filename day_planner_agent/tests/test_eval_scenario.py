@@ -153,6 +153,7 @@ def test_failure_injection_fields_default_to_off(tmp_path):
     scenario = load_scenario_file(path)
 
     assert scenario.given.zones_fetch_fails is False
+    assert scenario.given.habits_fetch_fails is False
     assert scenario.given.needs_auth is False
     assert scenario.given.calendar_access_role == "owner"
 
@@ -164,6 +165,7 @@ def test_failure_injection_fields_parse_when_set(tmp_path):
         given:
           today: "2026-08-17"
           zones_fetch_fails: true
+          habits_fetch_fails: true
           needs_auth: true
           calendar_access_role: reader
         when:
@@ -175,6 +177,7 @@ def test_failure_injection_fields_parse_when_set(tmp_path):
     scenario = load_scenario_file(path)
 
     assert scenario.given.zones_fetch_fails is True
+    assert scenario.given.habits_fetch_fails is True
     assert scenario.given.needs_auth is True
     assert scenario.given.calendar_access_role == "reader"
 
@@ -213,3 +216,39 @@ def test_model_invoked_parses_when_set(tmp_path):
     scenario = load_scenario_file(path)
 
     assert scenario.expect.model_invoked is True
+
+
+def test_no_exception_defaults_to_false(tmp_path):
+    yaml_text = textwrap.dedent(
+        """\
+        name: no no_exception expectation here
+        given:
+          today: "2026-08-17"
+        when:
+          user_says: "irrelevant"
+        """
+    )
+    path = tmp_path / "scenario.yaml"
+    path.write_text(yaml_text)
+    scenario = load_scenario_file(path)
+
+    assert scenario.expect.no_exception is False
+
+
+def test_no_exception_parses_when_set(tmp_path):
+    yaml_text = textwrap.dedent(
+        """\
+        name: no_exception expectation set
+        given:
+          today: "2026-08-17"
+        when:
+          user_says: "irrelevant"
+        expect:
+          no_exception: true
+        """
+    )
+    path = tmp_path / "scenario.yaml"
+    path.write_text(yaml_text)
+    scenario = load_scenario_file(path)
+
+    assert scenario.expect.no_exception is True

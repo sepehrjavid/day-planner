@@ -50,11 +50,31 @@ import logging
 import random
 from typing import Optional
 
+import google.auth.exceptions
+import google.genai.errors
 import vertexai
 from google.adk.tools import ToolContext
 from google.genai import types as genai_types
 
 logger = logging.getLogger(__name__)
+
+# A2.6: Memory Bank's own SDK, not backend_client — the equivalent tuple
+# to backend_client.BACKEND_ERROR for this module's dependency.
+#
+# Verified empirically, not assumed from docs — an earlier version of
+# this tuple used google.api_core.exceptions.GoogleAPIError, reasoning
+# by analogy from "Google Cloud client libraries raise GoogleAPIError."
+# That's the wrong SDK family: vertexai.Client(...).aio and ADK's
+# VertexAiMemoryBankService both go through the newer google-genai
+# client, not google-api-core. Forcing real failures (a malformed
+# reasoning engine id, a nonexistent one, an unresolvable region, a
+# missing credentials file) against the live API confirmed the actual
+# hierarchy: google.genai.errors.APIError (ClientError for 4xx,
+# ServerError for 5xx) for API-level failures, and
+# google.auth.exceptions.GoogleAuthError — confirmed separately, via a
+# forced credentials-resolution failure — for the underlying
+# credential/token-mint failure, same as backend_client's own tuple.
+_MEMORY_BANK_ERROR = (google.genai.errors.APIError, google.auth.exceptions.GoogleAuthError)
 
 PROFILE_SCHEMA_ID = "day-planner-profile"
 
@@ -186,7 +206,14 @@ async def update_profile(
     if not statements:
         return {"status": "error", "message": "No fields provided to save."}
 
-    client = vertexai.Client(project=service._project, location=service._location).aio
+    try:
+        client = vertexai.Client(project=service._project, location=service._location).aio
+    except _MEMORY_BANK_ERROR:
+        logger.warning("update_profile client construction failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not save this right now due to a backend error. Try again shortly.",
+        }
     scope = _memory_scope(tool_context)
     agent_engine_id = service._agent_engine_id
 
@@ -221,7 +248,11 @@ async def get_profile(tool_context: ToolContext) -> dict:
 
     Returns:
         dict with "status" and "profile" (the field dict, or {} if no
-        profile exists yet for this user).
+        profile exists yet for this user). On "error" due to a backend
+        failure, "profile" is omitted entirely rather than set to {} —
+        that would be indistinguishable from the user genuinely having
+        none on file; do not tell the user their preferences are unknown
+        or missing on the strength of this call.
     """
     service = _memory_service(tool_context)
     if service is None:
@@ -231,7 +262,18 @@ async def get_profile(tool_context: ToolContext) -> dict:
             "profile": {},
         }
 
-    profiles = await service.retrieve_profiles(**_memory_scope(tool_context))
+    try:
+        profiles = await service.retrieve_profiles(**_memory_scope(tool_context))
+    except _MEMORY_BANK_ERROR:
+        logger.warning("get_profile backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": (
+                "Could not load the profile right now due to a backend error — "
+                "this does not mean the user has no preferences on file. Retry "
+                "before assuming any preference is unknown or missing."
+            ),
+        }
     for profile in profiles:
         if profile.schema_id == PROFILE_SCHEMA_ID:
             return {"status": "success", "profile": profile.profile or {}}
@@ -255,7 +297,14 @@ async def save_memory(tool_context: ToolContext, fact: str) -> dict:
     if service is None:
         return {"status": "error", "message": "Memory Bank is not configured."}
 
-    client = vertexai.Client(project=service._project, location=service._location).aio
+    try:
+        client = vertexai.Client(project=service._project, location=service._location).aio
+    except _MEMORY_BANK_ERROR:
+        logger.warning("save_memory client construction failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not save this right now due to a backend error. Try again shortly.",
+        }
     scope = _memory_scope(tool_context)
     agent_engine_id = service._agent_engine_id
 

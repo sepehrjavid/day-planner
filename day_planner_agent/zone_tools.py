@@ -32,9 +32,13 @@ every other tool in this codebase — never a model-supplied argument.
 
 from __future__ import annotations
 
+import logging
+
 from google.adk.tools import ToolContext
 
 from . import backend_client
+
+logger = logging.getLogger(__name__)
 
 # Session-state key agent.py's _preload_zones writes the preloaded zone
 # list to. Public here (rather than private in agent.py, which is where
@@ -89,15 +93,24 @@ async def create_zone(
     Returns:
         dict with "status" ("success" or "error") and, on success, "zone"
         (zone_id, label, start_time, end_time, days_of_week, created_at,
-        updated_at).
+        updated_at). On "error", the zone was not created — a backend
+        failure, not a validation problem; retry rather than assuming it
+        was rejected.
     """
-    zone = await backend_client.create_zone(
-        tool_context.session.user_id,
-        label=label,
-        start_time=start_time,
-        end_time=end_time,
-        days_of_week=days_of_week,
-    )
+    try:
+        zone = await backend_client.create_zone(
+            tool_context.session.user_id,
+            label=label,
+            start_time=start_time,
+            end_time=end_time,
+            days_of_week=days_of_week,
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("create_zone backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not create the zone right now due to a backend error. Try again shortly.",
+        }
     return {"status": "success", "zone": zone}
 
 
@@ -117,9 +130,24 @@ async def list_zones(tool_context: ToolContext) -> dict:
         dict with "status" and "zones" (a list of zone_id, label,
         start_time, end_time, days_of_week, created_at, updated_at —
         empty if the user has none, which just means no restriction of
-        this kind exists for them).
+        this kind exists for them). On "error", zones could not be
+        loaded due to a backend failure — this is not the same as the
+        user having none on file; do not treat it as "no restrictions"
+        and do not place or move a habit session on the strength of this
+        call until it succeeds.
     """
-    zones = await backend_client.list_zones(tool_context.session.user_id)
+    try:
+        zones = await backend_client.list_zones(tool_context.session.user_id)
+    except backend_client.BACKEND_ERROR:
+        logger.warning("list_zones backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": (
+                "Could not load zones right now due to a backend error — this "
+                "does not mean the user has no zones. Avoid placing or moving "
+                "habit sessions until this can be re-checked successfully."
+            ),
+        }
     return {"status": "success", "zones": zones}
 
 
@@ -155,19 +183,27 @@ async def update_zone(
 
     Returns:
         dict with "status" ("success", "not_found", or "error") and, on
-        success, "zone" (the updated record).
+        success, "zone" (the updated record). On "error", a backend
+        failure prevented the update — not a validation problem.
     """
     if not any([label, start_time, end_time, days_of_week]):
         return {"status": "error", "message": "No fields provided to update."}
 
-    updated = await backend_client.update_zone(
-        tool_context.session.user_id,
-        zone_id,
-        label=label,
-        start_time=start_time,
-        end_time=end_time,
-        days_of_week=days_of_week,
-    )
+    try:
+        updated = await backend_client.update_zone(
+            tool_context.session.user_id,
+            zone_id,
+            label=label,
+            start_time=start_time,
+            end_time=end_time,
+            days_of_week=days_of_week,
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("update_zone backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not update the zone right now due to a backend error. Try again shortly.",
+        }
     if updated is None:
         return {"status": "not_found", "message": f"No zone {zone_id!r}."}
     return {"status": "success", "zone": updated}
@@ -191,9 +227,23 @@ async def get_sleep_schedule(tool_context: ToolContext) -> dict:
         default, e.g. sleeping in on Sundays), "cool_down_minutes" (the
         wind-down window immediately before sleep_time), and
         "wake_up_buffer_minutes" (the grace window immediately after
-        wake_time).
+        wake_time). On "error" — a backend failure, not the same as
+        "exists": False — no "exists" key is present at all; do not read
+        the absence of a schedule from this, and avoid placing or moving
+        habit sessions until this can be re-checked successfully.
     """
-    schedule = await backend_client.get_sleep_schedule(tool_context.session.user_id)
+    try:
+        schedule = await backend_client.get_sleep_schedule(tool_context.session.user_id)
+    except backend_client.BACKEND_ERROR:
+        logger.warning("get_sleep_schedule backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": (
+                "Could not load the sleep schedule right now due to a backend "
+                "error — this does not mean none is set. Avoid placing or "
+                "moving habit sessions until this can be re-checked successfully."
+            ),
+        }
     if schedule is None:
         return {"status": "success", "exists": False}
     return {"status": "success", "exists": True, "schedule": schedule}
@@ -240,7 +290,8 @@ async def set_sleep_schedule(
     Returns:
         dict with "status" ("success" or "error") and, on success,
         "schedule" (the full updated record, same shape as
-        get_sleep_schedule's).
+        get_sleep_schedule's). On "error", a backend failure prevented
+        the save — not a validation problem.
     """
     # Checked against None explicitly, not truthiness: cool_down_minutes=0
     # and wake_up_buffer_minutes=0 are meaningful values ("no buffer at
@@ -251,12 +302,19 @@ async def set_sleep_schedule(
     ):
         return {"status": "error", "message": "No fields provided to update."}
 
-    schedule = await backend_client.set_sleep_schedule(
-        tool_context.session.user_id,
-        sleep_time=sleep_time,
-        wake_time=wake_time,
-        cool_down_minutes=cool_down_minutes,
-        wake_up_buffer_minutes=wake_up_buffer_minutes,
-        day_overrides=day_overrides,
-    )
+    try:
+        schedule = await backend_client.set_sleep_schedule(
+            tool_context.session.user_id,
+            sleep_time=sleep_time,
+            wake_time=wake_time,
+            cool_down_minutes=cool_down_minutes,
+            wake_up_buffer_minutes=wake_up_buffer_minutes,
+            day_overrides=day_overrides,
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("set_sleep_schedule backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not save the sleep schedule right now due to a backend error. Try again shortly.",
+        }
     return {"status": "success", "schedule": schedule}
