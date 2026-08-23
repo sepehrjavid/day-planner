@@ -61,6 +61,30 @@ class Settings(BaseSettings):
     login_max_attempts: int = 8
     login_lockout_seconds: int = 900
 
+    # --- Password reset (A6.4) ---
+    # SendGrid Mail Send API key. Restricted Access, Mail Send only — see
+    # terraform/secrets.tf for why this has no default (forcing every
+    # environment to configure it explicitly, the same as
+    # google_oauth_client_secret) and why the value itself never appears
+    # here, in Terraform state, or in git.
+    sendgrid_api_key: str
+    # Must be a Single Sender Verified (or domain-authenticated) address
+    # in the SendGrid account sendgrid_api_key belongs to, or every send
+    # is rejected. No default for the same reason as the key itself.
+    password_reset_from_email: str
+
+    # How long a reset link is valid. Short relative to session_ttl_seconds
+    # (30 days) on purpose — a captured or logged link should have a
+    # narrow window to be useful.
+    password_reset_ttl_seconds: int = 1800
+
+    # Reset-request attempts before a key (an email, or an IP — see
+    # check_reset_throttle/record_reset_attempt in db/store.py) is locked
+    # out, and for how long. Same shape and same defaults as
+    # login_max_attempts/login_lockout_seconds above.
+    password_reset_max_attempts: int = 8
+    password_reset_lockout_seconds: int = 900
+
     # Messages /me/chat will forward to the agent per user per UTC day. One
     # flat limit for everyone for now — no tiers or billing yet, see
     # docs/pricing-ideas.md for where this is headed. 50 is a generous chat

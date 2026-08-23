@@ -22,6 +22,8 @@ os.environ.setdefault("GOOGLE_OAUTH_CLIENT_ID", "abc.apps.googleusercontent.com"
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_SECRET", "shh")
 os.environ.setdefault("PUBLIC_BASE_URL", "http://localhost:8080")
 os.environ.setdefault("AGENT_CALLER_SERVICE_ACCOUNTS", "agent@test.iam.gserviceaccount.com")
+os.environ.setdefault("SENDGRID_API_KEY", "SG.test-key")
+os.environ.setdefault("PASSWORD_RESET_FROM_EMAIL", "noreply@test.invalid")
 os.environ.setdefault(
     "AGENT_ENGINE_NAME",
     "projects/test-proj/locations/us-central1/reasoningEngines/1",
@@ -73,6 +75,8 @@ class FakeStore:
         self.emails: dict[str, str] = {}
         self.sessions: dict[str, dict] = {}
         self.throttle: dict[str, dict] = {}
+        self.password_resets: dict[str, dict] = {}
+        self.reset_throttle: dict[str, dict] = {}
         self.states: dict[str, OAuthState] = {}
         self.accounts: dict[str, dict[str, dict]] = {}
         self.habits: dict[str, dict[str, dict]] = {}
@@ -192,6 +196,40 @@ class FakeStore:
 
     async def clear_login_failures(self, email):
         self.throttle.pop(normalize_email(email), None)
+
+    # --- password reset (A6.4) ---
+    async def create_password_reset_token(self, *, user_id, ttl_seconds):
+        token = self._next("reset-token")
+        expires_at = _now() + timedelta(seconds=ttl_seconds)
+        self.password_resets[token] = {"user_id": user_id, "expires_at": expires_at}
+        return token, expires_at
+
+    async def consume_password_reset_token(self, token):
+        data = self.password_resets.pop(token, None)
+        if data is None:
+            return None
+        if _now() >= data["expires_at"]:
+            return None
+        return data["user_id"]
+
+    async def check_reset_throttle(self, key, *, max_attempts, lockout_seconds):
+        record = self.reset_throttle.get(key)
+        if record and record.get("locked_until", _now()) > _now():
+            return ThrottleState(
+                locked=True,
+                retry_after_seconds=int(
+                    (record["locked_until"] - _now()).total_seconds()
+                )
+                + 1,
+            )
+        return ThrottleState(locked=False)
+
+    async def record_reset_attempt(self, key, *, max_attempts, lockout_seconds):
+        record = self.reset_throttle.setdefault(key, {"attempt_count": 0})
+        record["attempt_count"] += 1
+        if record["attempt_count"] >= max_attempts:
+            record["locked_until"] = _now() + timedelta(seconds=lockout_seconds)
+            record["attempt_count"] = 0
 
     # --- oauth state ---
     async def create_oauth_state(self, *, user_id, provider, code_verifier, ttl_seconds):

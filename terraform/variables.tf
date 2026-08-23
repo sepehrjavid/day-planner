@@ -110,6 +110,17 @@ variable "google_oauth_client_id" {
   EOT
 }
 
+variable "password_reset_from_email" {
+  type        = string
+  description = <<-EOT
+    The "from" address password-reset emails are sent as (A6.4). Must be a
+    Single Sender Verified (or domain-authenticated) address in the SendGrid
+    account the sendgrid-api-key secret belongs to, or every send is
+    rejected. Not a secret — the SendGrid API key goes into Secret Manager
+    out of band, same as the OAuth client secret.
+  EOT
+}
+
 variable "public_base_url" {
   type        = string
   description = <<-EOT
