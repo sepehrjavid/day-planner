@@ -5,6 +5,7 @@ os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "TRUE")
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-proj")
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "us-central1")
 os.environ.setdefault("INTERNAL_BACKEND_URL", "https://internal.example.invalid")
+os.environ.setdefault("APP_BACKEND_URL", "https://app.example.invalid")
 
 # agent.py builds AdkApp(agent=_llm_agent) at import time, which eagerly
 # resolves a GCP project via google.auth.default() — with no credentials of
@@ -294,20 +295,25 @@ class ScenarioFixture:
     # -- install ------------------------------------------------------------
 
     def install(self, monkeypatch) -> None:
-        from day_planner_agent import backend_client, calendar_tool
+        # A6.2: credentials (backend_client, audienced to
+        # day_planner_backend_internal) and domain data (domain_client,
+        # audienced to day_planner_backend_app's /agent/*) are two
+        # separate clients now — see backend_client.py's own module
+        # docstring for why they must never be confused.
+        from day_planner_agent import backend_client, calendar_tool, domain_client
 
         monkeypatch.setattr(backend_client, "list_calendars", self.list_calendars)
         monkeypatch.setattr(backend_client, "access_token", self.access_token)
-        monkeypatch.setattr(backend_client, "list_zones", self.list_zones)
-        monkeypatch.setattr(backend_client, "get_sleep_schedule", self.get_sleep_schedule)
-        monkeypatch.setattr(backend_client, "list_habits", self.list_habits)
-        monkeypatch.setattr(backend_client, "create_habit", self.create_habit)
-        monkeypatch.setattr(backend_client, "update_habit", self.update_habit)
-        monkeypatch.setattr(backend_client, "upsert_habit_session", self.upsert_habit_session)
+        monkeypatch.setattr(domain_client, "list_zones", self.list_zones)
+        monkeypatch.setattr(domain_client, "get_sleep_schedule", self.get_sleep_schedule)
+        monkeypatch.setattr(domain_client, "list_habits", self.list_habits)
+        monkeypatch.setattr(domain_client, "create_habit", self.create_habit)
+        monkeypatch.setattr(domain_client, "update_habit", self.update_habit)
+        monkeypatch.setattr(domain_client, "upsert_habit_session", self.upsert_habit_session)
         monkeypatch.setattr(
-            backend_client, "set_habit_session_status", self.set_habit_session_status
+            domain_client, "set_habit_session_status", self.set_habit_session_status
         )
-        monkeypatch.setattr(backend_client, "list_habit_sessions", self.list_habit_sessions)
+        monkeypatch.setattr(domain_client, "list_habit_sessions", self.list_habit_sessions)
         monkeypatch.setattr(calendar_tool, "build", self.build)
 
 

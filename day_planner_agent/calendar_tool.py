@@ -29,6 +29,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from . import backend_client
+from . import domain_client
 
 logger = logging.getLogger(__name__)
 
@@ -743,9 +744,13 @@ def _trim_google_event(item: dict, calendar_id: str) -> dict:
 async def _log_habit_session(user_id: str, habit_id: str, event: dict) -> None:
     """Best-effort: logging the plan must never fail event creation/
     rescheduling itself — a missed log entry just means one session is
-    invisible to a future review_habit_week, not a broken calendar."""
+    invisible to a future review_habit_week, not a broken calendar.
+
+    Goes through domain_client (day_planner_backend_app's /agent/*, A6.2),
+    not backend_client — habit sessions moved there in A6.1, unlike the
+    calendar-credential calls the rest of this file makes."""
     try:
-        await backend_client.upsert_habit_session(
+        await domain_client.upsert_habit_session(
             user_id,
             habit_id=habit_id,
             event_id=event["event_id"],

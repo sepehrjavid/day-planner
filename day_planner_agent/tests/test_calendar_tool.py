@@ -2,10 +2,14 @@
 across multiple connected accounts, skipping stale ones without failing the
 whole request, and merging/sorting events across calendars.
 
-backend_client's own HTTP mechanics aren't re-tested here — day_planner_backend_internal's
-own test suite already covers /internal/* extensively. What's tested is that
-calendar_tool.py calls it correctly and handles every response shape it can
-return.
+backend_client's/domain_client's own HTTP mechanics aren't re-tested here —
+day_planner_backend_internal's and day_planner_backend_app's own test
+suites already cover their respective routes extensively. What's tested
+is that calendar_tool.py calls them correctly and handles every response
+shape they can return. _log_habit_session goes through domain_client
+(A6.2), not backend_client, since habit sessions moved to
+day_planner_backend_app in A6.1 — everything else calendar_tool.py calls
+(list_calendars, access_token) stays on backend_client.
 """
 
 import asyncio
@@ -15,7 +19,7 @@ import httpx
 import pytest
 from googleapiclient.errors import HttpError
 
-from day_planner_agent import backend_client, calendar_tool
+from day_planner_agent import backend_client, calendar_tool, domain_client
 
 
 class FakeEventsResource:
@@ -1114,7 +1118,7 @@ async def test_add_calendar_event_with_habit_id_tags_and_logs_session(tool_conte
 
     monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
     monkeypatch.setattr(backend_client, "access_token", _access_token)
-    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(domain_client, "upsert_habit_session", upsert_habit_session)
     monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
 
     result = await calendar_tool.add_calendar_event(
@@ -1152,7 +1156,7 @@ async def test_add_calendar_event_without_habit_id_does_not_tag_or_log(tool_cont
 
     monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
     monkeypatch.setattr(backend_client, "access_token", _access_token)
-    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(domain_client, "upsert_habit_session", upsert_habit_session)
     monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
 
     result = await calendar_tool.add_calendar_event(
@@ -1182,7 +1186,7 @@ async def test_add_calendar_event_habit_session_log_failure_is_best_effort(
 
     monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
     monkeypatch.setattr(backend_client, "access_token", _access_token)
-    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(domain_client, "upsert_habit_session", upsert_habit_session)
     monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
 
     result = await calendar_tool.add_calendar_event(
@@ -1218,7 +1222,7 @@ async def test_update_calendar_event_reschedule_of_tagged_event_updates_log(
 
     monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
     monkeypatch.setattr(backend_client, "access_token", _access_token)
-    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(domain_client, "upsert_habit_session", upsert_habit_session)
     monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
 
     result = await calendar_tool.update_calendar_event(
@@ -1258,7 +1262,7 @@ async def test_update_calendar_event_summary_only_does_not_touch_habit_log(
 
     monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
     monkeypatch.setattr(backend_client, "access_token", _access_token)
-    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(domain_client, "upsert_habit_session", upsert_habit_session)
     monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
 
     result = await calendar_tool.update_calendar_event(
@@ -1283,7 +1287,7 @@ async def test_update_calendar_event_untagged_event_never_logs(tool_context, mon
 
     monkeypatch.setattr(backend_client, "list_calendars", _single_calendar())
     monkeypatch.setattr(backend_client, "access_token", _access_token)
-    monkeypatch.setattr(backend_client, "upsert_habit_session", upsert_habit_session)
+    monkeypatch.setattr(domain_client, "upsert_habit_session", upsert_habit_session)
     monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
 
     result = await calendar_tool.update_calendar_event(

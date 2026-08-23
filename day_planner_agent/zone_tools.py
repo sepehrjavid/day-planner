@@ -10,9 +10,11 @@ correctly re-apply the wording every single time, which is what actually
 caused a habit session to get placed during work hours once (see
 instruction.md's placement guidance and docs/todo.md §1).
 
-Zone records live in day_planner_backend_internal's Firestore, the same
-store habits already use and for the same reason (see habit_tools.py's
-module docstring) — every zone gets a stable zone_id.
+Zone records live in day_planner_backend_app's Firestore as of A6.1, the
+same store and the same reason habits already use (see habit_tools.py's
+module docstring) — every zone gets a stable zone_id. Reached here
+through domain_client.py's OIDC-authenticated calls to its /agent/*
+routes (A6.2).
 
 A zone is a restriction by default: no habit may be placed inside one
 unless the zone's label appears in that habit's own allowed_zones (see
@@ -23,7 +25,7 @@ the user stays purely conversational and must never be written there
 
 Sleep is modeled separately (set_sleep_schedule/get_sleep_schedule, not
 create_zone) because cool-down and wake-up are offsets from sleep's own
-boundaries, not independent named windows — see day_planner_backend_internal's
+boundaries, not independent named windows — see day_planner_backend_app's
 SleepSchedule docstring for the full reasoning.
 
 user_id always comes from tool_context.session.user_id, the same rule as
@@ -36,7 +38,7 @@ import logging
 
 from google.adk.tools import ToolContext
 
-from . import backend_client
+from . import domain_client
 
 logger = logging.getLogger(__name__)
 
@@ -98,14 +100,14 @@ async def create_zone(
         was rejected.
     """
     try:
-        zone = await backend_client.create_zone(
+        zone = await domain_client.create_zone(
             tool_context.session.user_id,
             label=label,
             start_time=start_time,
             end_time=end_time,
             days_of_week=days_of_week,
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("create_zone backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -137,8 +139,8 @@ async def list_zones(tool_context: ToolContext) -> dict:
         call until it succeeds.
     """
     try:
-        zones = await backend_client.list_zones(tool_context.session.user_id)
-    except backend_client.BACKEND_ERROR:
+        zones = await domain_client.list_zones(tool_context.session.user_id)
+    except domain_client.BACKEND_ERROR:
         logger.warning("list_zones backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -190,7 +192,7 @@ async def update_zone(
         return {"status": "error", "message": "No fields provided to update."}
 
     try:
-        updated = await backend_client.update_zone(
+        updated = await domain_client.update_zone(
             tool_context.session.user_id,
             zone_id,
             label=label,
@@ -198,7 +200,7 @@ async def update_zone(
             end_time=end_time,
             days_of_week=days_of_week,
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("update_zone backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -233,8 +235,8 @@ async def get_sleep_schedule(tool_context: ToolContext) -> dict:
         habit sessions until this can be re-checked successfully.
     """
     try:
-        schedule = await backend_client.get_sleep_schedule(tool_context.session.user_id)
-    except backend_client.BACKEND_ERROR:
+        schedule = await domain_client.get_sleep_schedule(tool_context.session.user_id)
+    except domain_client.BACKEND_ERROR:
         logger.warning("get_sleep_schedule backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -303,7 +305,7 @@ async def set_sleep_schedule(
         return {"status": "error", "message": "No fields provided to update."}
 
     try:
-        schedule = await backend_client.set_sleep_schedule(
+        schedule = await domain_client.set_sleep_schedule(
             tool_context.session.user_id,
             sleep_time=sleep_time,
             wake_time=wake_time,
@@ -311,7 +313,7 @@ async def set_sleep_schedule(
             wake_up_buffer_minutes=wake_up_buffer_minutes,
             day_overrides=day_overrides,
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("set_sleep_schedule backend call failed", exc_info=True)
         return {
             "status": "error",

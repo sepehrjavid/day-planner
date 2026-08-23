@@ -53,6 +53,7 @@ def _configure_environment() -> None:
     os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "sepi-dev-planner")
     os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "europe-west1")
     os.environ.setdefault("INTERNAL_BACKEND_URL", "https://internal.example.invalid")
+    os.environ.setdefault("APP_BACKEND_URL", "https://app.example.invalid")
     adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
     if adc_path.exists():
         os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(adc_path))

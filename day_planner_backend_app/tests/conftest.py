@@ -21,6 +21,7 @@ os.environ.setdefault("KMS_KEY_NAME", "projects/p/locations/l/keyRings/r/cryptoK
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_ID", "abc.apps.googleusercontent.com")
 os.environ.setdefault("GOOGLE_OAUTH_CLIENT_SECRET", "shh")
 os.environ.setdefault("PUBLIC_BASE_URL", "http://localhost:8080")
+os.environ.setdefault("AGENT_CALLER_SERVICE_ACCOUNTS", "agent@test.iam.gserviceaccount.com")
 os.environ.setdefault(
     "AGENT_ENGINE_NAME",
     "projects/test-proj/locations/us-central1/reasoningEngines/1",
@@ -492,6 +493,24 @@ def user(anon_client):
     assert response.status_code == 201, response.text
     body = response.json()
     return body["user_id"], {"Authorization": f"Bearer {body['access_token']}"}
+
+
+@pytest.fixture
+def agent_client(store):
+    """Client that passes the /agent/* caller gate (A6.2) — mirrors
+    day_planner_backend_internal's own `client` fixture pattern for
+    require_internal_caller: override the dependency rather than mint a
+    real OIDC token, so route *logic* is testable without Google
+    verification in the loop. The auth check itself (require_agent_caller
+    unmodified) is covered separately, via anon_client, in
+    test_agent_routes.py."""
+    from app.api.deps import require_agent_caller
+
+    main.app.dependency_overrides[require_agent_caller] = lambda: "agent@test.iam"
+    with TestClient(main.app) as c:
+        main.app.state.store = store
+        yield c
+    main.app.dependency_overrides.clear()
 
 
 @pytest.fixture

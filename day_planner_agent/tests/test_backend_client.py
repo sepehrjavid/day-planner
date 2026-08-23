@@ -1,14 +1,13 @@
-"""Coverage of backend_client.py's token caching and shared HTTP client
-(A2.1). Every other test file in this suite monkeypatches backend_client's
-public functions wholesale and never exercises this machinery — this file
-is the only one that does.
+"""Coverage of backend_client.py's own request/response mapping —
+connect_link, list_calendars (+NeedsAuth), access_token (+409 -> None).
 
-Module-level state (_token, _token_minted_at, _http_client) is reset
-before and after every test via the autouse fixture below, since it would
-otherwise leak between tests in the same process.
+Token caching, connection pooling, and 401-retry are _service_client.
+ServiceClient's job now (A6.2) and are tested once, generically, in
+test_service_client.py — this file only covers what's specific to these
+three credential endpoints. Every other test file in this suite
+monkeypatches these functions wholesale rather than exercising this
+module's own internals, so this is the only place that does.
 """
-
-import time
 
 import pytest
 
@@ -16,14 +15,14 @@ from day_planner_agent import backend_client
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_state():
-    backend_client._token = None
-    backend_client._token_minted_at = 0.0
-    backend_client._http_client = None
+def _reset_client_state():
+    backend_client._client._token = None
+    backend_client._client._token_minted_at = 0.0
+    backend_client._client._http_client = None
     yield
-    backend_client._token = None
-    backend_client._token_minted_at = 0.0
-    backend_client._http_client = None
+    backend_client._client._token = None
+    backend_client._client._token_minted_at = 0.0
+    backend_client._client._http_client = None
 
 
 class FakeHTTPXResponse:
@@ -40,294 +39,89 @@ class FakeHTTPXResponse:
 
 
 class FakeHTTPXClient:
-    """Deliberately has no __aenter__/__aexit__ — A2.1's whole point is
-    that call sites stop doing `async with await _client() as client`,
-    which would close a shared client after the first use. If any call
-    site regressed to that pattern, this fake would raise AttributeError
-    rather than silently working.
-
-    get_responses/post_responses (A2.3), when given, override the default
-    fixed success response: each successive call pops the next response
-    off the list, so a test can script "401 then success" or "401 then
-    401" for _get/_post's retry-once-on-401 logic."""
-
     def __init__(self, get_responses=None, post_responses=None):
         self.get_calls: list[dict] = []
         self.post_calls: list[dict] = []
-        self.closed = False
         self._get_responses = list(get_responses) if get_responses is not None else None
         self._post_responses = list(post_responses) if post_responses is not None else None
 
     async def get(self, url, **kwargs):
         self.get_calls.append({"url": url, **kwargs})
-        if self._get_responses is not None:
-            return self._get_responses.pop(0)
-        return FakeHTTPXResponse({"zones": []})
+        return self._get_responses.pop(0)
 
     async def post(self, url, **kwargs):
         self.post_calls.append({"url": url, **kwargs})
-        if self._post_responses is not None:
-            return self._post_responses.pop(0)
-        return FakeHTTPXResponse({"zone_id": "z1"})
-
-    async def aclose(self):
-        self.closed = True
+        return self._post_responses.pop(0)
 
 
-# ---------------------------------------------------------------------------
-# Token caching
-# ---------------------------------------------------------------------------
-
-
-async def test_token_minted_once_across_many_sequential_calls(monkeypatch):
-    mint_calls = []
-
-    async def fake_mint():
-        mint_calls.append(1)
-        return f"token-{len(mint_calls)}"
-
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-
-    tokens = [await backend_client._get_id_token() for _ in range(10)]
-
-    assert len(mint_calls) == 1
-    assert len(set(tokens)) == 1
-
-
-async def test_token_re_minted_after_expiry(monkeypatch):
-    mint_calls = []
-
-    async def fake_mint():
-        mint_calls.append(1)
-        return f"token-{len(mint_calls)}"
-
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-
-    first = await backend_client._get_id_token()
-    assert len(mint_calls) == 1
-
-    # Simulate the cached token having been minted just past its TTL.
-    backend_client._token_minted_at = (
-        time.monotonic() - backend_client._TOKEN_TTL_SECONDS - 1
-    )
-
-    second = await backend_client._get_id_token()
-    assert len(mint_calls) == 2
-    assert second != first
-
-
-async def test_token_not_yet_expired_is_not_re_minted(monkeypatch):
-    mint_calls = []
-
-    async def fake_mint():
-        mint_calls.append(1)
-        return "token"
-
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-
-    await backend_client._get_id_token()
-    # Well inside the TTL window.
-    backend_client._token_minted_at = time.monotonic() - 60
-
-    await backend_client._get_id_token()
-    assert len(mint_calls) == 1
-
-
-async def test_auth_headers_carries_the_current_token(monkeypatch):
-    async def fake_mint():
-        return "abc123"
-
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-
-    headers = await backend_client._auth_headers()
-    assert headers == {"Authorization": "Bearer abc123"}
-
-
-# ---------------------------------------------------------------------------
-# Shared HTTP client
-# ---------------------------------------------------------------------------
-
-
-async def test_client_is_not_created_until_first_use():
-    assert backend_client._http_client is None
-
-
-async def test_client_instance_is_reused_across_calls():
-    first = await backend_client._get_client()
-    second = await backend_client._get_client()
-    assert first is second
-
-
-async def test_client_survives_multiple_backend_calls_without_closing(monkeypatch):
-    """The literal A2.1 regression this exists to catch: `async with
-    await _client() as client` would close the shared client after the
-    very first call, and a second call site using it would raise
-    `RuntimeError: client has been closed`. FakeHTTPXClient has no
-    __aenter__/__aexit__ at all, so a reintroduced `async with` here would
-    fail loudly instead of silently passing."""
-
+def _install_fake_client(monkeypatch, fake_client):
     async def fake_mint():
         return "tok"
 
-    fake_client = FakeHTTPXClient()
-
     async def fake_get_client():
         return fake_client
 
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-    monkeypatch.setattr(backend_client, "_get_client", fake_get_client)
-
-    await backend_client.list_zones("user-1")
-    await backend_client.create_zone(
-        "user-1", label="Work", start_time="09:00", end_time="17:00", days_of_week=["mon"]
-    )
-
-    assert fake_client.closed is False
-    assert len(fake_client.get_calls) == 1
-    assert len(fake_client.post_calls) == 1
+    monkeypatch.setattr(backend_client._client, "_mint_id_token", fake_mint)
+    monkeypatch.setattr(backend_client._client, "_get_client", fake_get_client)
 
 
-async def test_authorization_header_is_per_request_not_baked_into_client(monkeypatch):
-    """The client itself must carry no Authorization header of its own —
-    only individual requests do — since the client is long-lived but the
-    token rotates roughly every 55 minutes."""
-    mint_count = []
-
-    async def fake_mint():
-        mint_count.append(1)
-        return f"tok-{len(mint_count)}"
-
-    fake_client = FakeHTTPXClient()
-
-    async def fake_get_client():
-        return fake_client
-
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-    monkeypatch.setattr(backend_client, "_get_client", fake_get_client)
-
-    await backend_client.list_zones("user-1")
-    # Force a re-mint before the second call, simulating token rotation
-    # mid-session — the *client* must be unaffected either way.
-    backend_client._token_minted_at = (
-        time.monotonic() - backend_client._TOKEN_TTL_SECONDS - 1
-    )
-    await backend_client.list_zones("user-1")
-
-    headers_seen = [call["headers"]["Authorization"] for call in fake_client.get_calls]
-    assert headers_seen == ["Bearer tok-1", "Bearer tok-2"]
-
-
-# ---------------------------------------------------------------------------
-# A2.3 — retry-once on 401 (a cached token gone stale before its TTL)
-# ---------------------------------------------------------------------------
-
-
-async def test_401_triggers_exactly_one_retry_with_a_freshly_minted_token(monkeypatch):
-    mint_calls = []
-
-    async def fake_mint():
-        mint_calls.append(1)
-        return f"token-{len(mint_calls)}"
-
+async def test_connect_link_posts_and_returns_url(monkeypatch):
     fake_client = FakeHTTPXClient(
-        get_responses=[
-            FakeHTTPXResponse({}, status_code=401),
-            FakeHTTPXResponse({"zones": []}, status_code=200),
-        ]
+        post_responses=[FakeHTTPXResponse({"connect_url": "https://connect.example/start"})]
     )
+    _install_fake_client(monkeypatch, fake_client)
 
-    async def fake_get_client():
-        return fake_client
+    url = await backend_client.connect_link("user-1", provider="google")
 
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-    monkeypatch.setattr(backend_client, "_get_client", fake_get_client)
-
-    zones = await backend_client.list_zones("user-1")
-
-    assert zones == []
-    assert len(mint_calls) == 2  # the original mint, plus one re-mint after the 401
-    headers_seen = [call["headers"]["Authorization"] for call in fake_client.get_calls]
-    assert headers_seen == ["Bearer token-1", "Bearer token-2"]
+    assert url == "https://connect.example/start"
+    assert fake_client.post_calls[0]["url"] == "/internal/connect-link"
+    assert fake_client.post_calls[0]["json"] == {"user_id": "user-1", "provider": "google"}
 
 
-async def test_second_consecutive_401_is_not_retried_again(monkeypatch):
-    """A second 401 right after the re-mint is a real auth failure, not a
-    stale cache — retrying it again would loop."""
+async def test_list_calendars_returns_body_when_connected(monkeypatch):
+    body = {"connected": True, "needs_reauth": [], "calendars": [{"calendar_id": "me@gmail.com"}]}
+    fake_client = FakeHTTPXClient(get_responses=[FakeHTTPXResponse(body)])
+    _install_fake_client(monkeypatch, fake_client)
 
-    async def fake_mint():
-        return "tok"
+    result = await backend_client.list_calendars("user-1")
 
+    assert result == body
+    assert fake_client.get_calls[0]["url"] == "/internal/calendars"
+    assert fake_client.get_calls[0]["params"] == {"user_id": "user-1"}
+
+
+async def test_list_calendars_raises_needs_auth_when_not_connected(monkeypatch):
     fake_client = FakeHTTPXClient(
-        get_responses=[
-            FakeHTTPXResponse({}, status_code=401),
-            FakeHTTPXResponse({}, status_code=401),
-        ]
+        get_responses=[FakeHTTPXResponse({"connected": False, "needs_reauth": [], "calendars": []})],
+        post_responses=[FakeHTTPXResponse({"connect_url": "https://connect.example/start"})],
     )
+    _install_fake_client(monkeypatch, fake_client)
 
-    async def fake_get_client():
-        return fake_client
+    with pytest.raises(backend_client.NeedsAuth) as exc_info:
+        await backend_client.list_calendars("user-1")
 
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-    monkeypatch.setattr(backend_client, "_get_client", fake_get_client)
-
-    with pytest.raises(RuntimeError):
-        await backend_client.list_zones("user-1")
-
-    assert len(fake_client.get_calls) == 2
+    assert exc_info.value.connect_url == "https://connect.example/start"
 
 
-async def test_401_retry_clears_the_module_level_cached_token(monkeypatch):
-    """Not just this call's retry — the next unrelated call must also see
-    a cleared cache rather than reusing the token that just got a 401."""
-    mint_calls = []
-
-    async def fake_mint():
-        mint_calls.append(1)
-        return f"token-{len(mint_calls)}"
-
-    fake_client = FakeHTTPXClient(
-        get_responses=[
-            FakeHTTPXResponse({}, status_code=401),
-            FakeHTTPXResponse({"zones": []}, status_code=200),
-        ]
-    )
-
-    async def fake_get_client():
-        return fake_client
-
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-    monkeypatch.setattr(backend_client, "_get_client", fake_get_client)
-
-    await backend_client.list_zones("user-1")
-
-    assert backend_client._token == "token-2"
-
-
-async def test_401_retry_applies_to_writes_too(monkeypatch):
-    """require_internal_caller gates every /internal/* handler at the
-    router level, ahead of any handler body — a 401 means nothing was
-    processed, so retrying a write after a fresh token is exactly as safe
-    as retrying a read."""
-
-    async def fake_mint():
-        return "tok"
-
+async def test_access_token_returns_token(monkeypatch):
     fake_client = FakeHTTPXClient(
         post_responses=[
-            FakeHTTPXResponse({}, status_code=401),
-            FakeHTTPXResponse({"zone_id": "z1"}, status_code=200),
+            FakeHTTPXResponse(
+                {"account_id": "a1", "access_token": "AT-1", "expires_at": "x", "scopes": []}
+            )
         ]
     )
+    _install_fake_client(monkeypatch, fake_client)
 
-    async def fake_get_client():
-        return fake_client
+    token = await backend_client.access_token("user-1", "a1")
 
-    monkeypatch.setattr(backend_client, "_mint_id_token", fake_mint)
-    monkeypatch.setattr(backend_client, "_get_client", fake_get_client)
+    assert token == "AT-1"
+    assert fake_client.post_calls[0]["url"] == "/internal/access-token"
+    assert fake_client.post_calls[0]["json"] == {"user_id": "user-1", "account_id": "a1"}
 
-    result = await backend_client.create_zone(
-        "user-1", label="Work", start_time="09:00", end_time="17:00", days_of_week=["mon"]
-    )
 
-    assert result == {"zone_id": "z1"}
-    assert len(fake_client.post_calls) == 2
+async def test_access_token_returns_none_on_409(monkeypatch):
+    fake_client = FakeHTTPXClient(post_responses=[FakeHTTPXResponse({}, status_code=409)])
+    _install_fake_client(monkeypatch, fake_client)
+
+    assert await backend_client.access_token("user-1", "a1") is None
