@@ -43,7 +43,6 @@ from app.db.models import (  # noqa: E402
     HABIT_SESSION_STATUS_PENDING,
     HABIT_STATUS_ACTIVE,
     STATUS_ACTIVE,
-    STATUS_NEEDS_REAUTH,
     Calendar,
     ConnectedAccount,
     EmailAlreadyRegistered,
@@ -371,14 +370,6 @@ class _FakeAccounts:
             for c in data["calendars"]
         ]
         return self._to_account(account_id, data)
-
-    async def mark_needs_reauth(self, *, user_id, account_id, reason):
-        data = self._store._accounts.get(user_id, {}).get(account_id)
-        if data is None:
-            return
-        data["status"] = STATUS_NEEDS_REAUTH
-        data["encrypted_refresh_token"] = None
-        data["last_error"] = reason
 
     async def delete(self, *, user_id, account_id):
         store = self._store

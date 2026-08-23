@@ -8,6 +8,13 @@ same Firestore client, so reaching into `users` from here is no
 different at the database level than reaching into it from
 UserRepository itself — the point of a separate class per collection
 family is call-site visibility, not access control.
+
+No mark_needs_reauth here, unlike day_planner_backend_internal's own
+AccountRepository: this service never mints access tokens, so it can
+never observe a refresh failure and has no reason to flip an account to
+STATUS_NEEDS_REAUTH itself. save's healing behavior above (reconnecting
+an account clears a prior needs_reauth state) still applies to whatever
+that other service writes — this repository just isn't the writer.
 """
 
 from __future__ import annotations
@@ -16,7 +23,6 @@ from google.cloud import firestore
 
 from ..models import (
     STATUS_ACTIVE,
-    STATUS_NEEDS_REAUTH,
     Calendar,
     ConnectedAccount,
     account_id_for,
@@ -140,24 +146,6 @@ class AccountRepository:
         ]
         await ref.set({"calendars": calendars, "updated_at": utcnow()}, merge=True)
         return ConnectedAccount.from_dict(account_id, {**data, "calendars": calendars})
-
-    async def mark_needs_reauth(
-        self, *, user_id: str, account_id: str, reason: str
-    ) -> None:
-        """Flip a dead grant into a recoverable state rather than an error.
-
-        The credential is dropped: it is known-useless, and keeping it only
-        means holding a secret we can't use.
-        """
-        await self._accounts(user_id).document(account_id).set(
-            {
-                "status": STATUS_NEEDS_REAUTH,
-                "encrypted_refresh_token": None,
-                "last_error": reason,
-                "updated_at": utcnow(),
-            },
-            merge=True,
-        )
 
     async def delete(self, *, user_id: str, account_id: str) -> None:
         await self._accounts(user_id).document(account_id).delete()
