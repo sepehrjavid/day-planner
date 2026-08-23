@@ -1,21 +1,31 @@
-"""User-facing habit session completion route (A1.5).
+"""User-facing habit session routes: completion (A1.5) and listing
+(A6.3).
 
 Like every other /me route, user_id comes only from current_user_id (the
 session token) and never from the request body — that's what makes
 another user's session structurally unreachable here.
 
-A6.1: this used to proxy to day_planner_backend_internal's
+A6.1: mark_habit_session used to proxy to day_planner_backend_internal's
 /internal/habit-sessions/status over HTTP (see git history's
 services/internal_client.py, now deleted). Habit session data moved to
 this service's own Store, so this calls it directly — same Firestore
 document, same users/{user_id}/... scoping, one fewer network hop and
-one fewer OIDC token to mint.
+one fewer OIDC token to mint. list_habit_sessions (A6.3) is a new
+listing route with no predecessor on day_planner_backend_internal — the
+UI's own equivalent of what review_habit_week reads via /agent's own
+list route.
 """
+
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ...db.store import Store
-from ...schemas.habit_sessions import HabitSessionOut, MarkHabitSessionRequest
+from ...schemas.habit_sessions import (
+    HabitSessionOut,
+    HabitSessionsResponse,
+    MarkHabitSessionRequest,
+)
 from ..deps import current_user_id, get_store
 
 router = APIRouter(prefix="/me", tags=["habit-sessions"])
@@ -35,6 +45,22 @@ def _to_habit_session_out(session) -> HabitSessionOut:
         completed_at=session.completed_at,
         marked_by=session.marked_by,
     )
+
+
+@router.get("/habit-sessions", response_model=HabitSessionsResponse)
+async def list_habit_sessions(
+    planned_from: datetime,
+    planned_to: datetime,
+    user_id: str = Depends(current_user_id),
+    store: Store = Depends(get_store),
+):
+    """Every session for the signed-in user planned to start in
+    [planned_from, planned_to) — the same range query /agent/habit-sessions
+    (A6.2) uses, scoped here to current_user_id instead of a body field."""
+    sessions = await store.list_habit_sessions(
+        user_id, planned_from=planned_from, planned_to=planned_to
+    )
+    return HabitSessionsResponse(sessions=[_to_habit_session_out(s) for s in sessions])
 
 
 @router.post("/habit-sessions/status", response_model=HabitSessionOut)

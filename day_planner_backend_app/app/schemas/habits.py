@@ -10,10 +10,11 @@ service's identical-looking schemas, request models here carry no
 user_id field — every route on this service resolves identity from
 somewhere else (the session token for /me/*, an OIDC service identity
 for /agent/*), never a request body field a caller could set to any
-value. No route in this codebase uses these yet (A6.1 moves the data
-and its shapes; A6.2/A6.3 build the routes that consume them) — see each
-of those tasks in docs/roadmaps/1-agent.md for its own request schema,
-since /me and /agent must never share one (A6.2's own explicit rule).
+value. Used directly by /me/habits (A6.3); /agent/habits (A6.2) uses its
+own Agent*-prefixed request classes instead, since those additionally
+carry user_id in the body — see schemas/agent.py's own docstring for why
+that's a deliberate duplication and not something to unify, while
+`HabitStatus` below is still the single definition both import.
 """
 
 from datetime import datetime

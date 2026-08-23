@@ -843,6 +843,21 @@ class Store:
         updated = await ref.get()
         return Zone.from_dict(zone_id, updated.to_dict() or {})
 
+    async def delete_zone(self, *, user_id: str, zone_id: str) -> bool:
+        """True if a zone existed and was deleted, False if there was
+        nothing to delete for this user — lets the route 404 instead of
+        reporting success for an id that was never there. Unlike habits,
+        zones have no soft-retire status and no referential-integrity
+        concern of their own (a habit's allowed_zones names a zone by
+        label, not by zone_id — see schemas/habits.py), so a hard delete
+        is safe here (A6.3)."""
+        ref = self._zones(user_id).document(zone_id)
+        snapshot = await ref.get()
+        if not snapshot.exists:
+            return False
+        await ref.delete()
+        return True
+
     # ------------------------------------------------------------------
     # Sleep schedule (singleton per user)
     # ------------------------------------------------------------------

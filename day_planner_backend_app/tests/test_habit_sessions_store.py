@@ -1,9 +1,11 @@
 """Coverage of habit-session domain logic (moved from
 day_planner_backend_internal by A6.1) beyond what test_habit_sessions.py's
-/me/habit-sessions/status route tests already cover — upsert_habit_session
-and list_habit_sessions have no route on this service yet (see
-test_habits.py's module docstring for why), so these exercise the `store`
-fixture's own methods directly.
+/me/habit-sessions routes and test_agent_routes.py's /agent/habit-sessions
+routes already cover. upsert_habit_session still has no /me or /agent-side
+caller test of its own beyond request/response mapping (only the agent
+tags calendar events with a habit session; see schemas/habit_sessions.py's
+module docstring) — these exercise the `store` fixture's own methods
+directly for that reason.
 
 Unlike a route-level test, there's no Pydantic schema between these calls
 and the Store — planned_start/planned_end must be real datetime objects,

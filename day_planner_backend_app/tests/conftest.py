@@ -434,6 +434,13 @@ class FakeStore:
         data["updated_at"] = _now()
         return Zone.from_dict(zone_id, data)
 
+    async def delete_zone(self, *, user_id, zone_id):
+        bucket = self.zones.get(user_id, {})
+        if zone_id not in bucket:
+            return False
+        del bucket[zone_id]
+        return True
+
     # --- sleep schedule ---
     async def get_sleep_schedule(self, user_id):
         data = self.sleep_schedules.get(user_id)
