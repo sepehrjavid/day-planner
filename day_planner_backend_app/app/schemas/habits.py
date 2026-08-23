@@ -1,15 +1,19 @@
-"""Request/response models for /internal/habits*.
+"""Request/response models for habit domain operations.
 
 Habits are the day planner's structured, addressable record of a user's
 recurring goals — see ../../../docs/feature-ideas.md item 2 for why this
 needed to exist as its own entity rather than living inside the free-text
 preference profile in Memory Bank.
 
-Like every other route in this service, identity is a request-body field
-(InternalUserRequest, from ..schemas.calendars) filled from
-tool_context.session.user_id on the agent side — never something the model
-supplied. No path parameters anywhere here (habit_id lives in the body for
-the update route), matching every other route in this codebase.
+Moved here from day_planner_backend_internal by A6.1. Unlike that
+service's identical-looking schemas, request models here carry no
+user_id field — every route on this service resolves identity from
+somewhere else (the session token for /me/*, an OIDC service identity
+for /agent/*), never a request body field a caller could set to any
+value. No route in this codebase uses these yet (A6.1 moves the data
+and its shapes; A6.2/A6.3 build the routes that consume them) — see each
+of those tasks in docs/roadmaps/1-agent.md for its own request schema,
+since /me and /agent must never share one (A6.2's own explicit rule).
 """
 
 from datetime import datetime
@@ -17,17 +21,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .calendars import InternalUserRequest
-
 HabitStatus = Literal["active", "paused", "archived"]
 
 
-class CreateHabitRequest(InternalUserRequest):
+class CreateHabitRequest(BaseModel):
     label: str = Field(min_length=1, max_length=200)
     goal: str = Field(min_length=1, max_length=2000)
 
 
-class UpdateHabitRequest(InternalUserRequest):
+class UpdateHabitRequest(BaseModel):
     habit_id: str = Field(min_length=1)
     label: str | None = Field(default=None, min_length=1, max_length=200)
     goal: str | None = Field(default=None, min_length=1, max_length=2000)

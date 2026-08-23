@@ -21,15 +21,6 @@ class Settings(BaseSettings):
     # projects/{p}/locations/{l}/keyRings/{r}/cryptoKeys/{k}
     kms_key_name: str
 
-    # --- day_planner_backend_internal (A1.5's mark-session-status route) ---
-    # This service's own origin, no trailing slash — audience for the OIDC
-    # token internal_client.py mints to call it. Mirrors
-    # day_planner_agent/backend_client.py's INTERNAL_BACKEND_URL, but this
-    # service only ever calls the one route A1.5 added
-    # (/internal/habit-sessions/status); it never touches calendars,
-    # zones, or habits directly.
-    internal_backend_url: str
-
     # --- Vertex AI Agent Engine (day_planner_agent) ---
     # Full resource name: projects/{p}/locations/{l}/reasoningEngines/{id}
     # (terraform output: google_vertex_ai_reasoning_engine.day_planner_agent.name)
