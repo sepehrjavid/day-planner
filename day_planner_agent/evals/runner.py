@@ -161,6 +161,7 @@ async def run_trial(
         habits=scenario.given.habits,
         calendar_events=scenario.given.calendar_events,
         zones_fetch_fails=scenario.given.zones_fetch_fails,
+        habits_fetch_fails=scenario.given.habits_fetch_fails,
         needs_auth=scenario.given.needs_auth,
         calendar_access_role=scenario.given.calendar_access_role,
     )
@@ -225,6 +226,15 @@ async def run_trial(
                 "model was invoked (produced token usage) before any exception",
                 input_tokens > 0,
                 f"input_tokens={input_tokens}, exception={exception_repr!r}",
+            )
+        )
+
+    if scenario.expect.no_exception:
+        checks.append(
+            Check(
+                "turn completed without raising (A2.6)",
+                exception_repr is None,
+                f"exception={exception_repr!r}",
             )
         )
 

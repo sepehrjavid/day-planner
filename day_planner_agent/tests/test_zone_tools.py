@@ -8,6 +8,9 @@ day_planner_backend_internal's own test suite already covers
 /internal/zones* and /internal/sleep-schedule* directly.
 """
 
+import httpx
+import pytest
+
 from day_planner_agent import backend_client, zone_tools
 
 
@@ -196,3 +199,80 @@ async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
         zone_tools.set_sleep_schedule,
     ):
         assert "user_id" not in fn.__code__.co_varnames[: fn.__code__.co_argcount]
+
+
+# ---------------------------------------------------------------------------
+# A2.6: backend failures return {"status": "error", ...} instead of
+# crashing the turn — never {"status": "success", "exists": False} or an
+# empty list that would read as "the user has none".
+# ---------------------------------------------------------------------------
+
+
+async def test_create_zone_backend_failure_returns_error(tool_context, monkeypatch):
+    async def create_zone(user_id, **kwargs):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "create_zone", create_zone)
+
+    result = await zone_tools.create_zone(tool_context, "Work", "09:00", "17:00", ["mon"])
+    assert result["status"] == "error"
+
+
+async def test_list_zones_backend_failure_does_not_read_as_empty(tool_context, monkeypatch):
+    async def list_zones(user_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_zones", list_zones)
+
+    result = await zone_tools.list_zones(tool_context)
+    assert result["status"] == "error"
+    assert "zones" not in result
+    assert "does not mean" in result["message"]
+
+
+async def test_update_zone_backend_failure_returns_error(tool_context, monkeypatch):
+    async def update_zone(user_id, zone_id, **kwargs):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "update_zone", update_zone)
+
+    result = await zone_tools.update_zone(tool_context, "z1", end_time="18:00")
+    assert result["status"] == "error"
+
+
+async def test_get_sleep_schedule_backend_failure_omits_exists_key(tool_context, monkeypatch):
+    async def get_sleep_schedule(user_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "get_sleep_schedule", get_sleep_schedule)
+
+    result = await zone_tools.get_sleep_schedule(tool_context)
+    assert result["status"] == "error"
+    # Must never look like {"status": "success", "exists": False} — the
+    # whole point of scope item 4 is that a failed fetch can't be
+    # misread as "none is set".
+    assert "exists" not in result
+
+
+async def test_set_sleep_schedule_backend_failure_returns_error(tool_context, monkeypatch):
+    async def set_sleep_schedule(user_id, **kwargs):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "set_sleep_schedule", set_sleep_schedule)
+
+    result = await zone_tools.set_sleep_schedule(tool_context, sleep_time="23:00")
+    assert result["status"] == "error"
+
+
+async def test_list_zones_programming_error_still_propagates(tool_context, monkeypatch):
+    """A2.6's scope item 3: only HTTP/network/auth classes are caught —
+    a real bug (TypeError, KeyError) must keep surfacing loudly rather
+    than being reported to the model as a backend hiccup."""
+
+    async def list_zones(user_id):
+        raise TypeError("not a backend failure")
+
+    monkeypatch.setattr(backend_client, "list_zones", list_zones)
+
+    with pytest.raises(TypeError):
+        await zone_tools.list_zones(tool_context)

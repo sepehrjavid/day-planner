@@ -158,14 +158,30 @@ async def get_calendar_events(
             "connect_url": exc.connect_url,
             "message": exc.message,
         }
+    except backend_client.BACKEND_ERROR:
+        logger.warning("get_calendar_events: list_calendars backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": (
+                "Could not check connected calendars right now due to a "
+                "backend error — this does not mean nothing is connected."
+            ),
+        }
 
     # Sorted for reproducibility only — the original dict comprehension
     # this replaces iterated a set too, so there was never an ordering
     # guarantee to preserve here, unlike events.sort below.
     account_ids = sorted({c["account_id"] for c in calendars["calendars"]})
-    tokens = await asyncio.gather(
-        *(backend_client.access_token(user_id, account_id) for account_id in account_ids)
-    )
+    try:
+        tokens = await asyncio.gather(
+            *(backend_client.access_token(user_id, account_id) for account_id in account_ids)
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("get_calendar_events: access_token backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": "Could not verify calendar access right now due to a backend error.",
+        }
     tokens_by_account = dict(zip(account_ids, tokens))
 
     skipped_accounts = {aid for aid, token in tokens_by_account.items() if token is None}
@@ -278,6 +294,15 @@ async def add_calendar_event(
             "connect_url": exc.connect_url,
             "message": exc.message,
         }
+    except backend_client.BACKEND_ERROR:
+        logger.warning("add_calendar_event: list_calendars backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": (
+                "Could not check connected calendars right now due to a "
+                "backend error — this does not mean nothing is connected."
+            ),
+        }
 
     candidates = _candidate_calendars(calendars["calendars"], calendar_summary)
     if not candidates:
@@ -300,7 +325,14 @@ async def add_calendar_event(
     saw_any_token = False
     read_only_names = []
     for candidate in candidates:
-        token = await backend_client.access_token(user_id, candidate["account_id"])
+        try:
+            token = await backend_client.access_token(user_id, candidate["account_id"])
+        except backend_client.BACKEND_ERROR:
+            logger.warning("add_calendar_event: access_token backend call failed", exc_info=True)
+            return {
+                "status": "error",
+                "error_message": "Could not verify calendar access right now due to a backend error.",
+            }
         if token is None:
             continue
         saw_any_token = True
@@ -419,6 +451,15 @@ async def update_calendar_event(
             "connect_url": exc.connect_url,
             "message": exc.message,
         }
+    except backend_client.BACKEND_ERROR:
+        logger.warning("list_calendars backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": (
+                "Could not check connected calendars right now due to a "
+                "backend error — this does not mean nothing is connected."
+            ),
+        }
 
     candidate = next(
         (c for c in calendars["calendars"] if c["calendar_id"] == calendar_id), None
@@ -429,7 +470,14 @@ async def update_calendar_event(
             "message": f"No connected calendar with id {calendar_id!r}.",
         }
 
-    token = await backend_client.access_token(user_id, candidate["account_id"])
+    try:
+        token = await backend_client.access_token(user_id, candidate["account_id"])
+    except backend_client.BACKEND_ERROR:
+        logger.warning("access_token backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": "Could not verify calendar access right now due to a backend error.",
+        }
     if token is None:
         return {
             "status": "needs_auth",
@@ -513,6 +561,15 @@ async def delete_calendar_event(
             "connect_url": exc.connect_url,
             "message": exc.message,
         }
+    except backend_client.BACKEND_ERROR:
+        logger.warning("list_calendars backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": (
+                "Could not check connected calendars right now due to a "
+                "backend error — this does not mean nothing is connected."
+            ),
+        }
 
     candidate = next(
         (c for c in calendars["calendars"] if c["calendar_id"] == calendar_id), None
@@ -523,7 +580,14 @@ async def delete_calendar_event(
             "message": f"No connected calendar with id {calendar_id!r}.",
         }
 
-    token = await backend_client.access_token(user_id, candidate["account_id"])
+    try:
+        token = await backend_client.access_token(user_id, candidate["account_id"])
+    except backend_client.BACKEND_ERROR:
+        logger.warning("access_token backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": "Could not verify calendar access right now due to a backend error.",
+        }
     if token is None:
         return {
             "status": "needs_auth",

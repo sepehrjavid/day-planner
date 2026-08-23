@@ -23,11 +23,24 @@ import asyncio
 import os
 import time
 
+import google.auth.exceptions
 import httpx
 from google.auth.transport.requests import Request
 from google.oauth2 import id_token as google_id_token
 
 INTERNAL_BACKEND_URL = os.environ["INTERNAL_BACKEND_URL"].rstrip("/")
+
+# A2.6: every function below can fail this way — a transient or hard
+# backend outage, a network blip, or the OIDC token mint itself failing
+# (metadata server unreachable, credentials misconfigured). Callers
+# should catch this tuple (alongside NeedsAuth, which is an expected,
+# actionable state, not a failure) and report {"status": "error", ...}
+# rather than letting it propagate and crash the turn — see zone_tools.py,
+# habit_tools.py, and calendar_tool.py's backend_client call sites for
+# the pattern. httpx.HTTPError covers both connection/timeout failures
+# (httpx.RequestError) and non-2xx responses (httpx.HTTPStatusError, from
+# raise_for_status() below); GoogleAuthError covers _mint_id_token failing.
+BACKEND_ERROR = (httpx.HTTPError, google.auth.exceptions.GoogleAuthError)
 
 _TIMEOUT = httpx.Timeout(10.0)
 

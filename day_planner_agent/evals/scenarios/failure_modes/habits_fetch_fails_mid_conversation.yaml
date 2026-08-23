@@ -1,0 +1,24 @@
+name: "list_habits failing mid-conversation does not crash the turn"
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  # Unlike zones/the profile, habits are never preloaded — habit_tools.py's
+  # own list_habits docstring says to "call list_habits explicitly
+  # whenever you're deciding what to schedule". Every call is therefore a
+  # live, mid-conversation one, not a preload — this is what makes this
+  # scenario distinct from A3.2's zone_fetch_fails.yaml (which is about
+  # the preload path specifically): A2.6 was found empirically because a
+  # backend failure here used to propagate uncaught and kill the whole
+  # turn, not because of anything preload-related.
+  zones:
+    - {label: Work, start: "09:00", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits_fetch_fails: true
+  calendar_events: []
+when:
+  user_says: "Plan my gym sessions for this week."
+expect:
+  model_invoked: true
+  no_exception: true
+  invariants:
+    - no_events_actually_placed

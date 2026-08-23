@@ -11,6 +11,7 @@ return.
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from googleapiclient.errors import HttpError
 
@@ -2032,3 +2033,144 @@ async def test_add_calendar_event_gives_up_after_max_attempts_on_persistent_503(
 
     assert result["status"] == "error"
     assert len(service.events().insert_calls) == calendar_tool._MAX_INSERT_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# A2.6: backend failures (as opposed to NeedsAuth, an expected state)
+# return {"status": "error", ...} instead of crashing the turn.
+# ---------------------------------------------------------------------------
+
+
+async def test_get_calendar_events_list_calendars_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+    assert result["status"] == "error"
+
+
+async def test_get_calendar_events_access_token_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com"}],
+        }
+
+    async def access_token(user_id, account_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    result = await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+    assert result["status"] == "error"
+
+
+async def test_get_calendar_events_list_calendars_programming_error_still_propagates(
+    tool_context, monkeypatch
+):
+    """A2.6's scope item 3: only HTTP/network/auth classes are caught —
+    a real bug must keep surfacing loudly."""
+
+    async def list_calendars(user_id):
+        raise TypeError("not a backend failure")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    with pytest.raises(TypeError):
+        await calendar_tool.get_calendar_events(tool_context, "2026-08-01", "2026-08-02")
+
+
+async def test_add_calendar_event_list_calendars_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+    )
+    assert result["status"] == "error"
+
+
+async def test_add_calendar_event_access_token_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com", "is_primary": True}],
+        }
+
+    async def access_token(user_id, account_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    result = await calendar_tool.add_calendar_event(
+        tool_context, "Gym", "2026-08-04T07:00:00-07:00", "2026-08-04T07:30:00-07:00"
+    )
+    assert result["status"] == "error"
+
+
+async def test_update_calendar_event_list_calendars_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", summary="Renamed"
+    )
+    assert result["status"] == "error"
+
+
+async def test_update_calendar_event_access_token_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com"}],
+        }
+
+    async def access_token(user_id, account_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    result = await calendar_tool.update_calendar_event(
+        tool_context, "e1", "me@gmail.com", summary="Renamed"
+    )
+    assert result["status"] == "error"
+
+
+async def test_delete_calendar_event_list_calendars_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    result = await calendar_tool.delete_calendar_event(tool_context, "e1", "me@gmail.com")
+    assert result["status"] == "error"
+
+
+async def test_delete_calendar_event_access_token_backend_failure(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [{"account_id": "acct-1", "calendar_id": "me@gmail.com"}],
+        }
+
+    async def access_token(user_id, account_id):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+
+    result = await calendar_tool.delete_calendar_event(tool_context, "e1", "me@gmail.com")
+    assert result["status"] == "error"

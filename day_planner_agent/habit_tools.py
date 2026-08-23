@@ -92,11 +92,20 @@ async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict
 
     Returns:
         dict with "status" ("success" or "error") and, on success, "habit"
-        (habit_id, label, goal, status, created_at, updated_at).
+        (habit_id, label, goal, status, created_at, updated_at). On
+        "error", the habit was not created — a backend failure, not a
+        validation problem; retry rather than assuming it was rejected.
     """
-    habit = await backend_client.create_habit(
-        tool_context.session.user_id, label=label, goal=goal
-    )
+    try:
+        habit = await backend_client.create_habit(
+            tool_context.session.user_id, label=label, goal=goal
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("create_habit backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not create the habit right now due to a backend error. Try again shortly.",
+        }
     return {"status": "success", "habit": habit}
 
 
@@ -114,11 +123,26 @@ async def list_habits(tool_context: ToolContext, include_inactive: bool = False)
 
     Returns:
         dict with "status" and "habits" (a list of habit_id, label, goal,
-        status, created_at, updated_at — empty if none exist yet).
+        status, created_at, updated_at — empty if none exist yet). On
+        "error", habits could not be loaded due to a backend failure —
+        this is not the same as the user having none tracked; do not
+        place any habit session on the strength of this call, and do not
+        tell the user they have no habits.
     """
-    habits = await backend_client.list_habits(
-        tool_context.session.user_id, status=None if include_inactive else "active"
-    )
+    try:
+        habits = await backend_client.list_habits(
+            tool_context.session.user_id, status=None if include_inactive else "active"
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("list_habits backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": (
+                "Could not load habits right now due to a backend error — this "
+                "does not mean the user has none tracked. Retry before assuming "
+                "there is nothing to place."
+            ),
+        }
     return {"status": "success", "habits": habits}
 
 
@@ -164,19 +188,27 @@ async def update_habit(
 
     Returns:
         dict with "status" ("success", "not_found", or "error") and, on
-        success, "habit" (the updated record).
+        success, "habit" (the updated record). On "error", a backend
+        failure prevented the update — not a validation problem.
     """
     if not any([label, goal, status, allowed_zones is not None]):
         return {"status": "error", "message": "No fields provided to update."}
 
-    updated = await backend_client.update_habit(
-        tool_context.session.user_id,
-        habit_id,
-        label=label,
-        goal=goal,
-        status=status,
-        allowed_zones=allowed_zones,
-    )
+    try:
+        updated = await backend_client.update_habit(
+            tool_context.session.user_id,
+            habit_id,
+            label=label,
+            goal=goal,
+            status=status,
+            allowed_zones=allowed_zones,
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("update_habit backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not update the habit right now due to a backend error. Try again shortly.",
+        }
     if updated is None:
         return {"status": "not_found", "message": f"No habit {habit_id!r}."}
     return {"status": "success", "habit": updated}
@@ -236,13 +268,26 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
         Empty "sessions" means no habit session was planned in this period
         at all — distinct from every one of them being kept/completed, so
         don't conflate the two when summarizing. On "needs_auth"/"error",
-        handle identically to get_calendar_events.
+        handle identically to get_calendar_events — an "error" here means
+        the review could not be performed due to a backend failure, not
+        that nothing was planned; don't report it as an empty period.
     """
     user_id = tool_context.session.user_id
 
-    sessions = await backend_client.list_habit_sessions(
-        user_id, planned_from=f"{date_from}T00:00:00Z", planned_to=f"{date_to}T00:00:00Z"
-    )
+    try:
+        sessions = await backend_client.list_habit_sessions(
+            user_id, planned_from=f"{date_from}T00:00:00Z", planned_to=f"{date_to}T00:00:00Z"
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("review_habit_week: list_habit_sessions backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": (
+                "Could not check habit session history right now due to a "
+                "backend error — this does not mean nothing was planned. "
+                "Try again shortly rather than reporting an empty period."
+            ),
+        }
     if not sessions:
         return {"status": "success", "sessions": []}
 
@@ -253,8 +298,16 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
     events = calendar_state["events"]
     events_by_key = {(e["calendar_id"], e["event_id"]): e for e in events}
 
-    habits = await backend_client.list_habits(user_id, status=None)
-    habit_labels = {h["habit_id"]: h["label"] for h in habits}
+    try:
+        habits = await backend_client.list_habits(user_id, status=None)
+        habit_labels = {h["habit_id"]: h["label"] for h in habits}
+    except backend_client.BACKEND_ERROR:
+        # Best-effort enrichment only — habit_labels falls back to
+        # habit_id below (see the .get(..., session["habit_id"]) default
+        # a few lines down), so a failure here degrades display quality
+        # rather than failing the whole review over a non-essential lookup.
+        logger.warning("review_habit_week: list_habits enrichment failed", exc_info=True)
+        habit_labels = {}
 
     results = []
     for session in sessions:
@@ -325,15 +378,24 @@ async def mark_habit_session(
         session_status, completed_at, marked_by). "not_found" means no
         habit session is logged for that calendar_id/event_id — call
         review_habit_week or get_calendar_events first to find the right
-        one rather than guessing.
+        one rather than guessing. "error" means a backend failure
+        prevented the mark from being recorded — not that it was
+        rejected; the user's report should not be treated as saved.
     """
-    session = await backend_client.set_habit_session_status(
-        tool_context.session.user_id,
-        calendar_id=calendar_id,
-        event_id=event_id,
-        status=status,
-        marked_by="agent",
-    )
+    try:
+        session = await backend_client.set_habit_session_status(
+            tool_context.session.user_id,
+            calendar_id=calendar_id,
+            event_id=event_id,
+            status=status,
+            marked_by="agent",
+        )
+    except backend_client.BACKEND_ERROR:
+        logger.warning("mark_habit_session backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Could not record this mark right now due to a backend error. Try again shortly.",
+        }
     if session is None:
         return {
             "status": "not_found",

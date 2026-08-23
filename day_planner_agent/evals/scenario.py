@@ -94,9 +94,10 @@ class Given:
     sleep_schedule: dict | None = None
     habits: list[dict] = field(default_factory=list)
     calendar_events: list[dict] = field(default_factory=list)
-    # A3.2 failure injection — see conftest.py's ScenarioFixture for what
-    # each of these actually does to the fixture's backend_client fakes.
+    # A3.2/A2.6 failure injection — see conftest.py's ScenarioFixture for
+    # what each of these actually does to the fixture's backend_client fakes.
     zones_fetch_fails: bool = False
+    habits_fetch_fails: bool = False
     needs_auth: bool = False
     calendar_access_role: str = "owner"
 
@@ -119,6 +120,13 @@ class Expect:
     # different agent behaviours. See evals/runner.py's use of
     # trial.input_tokens as the signal.
     model_invoked: bool = False
+    # A2.6: distinguishes "the agent reported an error and completed
+    # normally" from "the turn crashed" — model_invoked alone proves the
+    # model started, not that it finished without an uncaught exception
+    # (TrialResult.passed deliberately doesn't require exception is None
+    # on its own — see runner.py — so without this a crash and a clean
+    # decline both read as passing every other check here).
+    no_exception: bool = False
 
 
 @dataclass
@@ -149,6 +157,7 @@ def _parse_scenario(raw: dict, source_file: Path) -> Scenario:
             for i, e in enumerate(given_raw.get("calendar_events", []))
         ],
         zones_fetch_fails=given_raw.get("zones_fetch_fails", False),
+        habits_fetch_fails=given_raw.get("habits_fetch_fails", False),
         needs_auth=given_raw.get("needs_auth", False),
         calendar_access_role=given_raw.get("calendar_access_role", "owner"),
     )
@@ -162,6 +171,7 @@ def _parse_scenario(raw: dict, source_file: Path) -> Scenario:
         ],
         invariants=list(expect_raw.get("invariants", [])),
         model_invoked=expect_raw.get("model_invoked", False),
+        no_exception=expect_raw.get("no_exception", False),
     )
     return Scenario(
         name=raw["name"],

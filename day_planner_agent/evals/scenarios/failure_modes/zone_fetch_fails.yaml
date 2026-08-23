@@ -10,5 +10,12 @@ when:
   user_says: "Plan my gym sessions for this week."
 expect:
   model_invoked: true
+  # A2.6: this scenario's own re-check path (the model re-calling
+  # list_zones after instruction.md invites it to, following the preload
+  # failure) used to crash the turn — documented in BASELINE.md as "the
+  # informational re-check crash still present in every trial". Asserting
+  # no_exception here, not just at habits_fetch_fails_mid_conversation.yaml,
+  # closes that loose end directly on the scenario that first found it.
+  no_exception: true
   invariants:
     - no_events_actually_placed

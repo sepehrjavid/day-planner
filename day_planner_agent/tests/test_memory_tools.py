@@ -18,6 +18,8 @@ import asyncio
 import logging
 from types import SimpleNamespace
 
+import google.api_core.exceptions
+import google.auth.exceptions
 import pytest
 
 from day_planner_agent import memory_tools
@@ -270,3 +272,81 @@ async def test_save_memory_write_failure_is_retried_and_eventually_succeeds(monk
         await asyncio.gather(*memory_tools._pending_writes)
 
     assert len(memories.create_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# A2.6: backend failures return {"status": "error", ...} instead of
+# crashing the turn — never a shape that reads as "no profile exists".
+# ---------------------------------------------------------------------------
+
+
+class FakeMemoryServiceWithProfiles(FakeMemoryService):
+    def __init__(self, profiles=None, retrieve_effect=None, **kwargs):
+        super().__init__(**kwargs)
+        self._profiles = profiles or []
+        self._retrieve_effect = retrieve_effect
+
+    async def retrieve_profiles(self, **kwargs):
+        if self._retrieve_effect is not None:
+            raise self._retrieve_effect
+        return self._profiles
+
+
+async def test_get_profile_returns_matching_schema():
+    profile = SimpleNamespace(schema_id=memory_tools.PROFILE_SCHEMA_ID, profile={"a": "b"})
+    service = FakeMemoryServiceWithProfiles(profiles=[profile])
+
+    result = await memory_tools.get_profile(FakeToolContext(memory_service=service))
+    assert result == {"status": "success", "profile": {"a": "b"}}
+
+
+async def test_get_profile_backend_failure_omits_profile_key():
+    service = FakeMemoryServiceWithProfiles(
+        retrieve_effect=google.api_core.exceptions.ServiceUnavailable("boom")
+    )
+
+    result = await memory_tools.get_profile(FakeToolContext(memory_service=service))
+    assert result["status"] == "error"
+    # Must never look like {"status": "success", "profile": {}} — that
+    # would read as "the user genuinely has no preferences on file".
+    assert "profile" not in result
+
+
+async def test_get_profile_auth_failure_also_caught():
+    service = FakeMemoryServiceWithProfiles(
+        retrieve_effect=google.auth.exceptions.TransportError("boom")
+    )
+
+    result = await memory_tools.get_profile(FakeToolContext(memory_service=service))
+    assert result["status"] == "error"
+
+
+async def test_get_profile_programming_error_still_propagates():
+    """A2.6's scope item 3: only backend/auth failure classes are
+    caught — a real bug must keep surfacing loudly."""
+    service = FakeMemoryServiceWithProfiles(retrieve_effect=TypeError("not a backend failure"))
+
+    with pytest.raises(TypeError):
+        await memory_tools.get_profile(FakeToolContext(memory_service=service))
+
+
+async def test_update_profile_client_construction_failure_returns_error(monkeypatch):
+    def raising_client(**kwargs):
+        raise google.auth.exceptions.DefaultCredentialsError("boom")
+
+    monkeypatch.setattr(memory_tools.vertexai, "Client", raising_client)
+
+    result = await memory_tools.update_profile(FakeToolContext(), preferences="gym at 6am")
+    assert result["status"] == "error"
+    assert memory_tools._pending_writes == set()
+
+
+async def test_save_memory_client_construction_failure_returns_error(monkeypatch):
+    def raising_client(**kwargs):
+        raise google.auth.exceptions.DefaultCredentialsError("boom")
+
+    monkeypatch.setattr(memory_tools.vertexai, "Client", raising_client)
+
+    result = await memory_tools.save_memory(FakeToolContext(), "a fact")
+    assert result["status"] == "error"
+    assert memory_tools._pending_writes == set()
