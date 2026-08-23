@@ -8,11 +8,13 @@ which gave every habit no stable identity: nothing to tag a calendar event
 with later, nothing to query deterministically, and no guarantee Memory
 Bank's own LLM-driven merge preserved exact wording across updates.
 
-Habit records instead live in day_planner_backend_internal's Firestore, the
-same deterministic store already used for calendar-account identity (see
+Habit records instead live in Firestore — every habit gets a stable
+habit_id the rest of the system can rely on. Owned by
+day_planner_backend_app as of A6.1 (it used to live behind
+day_planner_backend_internal, the credential-only service — see
 ../docs/oauth-design.md §7 for why credential/identity-adjacent state
-doesn't belong in Memory Bank) — every habit gets a stable habit_id the
-rest of the system can rely on.
+belongs there and ordinary planning data doesn't); reached here through
+domain_client.py's OIDC-authenticated calls to its /agent/* routes (A6.2).
 
 user_id always comes from tool_context.session.user_id, the same rule as
 every other tool in this codebase — never a model-supplied argument.
@@ -26,7 +28,7 @@ from datetime import datetime
 
 from google.adk.tools import ToolContext
 
-from . import backend_client
+from . import domain_client
 from . import calendar_tool
 from . import zone_tools
 
@@ -97,10 +99,10 @@ async def create_habit(tool_context: ToolContext, label: str, goal: str) -> dict
         validation problem; retry rather than assuming it was rejected.
     """
     try:
-        habit = await backend_client.create_habit(
+        habit = await domain_client.create_habit(
             tool_context.session.user_id, label=label, goal=goal
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("create_habit backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -130,10 +132,10 @@ async def list_habits(tool_context: ToolContext, include_inactive: bool = False)
         tell the user they have no habits.
     """
     try:
-        habits = await backend_client.list_habits(
+        habits = await domain_client.list_habits(
             tool_context.session.user_id, status=None if include_inactive else "active"
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("list_habits backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -195,7 +197,7 @@ async def update_habit(
         return {"status": "error", "message": "No fields provided to update."}
 
     try:
-        updated = await backend_client.update_habit(
+        updated = await domain_client.update_habit(
             tool_context.session.user_id,
             habit_id,
             label=label,
@@ -203,7 +205,7 @@ async def update_habit(
             status=status,
             allowed_zones=allowed_zones,
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("update_habit backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -275,10 +277,10 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
     user_id = tool_context.session.user_id
 
     try:
-        sessions = await backend_client.list_habit_sessions(
+        sessions = await domain_client.list_habit_sessions(
             user_id, planned_from=f"{date_from}T00:00:00Z", planned_to=f"{date_to}T00:00:00Z"
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("review_habit_week: list_habit_sessions backend call failed", exc_info=True)
         return {
             "status": "error",
@@ -299,9 +301,9 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
     events_by_key = {(e["calendar_id"], e["event_id"]): e for e in events}
 
     try:
-        habits = await backend_client.list_habits(user_id, status=None)
+        habits = await domain_client.list_habits(user_id, status=None)
         habit_labels = {h["habit_id"]: h["label"] for h in habits}
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         # Best-effort enrichment only — habit_labels falls back to
         # habit_id below (see the .get(..., session["habit_id"]) default
         # a few lines down), so a failure here degrades display quality
@@ -383,14 +385,14 @@ async def mark_habit_session(
         rejected; the user's report should not be treated as saved.
     """
     try:
-        session = await backend_client.set_habit_session_status(
+        session = await domain_client.set_habit_session_status(
             tool_context.session.user_id,
             calendar_id=calendar_id,
             event_id=event_id,
             status=status,
             marked_by="agent",
         )
-    except backend_client.BACKEND_ERROR:
+    except domain_client.BACKEND_ERROR:
         logger.warning("mark_habit_session backend call failed", exc_info=True)
         return {
             "status": "error",

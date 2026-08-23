@@ -332,6 +332,19 @@ resource "google_vertex_ai_reasoning_engine" "day_planner_agent" {
         value = local.internal_url
       }
 
+      # habit_tools.py/zone_tools.py's target (A6.2) — habit, zone, and
+      # sleep-schedule data lives on the app service as of A6.1, reached
+      # here via domain_client.py's OIDC-authenticated calls to /agent/*.
+      # Unlike INTERNAL_BACKEND_URL above, no PSC-I is involved: the app
+      # service is INGRESS_TRAFFIC_ALL, so this resolves and is reachable
+      # over the public internet, gated by the roles/run.invoker grant in
+      # cloud_run.tf (agent_invoker_backend) plus the application-level
+      # AGENT_CALLER_SERVICE_ACCOUNTS allowlist.
+      env {
+        name  = "APP_BACKEND_URL"
+        value = local.public_base_url
+      }
+
       # AdkApp(agent=_llm_agent) in agent.py leaves enable_tracing unset
       # (None), so this env var is what actually turns tracing on — per the
       # ADK truth table, enable_tracing=None + this env true only takes

@@ -1,17 +1,17 @@
 """Coverage for habit_tools.py's orchestration: that user_id always comes
 from tool_context (never a model-supplied argument), and that each tool
-maps backend_client's response shapes — including "not found" on update —
+maps domain_client's response shapes — including "not found" on update —
 into the right status.
 
-backend_client's own HTTP mechanics aren't re-tested here —
-day_planner_backend_internal's own test suite already covers
-/internal/habits* directly.
+domain_client's own HTTP mechanics aren't re-tested here —
+day_planner_backend_app's own test suite already covers its /agent/*
+habits routes directly.
 """
 
 import httpx
 import pytest
 
-from day_planner_agent import backend_client, calendar_tool, habit_tools, zone_tools
+from day_planner_agent import calendar_tool, domain_client, habit_tools, zone_tools
 
 
 async def test_create_habit_passes_through(tool_context, monkeypatch):
@@ -28,7 +28,7 @@ async def test_create_habit_passes_through(tool_context, monkeypatch):
             "updated_at": "2026-08-01T00:00:00Z",
         }
 
-    monkeypatch.setattr(backend_client, "create_habit", create_habit)
+    monkeypatch.setattr(domain_client, "create_habit", create_habit)
 
     result = await habit_tools.create_habit(tool_context, "Gym", "180 min/week")
     assert result["status"] == "success"
@@ -43,7 +43,7 @@ async def test_list_habits_defaults_to_active_only(tool_context, monkeypatch):
         seen["status"] = status
         return []
 
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     result = await habit_tools.list_habits(tool_context)
     assert result == {"status": "success", "habits": []}
@@ -57,7 +57,7 @@ async def test_list_habits_include_inactive_lifts_the_filter(tool_context, monke
         seen["status"] = status
         return [{"habit_id": "h1", "status": "paused"}]
 
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     result = await habit_tools.list_habits(tool_context, include_inactive=True)
     assert result["habits"] == [{"habit_id": "h1", "status": "paused"}]
@@ -73,7 +73,7 @@ async def test_update_habit_not_found(tool_context, monkeypatch):
     async def update_habit(user_id, habit_id, **kwargs):
         return None
 
-    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+    monkeypatch.setattr(domain_client, "update_habit", update_habit)
 
     result = await habit_tools.update_habit(tool_context, "ghost", status="paused")
     assert result["status"] == "not_found"
@@ -86,7 +86,7 @@ async def test_update_habit_success(tool_context, monkeypatch):
         seen["args"] = (user_id, habit_id, kwargs)
         return {"habit_id": habit_id, "status": kwargs.get("status")}
 
-    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+    monkeypatch.setattr(domain_client, "update_habit", update_habit)
 
     result = await habit_tools.update_habit(tool_context, "h1", status="archived")
     assert result == {
@@ -107,7 +107,7 @@ async def test_update_habit_sets_allowed_zones(tool_context, monkeypatch):
         seen["args"] = (user_id, habit_id, kwargs)
         return {"habit_id": habit_id, "allowed_zones": kwargs.get("allowed_zones")}
 
-    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+    monkeypatch.setattr(domain_client, "update_habit", update_habit)
 
     result = await habit_tools.update_habit(tool_context, "h1", allowed_zones=["Work"])
     assert result["habit"]["allowed_zones"] == ["Work"]
@@ -124,7 +124,7 @@ async def test_update_habit_clears_allowed_zones_with_empty_list(tool_context, m
         seen["args"] = (user_id, habit_id, kwargs)
         return {"habit_id": habit_id, "allowed_zones": []}
 
-    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+    monkeypatch.setattr(domain_client, "update_habit", update_habit)
 
     result = await habit_tools.update_habit(tool_context, "h1", allowed_zones=[])
     assert result["status"] == "success"
@@ -133,7 +133,7 @@ async def test_update_habit_clears_allowed_zones_with_empty_list(tool_context, m
 
 async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
     """The whole tenant boundary: none of the habit tools take user_id as a
-    parameter a model could fill in — confirm each call into backend_client
+    parameter a model could fill in — confirm each call into domain_client
     is keyed on tool_context.session.user_id instead."""
     seen_user_ids = []
 
@@ -141,7 +141,7 @@ async def test_user_id_comes_only_from_tool_context(tool_context, monkeypatch):
         seen_user_ids.append(user_id)
         return []
 
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     await habit_tools.list_habits(tool_context)
     assert seen_user_ids == ["user-1"]
@@ -167,7 +167,7 @@ async def test_review_habit_week_no_sessions_short_circuits(tool_context, monkey
     async def get_calendar_events(*args, **kwargs):
         raise AssertionError("should not be called when there are no sessions")
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
@@ -189,7 +189,7 @@ async def test_review_habit_week_bubbles_needs_auth(tool_context, monkeypatch):
     async def get_calendar_events(tool_context, date_from, date_to):
         return {"status": "needs_auth", "connect_url": "https://connect.example/start"}
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
@@ -266,9 +266,9 @@ async def test_review_habit_week_buckets_outcomes_and_names_the_cause(tool_conte
         assert status is None  # review must see every habit, not just active ones
         return [{"habit_id": "h1", "label": "Gym"}, {"habit_id": "h2", "label": "Tennis"}]
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
     assert result["status"] == "success"
@@ -343,9 +343,9 @@ async def test_review_habit_week_surfaces_session_status(tool_context, monkeypat
     async def list_habits(user_id, *, status=None):
         return [{"habit_id": "h1", "label": "Gym"}]
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
     by_event = {s["event_id"]: s for s in result["sessions"]}
@@ -383,7 +383,7 @@ async def test_mark_habit_session_passes_through_and_hardcodes_marked_by(
             "marked_by": marked_by,
         }
 
-    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+    monkeypatch.setattr(domain_client, "set_habit_session_status", set_habit_session_status)
 
     result = await habit_tools.mark_habit_session(
         tool_context, "me@gmail.com", "e1", "completed"
@@ -401,7 +401,7 @@ async def test_mark_habit_session_not_found(tool_context, monkeypatch):
     async def set_habit_session_status(user_id, *, calendar_id, event_id, status, marked_by):
         return None
 
-    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+    monkeypatch.setattr(domain_client, "set_habit_session_status", set_habit_session_status)
 
     result = await habit_tools.mark_habit_session(
         tool_context, "me@gmail.com", "never-planned", "completed"
@@ -425,7 +425,7 @@ async def test_mark_habit_session_can_reset_to_pending(tool_context, monkeypatch
             "marked_by": marked_by,
         }
 
-    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+    monkeypatch.setattr(domain_client, "set_habit_session_status", set_habit_session_status)
 
     result = await habit_tools.mark_habit_session(tool_context, "me@gmail.com", "e1", "pending")
 
@@ -455,9 +455,9 @@ def _review_fixtures(monkeypatch, sessions, events, habits=None):
     async def list_habits(user_id, *, status=None):
         return habits or [{"habit_id": "h1", "label": "Gym"}]
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
 
 async def test_review_habit_week_emits_telemetry_to_state_not_the_return_value(
@@ -780,7 +780,7 @@ async def test_create_habit_backend_failure_returns_error(tool_context, monkeypa
     async def create_habit(user_id, *, label, goal):
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(backend_client, "create_habit", create_habit)
+    monkeypatch.setattr(domain_client, "create_habit", create_habit)
 
     result = await habit_tools.create_habit(tool_context, "Gym", "180 min/week")
     assert result["status"] == "error"
@@ -790,7 +790,7 @@ async def test_list_habits_backend_failure_does_not_read_as_empty(tool_context, 
     async def list_habits(user_id, *, status=None):
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     result = await habit_tools.list_habits(tool_context)
     assert result["status"] == "error"
@@ -802,7 +802,7 @@ async def test_update_habit_backend_failure_returns_error(tool_context, monkeypa
     async def update_habit(user_id, habit_id, **kwargs):
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(backend_client, "update_habit", update_habit)
+    monkeypatch.setattr(domain_client, "update_habit", update_habit)
 
     result = await habit_tools.update_habit(tool_context, "h1", label="Gym 2.0")
     assert result["status"] == "error"
@@ -817,7 +817,7 @@ async def test_review_habit_week_list_habit_sessions_failure_returns_error(
     async def get_calendar_events(*args, **kwargs):
         raise AssertionError("should not be called if the session fetch itself failed")
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
@@ -861,9 +861,9 @@ async def test_review_habit_week_list_habits_failure_degrades_to_habit_id_label(
     async def list_habits(user_id, *, status=None):
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(backend_client, "list_habit_sessions", list_habit_sessions)
+    monkeypatch.setattr(domain_client, "list_habit_sessions", list_habit_sessions)
     monkeypatch.setattr(calendar_tool, "get_calendar_events", get_calendar_events)
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
     assert result["status"] == "success"
@@ -874,7 +874,7 @@ async def test_mark_habit_session_backend_failure_returns_error(tool_context, mo
     async def set_habit_session_status(user_id, **kwargs):
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(backend_client, "set_habit_session_status", set_habit_session_status)
+    monkeypatch.setattr(domain_client, "set_habit_session_status", set_habit_session_status)
 
     result = await habit_tools.mark_habit_session(tool_context, "me@gmail.com", "e1", "completed")
     assert result["status"] == "error"
@@ -888,7 +888,7 @@ async def test_list_habits_programming_error_still_propagates(tool_context, monk
     async def list_habits(user_id, *, status=None):
         raise KeyError("not a backend failure")
 
-    monkeypatch.setattr(backend_client, "list_habits", list_habits)
+    monkeypatch.setattr(domain_client, "list_habits", list_habits)
 
     with pytest.raises(KeyError):
         await habit_tools.list_habits(tool_context)

@@ -113,6 +113,17 @@ resource "google_cloud_run_v2_service" "default" {
         }
       }
 
+      # Comma-separated (see day_planner_backend_app's
+      # Settings.agent_callers). Gates /agent/* (A6.2) — day_planner_agent
+      # is the only caller, invoking on a user's behalf with user_id taken
+      # from tool_context.session.user_id, never from the model. Paired
+      # with the roles/run.invoker grant below, which is the IAM layer this
+      # application-level allowlist sits on top of.
+      env {
+        name  = "AGENT_CALLER_SERVICE_ACCOUNTS"
+        value = google_service_account.agent.email
+      }
+
       # /me/chat's target. This service's own identity (google_service_account
       # .backend, via google_vertex_ai_reasoning_engine_iam_member.backend_query
       # below) is what's allowed to call it — end users never get credentials
@@ -177,6 +188,22 @@ resource "google_cloud_run_v2_service_iam_member" "public" {
   name     = google_cloud_run_v2_service.default.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# day_planner_agent's own path to /agent/* (A6.2). Unlike the internal
+# service below, the app service is INGRESS_TRAFFIC_ALL, so no PSC-I/VPC
+# networking is needed here — a plain IAM invoker grant is sufficient.
+# Independent of var.publicly_exposed above: this stays granted even
+# while the app is closed to allUsers, since the agent needs it
+# regardless of launch status. Paired with AGENT_CALLER_SERVICE_ACCOUNTS
+# above, the application-level allowlist require_agent_caller checks in
+# addition to this IAM layer.
+resource "google_cloud_run_v2_service_iam_member" "agent_invoker_backend" {
+  project  = var.project_id
+  location = google_cloud_run_v2_service.default.location
+  name     = google_cloud_run_v2_service.default.name
+  role     = "roles/run.invoker"
+  member   = google_service_account.agent.member
 }
 
 # ---------------------------------------------------------------------------
@@ -262,15 +289,15 @@ resource "google_cloud_run_v2_service" "internal" {
       }
       env {
         # Comma-separated (see day_planner_backend_internal's
-        # Settings.internal_callers). google_service_account.backend is
-        # added alongside the agent's own SA for A1.5's user-facing
-        # completion route — day_planner_backend_app also runs as
-        # `backend` (see service_account above and on the app service
-        # earlier in this file), so this is what lets it call
-        # /internal/habit-sessions/status on the user's behalf, gated by
-        # the internal_invoker_backend IAM binding below.
+        # Settings.internal_callers). Only the agent's own SA — as of A6.1,
+        # habit/zone/sleep-schedule data (and the /internal/habit-sessions
+        # /status route that used to back day_planner_backend_app's
+        # user-facing completion route) moved to day_planner_backend_app's
+        # own Store, so `backend` no longer calls /internal/* at all; it
+        # was dropped from here alongside the internal_invoker_backend IAM
+        # binding that gated it.
         name  = "INTERNAL_CALLER_SERVICE_ACCOUNTS"
-        value = "${google_service_account.agent.email},${google_service_account.backend.email}"
+        value = google_service_account.agent.email
       }
       env {
         name  = "STATE_TTL_SECONDS"
@@ -324,25 +351,4 @@ resource "google_cloud_run_v2_service_iam_member" "internal_invoker" {
   name     = google_cloud_run_v2_service.internal.name
   role     = "roles/run.invoker"
   member   = google_service_account.agent.member
-}
-
-# Added for A1.5: day_planner_backend_app's new user-facing route calls
-# /internal/habit-sessions/status on the caller's behalf (after resolving
-# and verifying user_id from the session token itself — the internal
-# route still trusts whatever user_id the body carries, same as every
-# other /internal/* route, so that verification has to happen here, not
-# there). google_service_account.backend is what both the app and
-# internal services already run as (see service_account = ... on each
-# google_cloud_run_v2_service above) — this grant is what lets that same
-# identity, acting as a caller rather than as the internal service
-# itself, actually invoke it. Paired with the
-# INTERNAL_CALLER_SERVICE_ACCOUNTS env var above, which is the
-# application-level allowlist require_internal_caller checks in addition
-# to this IAM layer.
-resource "google_cloud_run_v2_service_iam_member" "internal_invoker_backend" {
-  project  = var.project_id
-  location = google_cloud_run_v2_service.internal.location
-  name     = google_cloud_run_v2_service.internal.name
-  role     = "roles/run.invoker"
-  member   = google_service_account.backend.member
 }

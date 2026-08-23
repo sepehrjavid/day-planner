@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     # this is true — see turn_log._NEVER_LOG_ARGS_FOR.
     log_tool_call_args: bool = False
 
+    # Service accounts allowed to call /agent/* (A6.2) — comma-separated
+    # emails, same shape and same "fail closed on empty" reasoning as
+    # day_planner_backend_internal's Settings.internal_callers. In
+    # practice: just the Agent Engine runtime SA. public_base_url (above)
+    # doubles as the audience these tokens are checked against — unlike
+    # that service, this one already knows its own public URL, so there's
+    # no separate self_base_url setting to keep in sync with it.
+    agent_caller_service_accounts: str = ""
+
+    @property
+    def agent_callers(self) -> set[str]:
+        raw = self.agent_caller_service_accounts
+        return {e.strip() for e in raw.split(",") if e.strip()}
+
     def redirect_uri(self, provider: str) -> str:
         return f"{self.public_base_url.rstrip('/')}/auth/{provider}/callback"
 
