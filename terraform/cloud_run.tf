@@ -134,15 +134,6 @@ resource "google_cloud_run_v2_service" "default" {
         name  = "AGENT_ENGINE_LOCATION"
         value = var.agent_region
       }
-      env {
-        # A1.5: the app service's own new /me/habit-sessions/status route
-        # calls into the internal service (services/internal_client.py).
-        # Same value as the internal service's own SELF_BASE_URL below —
-        # that's the audience incoming OIDC tokens are checked against,
-        # so the caller's token has to be minted for exactly this.
-        name  = "INTERNAL_BACKEND_URL"
-        value = local.internal_url
-      }
 
       startup_probe {
         http_get {

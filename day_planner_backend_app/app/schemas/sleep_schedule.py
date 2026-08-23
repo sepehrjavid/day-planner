@@ -1,4 +1,4 @@
-"""Request/response models for /internal/sleep-schedule*.
+"""Request/response models for sleep-schedule domain operations.
 
 Sleep is a singleton, separate from the generic Zone shape — cool-down
 and wake-up are offsets from sleep's own boundaries, not independent
@@ -6,13 +6,16 @@ zones, so this gets its own request/response pair instead of reusing
 CreateZoneRequest/ZoneOut. See ../../../docs/todo.md §1's "Sleep is a
 special, singular zone" section and db/models.py's SleepSchedule
 docstring for the full reasoning.
+
+Moved here from day_planner_backend_internal by A6.1 — see
+./habits.py's module docstring for why the request model here carries
+no user_id field, unlike that service's identical-looking schema.
 """
 
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from .calendars import InternalUserRequest
 from .zones import TIME_PATTERN, DayOfWeek
 
 
@@ -21,7 +24,7 @@ class DayOverride(BaseModel):
     wake_time: str | None = Field(default=None, pattern=TIME_PATTERN)
 
 
-class SetSleepScheduleRequest(InternalUserRequest):
+class SetSleepScheduleRequest(BaseModel):
     sleep_time: str | None = Field(default=None, pattern=TIME_PATTERN)
     wake_time: str | None = Field(default=None, pattern=TIME_PATTERN)
     cool_down_minutes: int | None = Field(default=None, ge=0, le=600)

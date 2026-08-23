@@ -1,13 +1,19 @@
-"""Request/response models for /me/habit-sessions/status (A1.5).
+"""Request/response models for habit-session domain operations, including
+/me/habit-sessions/status (A1.5).
 
 status accepts "pending" too, not just "completed"/"skipped" — resetting
 back to unknown (correcting a mis-mark) is itself an explicit action, the
-same as any other transition; see day_planner_backend_internal's identical
-HabitSessionStatus for the same reasoning. marked_by is not a field a
-client can set — the route hardcodes "user", since this is the human
+same as any other transition. marked_by is not a field MarkHabitSessionRequest
+lets a client set — the route hardcodes "user", since this is the human
 directly marking their own session, mirroring day_planner_agent's
 mark_habit_session tool hardcoding "agent" on its side of the same
-underlying /internal/habit-sessions/status call.
+underlying Store.set_habit_session_status call.
+
+UpsertHabitSessionRequest/HabitSessionsResponse were moved here from
+day_planner_backend_internal by A6.1 alongside the store logic they back
+— no route on this service uses them yet (see ../schemas/habits.py's
+module docstring for why, and why they carry no user_id field unlike
+that service's identical-looking schemas).
 """
 
 from datetime import datetime
@@ -24,6 +30,14 @@ class MarkHabitSessionRequest(BaseModel):
     status: HabitSessionStatus
 
 
+class UpsertHabitSessionRequest(BaseModel):
+    habit_id: str = Field(min_length=1)
+    event_id: str = Field(min_length=1)
+    calendar_id: str = Field(min_length=1)
+    planned_start: datetime
+    planned_end: datetime
+
+
 class HabitSessionOut(BaseModel):
     session_id: str
     habit_id: str
@@ -36,3 +50,7 @@ class HabitSessionOut(BaseModel):
     status: str
     completed_at: datetime | None = None
     marked_by: str | None = None
+
+
+class HabitSessionsResponse(BaseModel):
+    sessions: list[HabitSessionOut] = Field(default_factory=list)

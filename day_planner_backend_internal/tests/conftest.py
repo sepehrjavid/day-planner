@@ -29,20 +29,12 @@ from app import main  # noqa: E402
 from app.api.deps import require_internal_caller  # noqa: E402
 from app.services import crypto  # noqa: E402
 from app.db.models import (  # noqa: E402
-    HABIT_SESSION_STATUS_COMPLETED,
-    HABIT_SESSION_STATUS_PENDING,
-    HABIT_STATUS_ACTIVE,
     STATUS_ACTIVE,
     STATUS_NEEDS_REAUTH,
     Calendar,
     ConnectedAccount,
-    Habit,
-    HabitSession,
     OAuthState,
-    SleepSchedule,
-    Zone,
     account_id_for,
-    habit_session_id_for,
 )
 
 
@@ -57,10 +49,6 @@ class FakeStore:
         self.users: dict[str, dict] = {}
         self.states: dict[str, OAuthState] = {}
         self.accounts: dict[str, dict[str, dict]] = {}
-        self.habits: dict[str, dict[str, dict]] = {}
-        self.habit_sessions: dict[str, dict[str, dict]] = {}
-        self.zones: dict[str, dict[str, dict]] = {}
-        self.sleep_schedules: dict[str, dict] = {}
         self._seq = 0
 
     def _next(self, prefix: str) -> str:
@@ -192,166 +180,6 @@ class FakeStore:
             self.users[user_id]["default_account_id"] = (
                 remaining[0] if remaining else None
             )
-
-    # --- habits ---
-    async def create_habit(self, *, user_id, label, goal):
-        habit_id = self._next("habit")
-        now = _now()
-        data = {
-            "label": label,
-            "goal": goal,
-            "status": HABIT_STATUS_ACTIVE,
-            "created_at": now,
-            "updated_at": now,
-        }
-        self.habits.setdefault(user_id, {})[habit_id] = data
-        return Habit.from_dict(habit_id, data)
-
-    async def list_habits(self, user_id, *, status=None):
-        items = self.habits.get(user_id, {})
-        return [
-            Habit.from_dict(habit_id, data)
-            for habit_id, data in items.items()
-            if status is None or data["status"] == status
-        ]
-
-    async def update_habit(
-        self, *, user_id, habit_id, label=None, goal=None, status=None, allowed_zones=None
-    ):
-        data = self.habits.get(user_id, {}).get(habit_id)
-        if data is None:
-            return None
-        if label is not None:
-            data["label"] = label
-        if goal is not None:
-            data["goal"] = goal
-        if status is not None:
-            data["status"] = status
-        if allowed_zones is not None:
-            data["allowed_zones"] = allowed_zones
-        data["updated_at"] = _now()
-        return Habit.from_dict(habit_id, data)
-
-    # --- habit sessions ---
-    async def upsert_habit_session(
-        self, *, user_id, habit_id, event_id, calendar_id, planned_start, planned_end
-    ):
-        session_id = habit_session_id_for(calendar_id, event_id)
-        bucket = self.habit_sessions.setdefault(user_id, {})
-        existing = bucket.get(session_id)
-        now = _now()
-        data = {
-            "habit_id": habit_id,
-            "event_id": event_id,
-            "calendar_id": calendar_id,
-            "planned_start": planned_start,
-            "planned_end": planned_end,
-            "created_at": existing["created_at"] if existing else now,
-            "updated_at": now,
-            # Completion state (A1.5) is preserved from any existing
-            # record, exactly like created_at above — this is what makes
-            # a reschedule (this method called again for the same
-            # calendar_id/event_id) not silently wipe out a completion.
-            "status": existing["status"] if existing else HABIT_SESSION_STATUS_PENDING,
-            "completed_at": existing.get("completed_at") if existing else None,
-            "marked_by": existing.get("marked_by") if existing else None,
-        }
-        bucket[session_id] = data
-        return HabitSession.from_dict(session_id, data)
-
-    async def set_habit_session_status(
-        self, *, user_id, calendar_id, event_id, status, marked_by
-    ):
-        session_id = habit_session_id_for(calendar_id, event_id)
-        bucket = self.habit_sessions.get(user_id, {})
-        data = bucket.get(session_id)
-        if data is None:
-            return None
-        if data.get("status") == status:
-            return HabitSession.from_dict(session_id, data)
-        data["status"] = status
-        data["marked_by"] = marked_by
-        data["updated_at"] = _now()
-        data["completed_at"] = _now() if status == HABIT_SESSION_STATUS_COMPLETED else None
-        return HabitSession.from_dict(session_id, data)
-
-    async def list_habit_sessions(self, user_id, *, planned_from, planned_to):
-        return [
-            HabitSession.from_dict(session_id, data)
-            for session_id, data in self.habit_sessions.get(user_id, {}).items()
-            if planned_from <= data["planned_start"] < planned_to
-        ]
-
-    # --- zones ---
-    async def create_zone(self, *, user_id, label, start_time, end_time, days_of_week):
-        zone_id = self._next("zone")
-        now = _now()
-        data = {
-            "label": label,
-            "start_time": start_time,
-            "end_time": end_time,
-            "days_of_week": days_of_week,
-            "created_at": now,
-            "updated_at": now,
-        }
-        self.zones.setdefault(user_id, {})[zone_id] = data
-        return Zone.from_dict(zone_id, data)
-
-    async def list_zones(self, user_id):
-        return [
-            Zone.from_dict(zone_id, data)
-            for zone_id, data in self.zones.get(user_id, {}).items()
-        ]
-
-    async def update_zone(
-        self, *, user_id, zone_id, label=None, start_time=None, end_time=None, days_of_week=None
-    ):
-        data = self.zones.get(user_id, {}).get(zone_id)
-        if data is None:
-            return None
-        if label is not None:
-            data["label"] = label
-        if start_time is not None:
-            data["start_time"] = start_time
-        if end_time is not None:
-            data["end_time"] = end_time
-        if days_of_week is not None:
-            data["days_of_week"] = days_of_week
-        data["updated_at"] = _now()
-        return Zone.from_dict(zone_id, data)
-
-    # --- sleep schedule ---
-    async def get_sleep_schedule(self, user_id):
-        data = self.sleep_schedules.get(user_id)
-        return None if data is None else SleepSchedule.from_dict(data)
-
-    async def set_sleep_schedule(
-        self,
-        *,
-        user_id,
-        sleep_time=None,
-        wake_time=None,
-        cool_down_minutes=None,
-        wake_up_buffer_minutes=None,
-        day_overrides=None,
-    ):
-        data = self.sleep_schedules.get(user_id)
-        now = _now()
-        if data is None:
-            data = {"created_at": now}
-            self.sleep_schedules[user_id] = data
-        if sleep_time is not None:
-            data["sleep_time"] = sleep_time
-        if wake_time is not None:
-            data["wake_time"] = wake_time
-        if cool_down_minutes is not None:
-            data["cool_down_minutes"] = cool_down_minutes
-        if wake_up_buffer_minutes is not None:
-            data["wake_up_buffer_minutes"] = wake_up_buffer_minutes
-        if day_overrides is not None:
-            data["day_overrides"] = day_overrides
-        data["updated_at"] = now
-        return SleepSchedule.from_dict(data)
 
 
 @pytest.fixture

@@ -3,10 +3,11 @@
 Unlike the internal service (day_planner_backend_internal), there's no
 surface switching here — this codebase only ever knows about health, auth,
 oauth, me, chat, and habit-sessions. /internal/* isn't a route this process
-could ever mount even by misconfiguration; it isn't in the codebase at all
-— habit_sessions.py's /me/habit-sessions/status route calls out to it as a
-client (see ../../services/internal_client.py), which is a different thing
-entirely from hosting it.
+could ever mount even by misconfiguration; it isn't in the codebase at all.
+Habit, habit-session, zone, and sleep-schedule data lives in this
+service's own Store as of A6.1 — habit_sessions.py's /me/habit-sessions/
+status route calls it directly, no HTTP hop to the internal service
+involved.
 
 Order matters for the /auth prefix: `auth.router` declares the literal paths
 (/auth/signup, /auth/login, /auth/logout) and `oauth.router` declares the
