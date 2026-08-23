@@ -1,9 +1,23 @@
 """Firestore persistence.
 
-Collection layout:
+This service and day_planner_backend_app point at the same database — see
+that service's own store.py for the account/signup/session/login-throttle
+collections and the code that owns them (account creation, password
+hashing, session issuance, throttling). None of that lives here: this
+service only ever reads a user document, via get_user, to resolve
+mint_access_token's default_account_id. It never creates a user, never
+issues a session, and has no login surface of its own to throttle — there
+was no auth route in this codebase for any of that code to back, so it's
+gone rather than left to invite the assumption that this service handles
+sessions.
 
-  users/{user_id}                                the account: email, password
-                                                 hash, default calendar account
+Collection layout (the two this service actually reads and writes):
+
+  users/{user_id}                                the account document
+                                                 app-service creates and
+                                                 maintains — read-only from
+                                                 here, via get_user, for
+                                                 default_account_id.
 
   users/{user_id}/connected_accounts/{acct_id}   one per linked calendar
                                                  account. A user can have as
@@ -12,21 +26,7 @@ Collection layout:
                                                  CalDAV one. Each holds its own
                                                  credential and calendars.
 
-  user_emails/{normalized_email}                 uniqueness lock for signup.
-                                                 Firestore has no unique
-                                                 constraint, so "query, then
-                                                 write" races two concurrent
-                                                 signups into duplicate
-                                                 accounts. A document keyed by
-                                                 the email, claimed inside a
-                                                 transaction, is the constraint.
-
-  sessions/{token_hash}                          opaque login sessions, TTL'd
-  login_throttle/{normalized_email}              failed-attempt counter
   oauth_states/{nonce}                           single-use connect links, TTL'd
-
-Two things are deliberately never stored: provider access tokens (they last an
-hour; the refresh token can always mint another) and raw session tokens.
 
 Habits, habit sessions, zones, and the sleep schedule used to live here too
 (users/{user_id}/habits, .../habit_sessions, .../zones, .../sleep_schedule) —
@@ -40,8 +40,7 @@ reads and writes them moved.
 from __future__ import annotations
 
 import secrets
-import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from google.cloud import firestore
 
@@ -50,19 +49,12 @@ from .models import (
     STATUS_NEEDS_REAUTH,
     Calendar,
     ConnectedAccount,
-    EmailAlreadyRegistered,
     OAuthState,
-    ThrottleState,
     account_id_for,
-    hash_session_token,
-    normalize_email,
     utcnow,
 )
 
 USERS = "users"
-USER_EMAILS = "user_emails"
-SESSIONS = "sessions"
-LOGIN_THROTTLE = "login_throttle"
 OAUTH_STATES = "oauth_states"
 CONNECTED_ACCOUNTS = "connected_accounts"
 
@@ -93,139 +85,15 @@ class Store:
     # Accounts
     # ------------------------------------------------------------------
 
-    async def create_user(self, *, email: str, password_hash: str) -> str:
-        """Claim the email and create the user atomically.
-
-        Raises EmailAlreadyRegistered if the address is taken.
-        """
-        normalized = normalize_email(email)
-        user_id = uuid.uuid4().hex
-        email_ref = self._db.collection(USER_EMAILS).document(normalized)
-        user_ref = self._db.collection(USERS).document(user_id)
-
-        @firestore.async_transactional
-        async def _create(transaction) -> None:
-            # All reads must precede all writes inside a Firestore transaction.
-            existing = await email_ref.get(transaction=transaction)
-            if existing.exists:
-                raise EmailAlreadyRegistered(normalized)
-            transaction.set(email_ref, {"user_id": user_id, "created_at": utcnow()})
-            transaction.set(
-                user_ref,
-                {
-                    "email": normalized,
-                    "password_hash": password_hash,
-                    "email_verified": False,
-                    "default_account_id": None,
-                    "created_at": utcnow(),
-                    "updated_at": utcnow(),
-                },
-            )
-
-        await _create(self._db.transaction())
-        return user_id
-
     async def get_user(self, user_id: str) -> dict | None:
+        """The only account read this service performs — mint_access_token's
+        default_account_id lookup. Signup, login, sessions, and throttling
+        all belong to day_planner_backend_app; this service creates no
+        user, issues no session, and has no login route of its own."""
         snapshot = await self._db.collection(USERS).document(user_id).get()
         if not snapshot.exists:
             return None
         return {"user_id": user_id, **(snapshot.to_dict() or {})}
-
-    async def get_user_by_email(self, email: str) -> dict | None:
-        pointer = (
-            await self._db.collection(USER_EMAILS)
-            .document(normalize_email(email))
-            .get()
-        )
-        if not pointer.exists:
-            return None
-        return await self.get_user((pointer.to_dict() or {})["user_id"])
-
-    async def update_password_hash(self, *, user_id: str, password_hash: str) -> None:
-        await self._db.collection(USERS).document(user_id).update(
-            {"password_hash": password_hash, "updated_at": utcnow()}
-        )
-
-    # ------------------------------------------------------------------
-    # Sessions
-    # ------------------------------------------------------------------
-
-    async def create_session(
-        self, *, user_id: str, ttl_seconds: int
-    ) -> tuple[str, datetime]:
-        """Returns (raw token, expiry). Only the token's hash is persisted."""
-        token = secrets.token_urlsafe(32)
-        expires_at = utcnow() + timedelta(seconds=ttl_seconds)
-        await self._db.collection(SESSIONS).document(hash_session_token(token)).set(
-            {"user_id": user_id, "created_at": utcnow(), "expires_at": expires_at}
-        )
-        return token, expires_at
-
-    async def resolve_session(self, token: str) -> str | None:
-        snapshot = (
-            await self._db.collection(SESSIONS)
-            .document(hash_session_token(token))
-            .get()
-        )
-        if not snapshot.exists:
-            return None
-        data = snapshot.to_dict() or {}
-        # TTL deletion is asynchronous and can lag by hours, so expiry is
-        # enforced on read rather than trusted to the sweeper.
-        if data.get("expires_at") and utcnow() >= data["expires_at"]:
-            return None
-        return data.get("user_id")
-
-    async def delete_session(self, token: str) -> None:
-        await self._db.collection(SESSIONS).document(
-            hash_session_token(token)
-        ).delete()
-
-    # ------------------------------------------------------------------
-    # Login throttling
-    # ------------------------------------------------------------------
-
-    async def check_login_throttle(
-        self, email: str, *, max_attempts: int, lockout_seconds: int
-    ) -> ThrottleState:
-        snapshot = (
-            await self._db.collection(LOGIN_THROTTLE)
-            .document(normalize_email(email))
-            .get()
-        )
-        if not snapshot.exists:
-            return ThrottleState(locked=False)
-
-        locked_until = (snapshot.to_dict() or {}).get("locked_until")
-        if locked_until and utcnow() < locked_until:
-            return ThrottleState(
-                locked=True,
-                retry_after_seconds=int((locked_until - utcnow()).total_seconds()) + 1,
-            )
-        return ThrottleState(locked=False)
-
-    async def record_login_failure(
-        self, email: str, *, max_attempts: int, lockout_seconds: int
-    ) -> None:
-        ref = self._db.collection(LOGIN_THROTTLE).document(normalize_email(email))
-
-        @firestore.async_transactional
-        async def _bump(transaction) -> None:
-            snapshot = await ref.get(transaction=transaction)
-            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
-            failures = int(data.get("failed_count", 0)) + 1
-            payload: dict = {"failed_count": failures, "updated_at": utcnow()}
-            if failures >= max_attempts:
-                payload["locked_until"] = utcnow() + timedelta(seconds=lockout_seconds)
-                payload["failed_count"] = 0
-            transaction.set(ref, payload, merge=True)
-
-        await _bump(self._db.transaction())
-
-    async def clear_login_failures(self, email: str) -> None:
-        await self._db.collection(LOGIN_THROTTLE).document(
-            normalize_email(email)
-        ).delete()
 
     # ------------------------------------------------------------------
     # OAuth state (connect links)

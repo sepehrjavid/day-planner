@@ -2,11 +2,15 @@
 
 Kept separate from `store.py` so the shapes can be imported — by services,
 schemas, or tests — without dragging in the Firestore client.
+
+No EmailAlreadyRegistered/ThrottleState/normalize_email/hash_session_token
+here — those backed signup, session, and login-throttle code this service
+never had a route for; see store.py's own module docstring for where that
+logic actually lives (day_planner_backend_app).
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -14,22 +18,8 @@ STATUS_ACTIVE = "active"
 STATUS_NEEDS_REAUTH = "needs_reauth"
 
 
-class EmailAlreadyRegistered(Exception):
-    """Signup lost the race, or the address was already taken."""
-
-
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def normalize_email(email: str) -> str:
-    return email.strip().lower()
-
-
-def hash_session_token(token: str) -> str:
-    """Sessions are stored as digests, so a database dump can't be replayed
-    as a set of live logins."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def account_id_for(provider: str, provider_account_id: str) -> str:
@@ -54,12 +44,6 @@ class OAuthState:
     @property
     def is_expired(self) -> bool:
         return utcnow() >= self.expires_at
-
-
-@dataclass(frozen=True)
-class ThrottleState:
-    locked: bool
-    retry_after_seconds: int = 0
 
 
 @dataclass(frozen=True)
