@@ -1,14 +1,14 @@
 """Coverage of habit domain logic (moved from day_planner_backend_internal
 by A6.1).
 
-No route on this service calls Store.create_habit/list_habits/update_habit
-yet — A6.1 moves the data and the code that owns it; A6.2 (agent access)
-and A6.3 (user-facing routes) are what actually wire a caller to it. These
-tests exercise the `store` fixture's own habit methods directly rather
-than through HTTP, which is what "no net loss in assertions" from the
-move means until a route exists to test through — the auth-gate coverage
-day_planner_backend_internal had for /internal/habits* doesn't have an
-app-service equivalent yet, since there is no route here to gate.
+Both /agent/habits (A6.2) and /me/habits (A6.3) now call
+Store.create_habit/list_habits/update_habit — see test_agent_routes.py
+and test_habits_routes.py for the auth-gate and HTTP-mapping coverage on
+each of those paths. These tests exercise the `store` fixture's own
+habit methods directly instead, which is what's left once the route-level
+suites cover request validation and status mapping: the store's own
+behavior (stable ids, partial-update semantics, unknown-id handling)
+independent of which caller reached it.
 """
 
 

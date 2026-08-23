@@ -8,7 +8,12 @@ Memory Bank.
 
 Moved here from day_planner_backend_internal by A6.1 — see
 ./habits.py's module docstring for why request models here carry no
-user_id field, unlike that service's identical-looking schemas.
+user_id field, unlike that service's identical-looking schemas, and why
+/agent/zones (A6.2) uses its own Agent*-prefixed request classes built
+from the same `TIME_PATTERN`/`DayOfWeek` rather than duplicating them.
+Used directly by /me/zones (A6.3), which additionally exposes a hard
+delete — see db/store.py's `delete_zone` docstring for why that's safe
+here but not for habits.
 """
 
 from datetime import datetime

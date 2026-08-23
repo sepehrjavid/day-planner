@@ -1,7 +1,8 @@
 """Coverage of sleep-schedule domain logic (moved from
 day_planner_backend_internal by A6.1) — see test_habits.py's module
 docstring for why these exercise the `store` fixture directly rather
-than through a route.
+than through a route. Route-level coverage lives in
+test_sleep_schedule_routes.py and test_agent_routes.py.
 """
 
 

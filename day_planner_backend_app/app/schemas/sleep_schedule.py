@@ -9,7 +9,10 @@ docstring for the full reasoning.
 
 Moved here from day_planner_backend_internal by A6.1 — see
 ./habits.py's module docstring for why the request model here carries
-no user_id field, unlike that service's identical-looking schema.
+no user_id field, unlike that service's identical-looking schema. Used
+directly by /me/sleep-schedule (A6.3); /agent/sleep-schedule (A6.2) uses
+its own Agent*-prefixed request class instead, built from the same
+`TIME_PATTERN`/`DayOfWeek` imported here rather than a second copy.
 """
 
 from datetime import datetime

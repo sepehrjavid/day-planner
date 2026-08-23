@@ -17,7 +17,14 @@ if they differ in user_id handling — a shared schema is how the two
 auth models leak into each other. Response shapes (HabitOut, ZoneOut,
 SleepScheduleOut, HabitSessionOut, and their *Response wrappers) carry
 no user_id either way, so those are reused as-is from the /me schema
-modules rather than duplicated here.
+modules rather than duplicated here. The same goes for the value types
+below that aren't user_id-shaped at all — `HabitStatus`,
+`HabitSessionStatus`, `TIME_PATTERN`, and `DayOfWeek` are imported from
+the /me schema modules rather than redefined, so /me and /agent can never
+independently drift on what counts as a valid status or a valid
+days_of_week (A6.3's own explicit requirement). `MarkedBy` has no /me
+equivalent to import — day_planner_backend_app/app/api/routes/habit_sessions.py
+hardcodes "user" as a Python literal rather than accepting it as a field.
 """
 
 from datetime import datetime
@@ -25,6 +32,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .habit_sessions import HabitSessionStatus
+from .habits import HabitStatus
 from .zones import TIME_PATTERN, DayOfWeek
 
 
@@ -33,9 +42,6 @@ class AgentUserRequest(BaseModel):
     # model-supplied value — this is the whole tenant boundary. See this
     # module's own docstring.
     user_id: str = Field(min_length=1, max_length=256)
-
-
-HabitStatus = Literal["active", "paused", "archived"]
 
 
 class AgentCreateHabitRequest(AgentUserRequest):
@@ -51,7 +57,6 @@ class AgentUpdateHabitRequest(AgentUserRequest):
     allowed_zones: list[str] | None = None
 
 
-HabitSessionStatus = Literal["pending", "completed", "skipped"]
 MarkedBy = Literal["user", "agent"]
 
 

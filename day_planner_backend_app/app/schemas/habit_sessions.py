@@ -9,11 +9,14 @@ directly marking their own session, mirroring day_planner_agent's
 mark_habit_session tool hardcoding "agent" on its side of the same
 underlying Store.set_habit_session_status call.
 
-UpsertHabitSessionRequest/HabitSessionsResponse were moved here from
-day_planner_backend_internal by A6.1 alongside the store logic they back
-— no route on this service uses them yet (see ../schemas/habits.py's
-module docstring for why, and why they carry no user_id field unlike
-that service's identical-looking schemas).
+UpsertHabitSessionRequest was moved here from day_planner_backend_internal
+by A6.1 alongside the store logic it backs; no /me route uses it (only
+the agent tags calendar events with a habit session — see
+schemas/agent.py's AgentUpsertHabitSessionRequest for its /agent-side
+counterpart). HabitSessionsResponse backs /me/habit-sessions' list route
+(A6.3) as well as /agent/habit-sessions' — see ../schemas/habits.py's
+module docstring for why request models here carry no user_id field
+unlike day_planner_backend_internal's identical-looking schemas.
 """
 
 from datetime import datetime

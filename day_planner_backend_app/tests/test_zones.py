@@ -1,8 +1,8 @@
 """Coverage of zone domain logic (moved from day_planner_backend_internal
 by A6.1) — see test_habits.py's module docstring for why these exercise
-the `store` fixture directly rather than through a route, and why the
-auth-gate coverage day_planner_backend_internal had doesn't have an
-app-service equivalent yet.
+the `store` fixture directly rather than through a route. Route-level
+coverage (including delete_zone, new in A6.3) lives in
+test_zones_routes.py and test_agent_routes.py.
 """
 
 import pytest

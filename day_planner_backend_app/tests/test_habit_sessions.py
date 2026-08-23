@@ -1,12 +1,14 @@
-"""Coverage of /me/habit-sessions/status (A1.5, rewired by A6.1).
+"""Coverage of /me/habit-sessions: the status route (A1.5, rewired by
+A6.1) and the list route (new in A6.3).
 
 Habit session data lives in this service's own Store as of A6.1, so
 these tests seed the `store` fixture directly instead of monkeypatching
 a since-deleted internal_client — day_planner_backend_internal's own
 test suite used to cover the equivalent logic before the move; it now
-lives here alongside the code. What's under test is that this route
-resolves user_id only from the session token, never trusts a
-client-supplied marked_by, and maps a missing session to a 404.
+lives here alongside the code. What's under test is that both routes
+resolve user_id only from the session token, the status route never
+trusts a client-supplied marked_by, and a missing session 404s rather
+than being silently created.
 
 Calling store.upsert_habit_session directly (not through a route) means
 planned_start/planned_end must be real datetime objects, not ISO
@@ -130,3 +132,58 @@ async def test_can_reset_status_to_pending(anon_client, user, store):
     body = response.json()
     assert body["status"] == "pending"
     assert body["completed_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /me/habit-sessions (A6.3) — the user-facing counterpart to
+# /agent/habit-sessions (A6.2), scoped to current_user_id instead of a
+# body field.
+# ---------------------------------------------------------------------------
+
+
+def test_list_requires_auth(anon_client):
+    response = anon_client.get(
+        "/me/habit-sessions"
+        "?planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z"
+    )
+    assert response.status_code == 401
+
+
+async def test_list_returns_only_the_caller_s_own_sessions(anon_client, user, store):
+    user_id, headers = user
+    await _upsert_session(store, user_id=user_id, event_id="mine")
+    await _upsert_session(store, user_id="someone-else", event_id="not-mine")
+
+    response = anon_client.get(
+        "/me/habit-sessions"
+        "?planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z",
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [s["event_id"] for s in body["sessions"]] == ["mine"]
+
+
+async def test_list_filters_by_planned_start_range(anon_client, user, store):
+    user_id, headers = user
+    await _upsert_session(
+        store,
+        user_id=user_id,
+        event_id="in-range",
+        planned_start=datetime.fromisoformat("2026-08-04T07:00:00-07:00"),
+    )
+    await _upsert_session(
+        store,
+        user_id=user_id,
+        event_id="before",
+        planned_start=datetime.fromisoformat("2026-07-20T07:00:00-07:00"),
+    )
+
+    response = anon_client.get(
+        "/me/habit-sessions"
+        "?planned_from=2026-08-01T00:00:00Z&planned_to=2026-08-08T00:00:00Z",
+        headers=headers,
+    )
+
+    assert [s["event_id"] for s in response.json()["sessions"]] == ["in-range"]

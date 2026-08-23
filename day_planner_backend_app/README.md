@@ -32,6 +32,18 @@ Provisioned together with the internal service by [../terraform](../terraform).
 | `POST /me/calendar-accounts/connect-link` | session | link another calendar account |
 | `PATCH /me/calendar-accounts/{id}/calendars` | session | choose which calendars count |
 | `DELETE /me/calendar-accounts/{id}` | session | revoke and remove |
+| `POST /me/chat`, `POST /me/chat/reset` | session | talk to the agent |
+| `POST /me/habits`, `GET /me/habits`, `POST /me/habits/update` | session | create/list/update habits (A6.3) — no delete, see `status` |
+| `POST /me/zones`, `GET /me/zones`, `POST /me/zones/update`, `DELETE /me/zones/{id}` | session | create/list/update/delete zones (A6.3) |
+| `GET /me/sleep-schedule`, `POST /me/sleep-schedule` | session | get / create-or-update the sleep schedule (A6.3) |
+| `GET /me/habit-sessions` | session | list planned sessions in a time range (A6.3) |
+| `POST /me/habit-sessions/status` | session | mark a session completed/skipped/pending (A1.5) |
+
+`day_planner_agent` reaches the same habit/zone/sleep-schedule/habit-session
+data through a parallel `/agent/*` route group (A6.2), OIDC-service-authenticated
+instead of session-authenticated — see `app/api/routes/agent.py` and
+`app/api/deps.py`'s module docstring for why `/me/*` and `/agent/*` share no
+dependency, router, or `user_id` derivation.
 
 Public exposure is gated by `var.publicly_exposed` in
 `../terraform/cloud_run.tf` — `false` (the default, test phase) means nobody
