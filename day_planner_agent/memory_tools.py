@@ -50,8 +50,8 @@ import logging
 import random
 from typing import Optional
 
-import google.api_core.exceptions
 import google.auth.exceptions
+import google.genai.errors
 import vertexai
 from google.adk.tools import ToolContext
 from google.genai import types as genai_types
@@ -59,11 +59,22 @@ from google.genai import types as genai_types
 logger = logging.getLogger(__name__)
 
 # A2.6: Memory Bank's own SDK, not backend_client — the equivalent tuple
-# to backend_client.BACKEND_ERROR for this module's dependency. Google's
-# Cloud client libraries raise GoogleAPIError (and subclasses) for a
-# failed API call; GoogleAuthError covers the underlying credential/
-# token-mint failure the same way it does for backend_client.
-_MEMORY_BANK_ERROR = (google.api_core.exceptions.GoogleAPIError, google.auth.exceptions.GoogleAuthError)
+# to backend_client.BACKEND_ERROR for this module's dependency.
+#
+# Verified empirically, not assumed from docs — an earlier version of
+# this tuple used google.api_core.exceptions.GoogleAPIError, reasoning
+# by analogy from "Google Cloud client libraries raise GoogleAPIError."
+# That's the wrong SDK family: vertexai.Client(...).aio and ADK's
+# VertexAiMemoryBankService both go through the newer google-genai
+# client, not google-api-core. Forcing real failures (a malformed
+# reasoning engine id, a nonexistent one, an unresolvable region, a
+# missing credentials file) against the live API confirmed the actual
+# hierarchy: google.genai.errors.APIError (ClientError for 4xx,
+# ServerError for 5xx) for API-level failures, and
+# google.auth.exceptions.GoogleAuthError — confirmed separately, via a
+# forced credentials-resolution failure — for the underlying
+# credential/token-mint failure, same as backend_client's own tuple.
+_MEMORY_BANK_ERROR = (google.genai.errors.APIError, google.auth.exceptions.GoogleAuthError)
 
 PROFILE_SCHEMA_ID = "day-planner-profile"
 

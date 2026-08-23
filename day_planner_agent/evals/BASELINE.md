@@ -266,10 +266,45 @@ task's own stated purpose.
 
 **Only HTTP/network/auth classes are caught** — `backend_client.
 BACKEND_ERROR = (httpx.HTTPError, google.auth.exceptions.GoogleAuthError)`,
-and the Memory Bank equivalent, `(google.api_core.exceptions.
-GoogleAPIError, google.auth.exceptions.GoogleAuthError)` — never a
+and the Memory Bank equivalent, `_MEMORY_BANK_ERROR = (google.genai.
+errors.APIError, google.auth.exceptions.GoogleAuthError)` — never a
 blanket `except Exception`. A `TypeError`/`KeyError` still propagates,
 confirmed with a dedicated test per module.
+
+**Review caught a real defect in the first version of this PR**: the
+Memory Bank tuple originally used `google.api_core.exceptions.
+GoogleAPIError`, reasoned by analogy ("Google Cloud client libraries
+raise GoogleAPIError") rather than verified — and `memory_tools.py`
+doesn't use that SDK family at all. It goes through `vertexai.
+Client(...).aio` and ADK's `VertexAiMemoryBankService`, both built on
+the newer `google-genai` client. The `except _MEMORY_BANK_ERROR` clauses
+would never have fired; every test passed anyway, because nothing raised
+a realistic exception type — the identical shape of bug already caught
+once in this PR (`conftest.py`'s bare `RuntimeError`), just not yet
+applied to Memory Bank. Fixed empirically, not by re-reading docs: forced
+four real failures against the live API (a malformed reasoning engine
+id, a nonexistent one, an unresolvable region, a missing credentials
+file) and captured the actual exception types —
+`google.genai.errors.ClientError`/`ServerError` (both `APIError`
+subclasses) for API-level failures, `google.auth.exceptions.
+DefaultCredentialsError` (a `GoogleAuthError` subclass, confirming that
+half of the original tuple was already right) for credential
+resolution. `_MEMORY_BANK_ERROR` now reflects what was actually
+observed. Confirmed the new tests catch the regression: reverting the
+tuple to `(GoogleAuthError,)` alone made both `get_profile` tests fail
+immediately.
+
+**Checked the A2.4 interaction directly, per review**: the synchronous
+`try/except` this task added only wraps `vertexai.Client(...)`
+construction in `update_profile`/`save_memory` — the write itself
+executes later, inside the detached background task A2.4 already
+schedules, a different code path with its own pre-existing (and
+already-broad, `except Exception`) error handling. Added a test per
+write path raising the real `ClientError` type from inside that
+background execution, confirming it's retried and logged without
+escaping — the equivalent backend_client already had, now covering
+Memory Bank's async write path too, not just the synchronous
+construction line.
 
 **Error text was checked, not just written, to never read as "no data
 exists"** — the single most important line in the task, per its own
