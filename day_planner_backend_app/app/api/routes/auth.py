@@ -1,7 +1,5 @@
 """Signup, login, logout, and (A6.4) password reset."""
 
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ...core import security
@@ -19,8 +17,6 @@ from ...services import email as email_service
 from ..deps import bearer_token, get_store
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-logger = logging.getLogger(__name__)
 
 
 @router.post("/signup", response_model=SessionResponse, status_code=201)
@@ -153,14 +149,17 @@ async def request_password_reset(
     are being actively targeted.
 
     Known gap, recorded rather than left silently unhandled: this
-    equalises the *response*, not the *timing*. A registered address
-    costs an extra Firestore write and a network call to SendGrid that a
-    non-existent one doesn't, so a sufficiently precise timing
+    equalises the *response*, not the *timing*. The SendGrid call itself
+    is fire-and-forget (email_service.schedule_password_reset_email) so
+    it no longer sits on the request path at all — both branches return
+    right after their last Firestore call — but a registered address
+    still costs one extra Firestore write (create_password_reset_token)
+    that a non-existent one doesn't, so a sufficiently precise timing
     measurement could still distinguish the two. Login's dummy-hash
     comparison solves the equivalent problem there because Argon2
     verification time dominates; there's no equally cheap constant-time
-    trick for "did an outbound HTTP call happen," and building one
-    (e.g. always making a throwaway call) was judged not worth the
+    trick for a single extra document write, and closing that last gap
+    (e.g. always writing a throwaway document) was judged not worth the
     complexity for what this product protects.
     """
     email_key = f"email:{normalize_email(body.email)}"
@@ -202,13 +201,9 @@ async def request_password_reset(
     # can read it with no change needed on this side.
     reset_url = f"{settings.public_base_url.rstrip('/')}/reset-password?token={token}"
 
-    try:
-        await email_service.send_password_reset_email(
-            settings=settings, to_email=user["email"], reset_url=reset_url
-        )
-    except email_service.SendEmailError:
-        logger.exception("password reset email failed to send")
-        # Deliberately not re-raised — see this function's own docstring.
+    email_service.schedule_password_reset_email(
+        settings=settings, to_email=user["email"], reset_url=reset_url
+    )
 
 
 @router.post("/password-reset/confirm", status_code=204)

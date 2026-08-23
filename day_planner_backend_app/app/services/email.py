@@ -10,7 +10,19 @@ The API key needs only "Mail Send" access on a Restricted Access key,
 never "Full Access" — see terraform/secrets.tf for how the key reaches
 this service (mounted from Secret Manager, value set out of band, same
 pattern as google_oauth_client_secret).
+
+schedule_password_reset_email is fire-and-forget, same shape as
+day_planner_agent/memory_tools.py's background Memory Bank writes
+(A2.4): the caller (routes/auth.py's request_password_reset) returns
+right after writing the reset token, not after this completes, since
+awaiting the SendGrid network call inline was most of what made a
+registered address measurably slower to respond to than an
+unregistered one — see that route's own docstring for the rest of that
+reasoning.
 """
+
+import asyncio
+import logging
 
 import httpx
 
@@ -19,9 +31,39 @@ from ..core.config import Settings
 _SENDGRID_URL = "https://api.sendgrid.com/v3/mail/send"
 _TIMEOUT = 10.0
 
+logger = logging.getLogger(__name__)
+
+# A fire-and-forget asyncio.Task with no other strong reference can be
+# garbage-collected mid-flight ("Task was destroyed but it is pending") —
+# this set plus the done-callback in schedule_password_reset_email is
+# asyncio's own documented idiom for avoiding that, same pattern
+# memory_tools.py's _pending_writes uses.
+_pending_sends: set[asyncio.Task] = set()
+
 
 class SendEmailError(Exception):
     """SendGrid rejected or failed to deliver the message."""
+
+
+def schedule_password_reset_email(
+    *, settings: Settings, to_email: str, reset_url: str
+) -> None:
+    """Fire-and-forget wrapper around send_password_reset_email. Failure
+    is only logged — by the time this runs, the HTTP response to the
+    original request has already been sent, so there is nothing left to
+    report it to."""
+
+    async def _send_and_log() -> None:
+        try:
+            await send_password_reset_email(
+                settings=settings, to_email=to_email, reset_url=reset_url
+            )
+        except SendEmailError:
+            logger.exception("password reset email failed to send")
+
+    task = asyncio.create_task(_send_and_log())
+    _pending_sends.add(task)
+    task.add_done_callback(_pending_sends.discard)
 
 
 async def send_password_reset_email(
