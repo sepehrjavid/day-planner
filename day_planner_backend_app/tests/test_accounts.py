@@ -21,7 +21,7 @@ def test_password_is_never_stored_in_the_clear(anon_client, store):
     anon_client.post(
         "/auth/signup", json={"email": "new@example.com", "password": GOOD_PASSWORD}
     )
-    stored = next(iter(store.users.values()))["password_hash"]
+    stored = next(iter(store._users.values()))["password_hash"]
     assert GOOD_PASSWORD not in stored
     assert stored.startswith("$argon2id$")
 
@@ -99,7 +99,7 @@ def test_successful_login_clears_the_failure_counter(anon_client, user, store):
     anon_client.post(
         "/auth/login", json={"email": "me@example.com", "password": GOOD_PASSWORD}
     )
-    assert "me@example.com" not in store.throttle
+    assert "me@example.com" not in store._login_throttle
 
 
 def test_logout_revokes_the_session(anon_client, user):
@@ -124,7 +124,7 @@ def test_expired_session_is_rejected(anon_client, user, store):
 
     _, headers = user
     token = headers["Authorization"].removeprefix("Bearer ")
-    store.sessions[token]["expires_at"] = datetime.now(timezone.utc) - timedelta(
+    store._sessions[token]["expires_at"] = datetime.now(timezone.utc) - timedelta(
         seconds=1
     )
     assert anon_client.get("/me", headers=headers).status_code == 401
@@ -134,7 +134,7 @@ def test_argon2_rehash_on_parameter_upgrade(anon_client, user, store, monkeypatc
     """Raising Argon2 cost later must upgrade existing users on next login,
     not leave them on the old parameters forever."""
     _, _ = user
-    original = store.users["user-1"]["password_hash"]
+    original = store._users["user-1"]["password_hash"]
 
     class AlwaysNeedsRehash:
         """PasswordHasher uses __slots__, so its methods can't be patched in
@@ -159,4 +159,4 @@ def test_argon2_rehash_on_parameter_upgrade(anon_client, user, store, monkeypatc
         ).status_code
         == 200
     )
-    assert store.users["user-1"]["password_hash"] != original
+    assert store._users["user-1"]["password_hash"] != original

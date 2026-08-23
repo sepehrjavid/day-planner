@@ -60,7 +60,7 @@ def _to_habit_out(habit) -> HabitOut:
 @router.post("/habits", response_model=HabitOut)
 async def create_habit(body: AgentCreateHabitRequest, store: Store = Depends(get_store)):
     """Track a new recurring goal for a user."""
-    habit = await store.create_habit(user_id=body.user_id, label=body.label, goal=body.goal)
+    habit = await store.habits.create(user_id=body.user_id, label=body.label, goal=body.goal)
     return _to_habit_out(habit)
 
 
@@ -73,7 +73,7 @@ async def list_habits(
     Filtering (and any "active by default" policy) is the agent tool's
     call, not this route's — this just passes the filter through as given.
     """
-    habits = await store.list_habits(user_id, status=status)
+    habits = await store.habits.list(user_id, status=status)
     return HabitsResponse(habits=[_to_habit_out(h) for h in habits])
 
 
@@ -83,7 +83,7 @@ async def update_habit(body: AgentUpdateHabitRequest, store: Store = Depends(get
     it (status="paused"/"archived") — never a hard delete, so anything that
     already referenced this habit_id (a tagged calendar event, a plan log
     entry) still resolves."""
-    habit = await store.update_habit(
+    habit = await store.habits.update(
         user_id=body.user_id,
         habit_id=body.habit_id,
         label=body.label,
@@ -120,7 +120,7 @@ async def upsert_habit_session(
     calendar event created for a habit. Called by add_calendar_event on
     creation and by update_calendar_event when it moves an already-tagged
     event — see calendar_tool.py."""
-    session = await store.upsert_habit_session(
+    session = await store.habit_sessions.upsert(
         user_id=body.user_id,
         habit_id=body.habit_id,
         event_id=body.event_id,
@@ -142,7 +142,7 @@ async def list_habit_sessions(
     review_habit_week's input. Sessions whose event was later deleted are
     still returned; that's the entire point of this record surviving
     independently of the calendar event it describes."""
-    sessions = await store.list_habit_sessions(
+    sessions = await store.habit_sessions.list(
         user_id, planned_from=planned_from, planned_to=planned_to
     )
     return HabitSessionsResponse(sessions=[_to_habit_session_out(s) for s in sessions])
@@ -156,8 +156,8 @@ async def set_habit_session_status(
     back to pending — the first-class completion state review_habit_week
     reports alongside its calendar diff (A1.5). Called by
     day_planner_agent's mark_habit_session tool (marked_by="agent").
-    Idempotent — see Store.set_habit_session_status."""
-    session = await store.set_habit_session_status(
+    Idempotent — see HabitSessionRepository.set_status."""
+    session = await store.habit_sessions.set_status(
         user_id=body.user_id,
         calendar_id=body.calendar_id,
         event_id=body.event_id,
@@ -186,7 +186,7 @@ async def create_zone(body: AgentCreateZoneRequest, store: Store = Depends(get_s
     """Track a new named scheduling restriction for a user (work hours,
     commute, ...). A habit may only be placed inside it if the habit's
     own allowed_zones names this zone's label — see schemas/habits.py."""
-    zone = await store.create_zone(
+    zone = await store.zones.create(
         user_id=body.user_id,
         label=body.label,
         start_time=body.start_time,
@@ -200,14 +200,14 @@ async def create_zone(body: AgentCreateZoneRequest, store: Store = Depends(get_s
 async def list_zones(user_id: str, store: Store = Depends(get_store)):
     """Every zone for a user. No rows at all means no restriction of
     this kind exists for them — there's nothing else to check for."""
-    zones = await store.list_zones(user_id)
+    zones = await store.zones.list(user_id)
     return ZonesResponse(zones=[_to_zone_out(z) for z in zones])
 
 
 @router.post("/zones/update", response_model=ZoneOut)
 async def update_zone(body: AgentUpdateZoneRequest, store: Store = Depends(get_store)):
     """Partial update of an existing zone."""
-    zone = await store.update_zone(
+    zone = await store.zones.update(
         user_id=body.user_id,
         zone_id=body.zone_id,
         label=body.label,
@@ -238,7 +238,7 @@ async def get_sleep_schedule(user_id: str, store: Store = Depends(get_store)):
     (not a 404) when they haven't — this is a singleton with no id to
     get wrong, so "not configured yet" is a normal response, not an
     error."""
-    schedule = await store.get_sleep_schedule(user_id)
+    schedule = await store.sleep_schedule.get(user_id)
     if schedule is None:
         return SleepScheduleResponse(exists=False)
     return SleepScheduleResponse(exists=True, schedule=_to_sleep_schedule_out(schedule))
@@ -257,7 +257,7 @@ async def set_sleep_schedule(
             day: override.model_dump(exclude_none=True)
             for day, override in body.day_overrides.items()
         }
-    schedule = await store.set_sleep_schedule(
+    schedule = await store.sleep_schedule.set(
         user_id=body.user_id,
         sleep_time=body.sleep_time,
         wake_time=body.wake_time,

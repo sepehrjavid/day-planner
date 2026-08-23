@@ -91,7 +91,7 @@ class ThrottleState:
 class QuotaState:
     """Result of a daily message-quota check, made atomically with the
     consuming increment so two concurrent requests can't both slip through
-    on the last unit — see Store.check_and_consume_quota."""
+    on the last unit — see UserRepository.check_and_consume_quota."""
 
     allowed: bool
     limit: int
@@ -245,7 +245,7 @@ class HabitSession:
     separate from whether the calendar event still exists — the calendar
     diff review_habit_week already did (kept/moved/gone) measures plan
     *durability*, not whether the user actually did the thing. Set only via
-    Store.set_habit_session_status, never implied from calendar state.
+    store.habit_sessions.set_status, never implied from calendar state.
 
     Invariant: completion must survive a reschedule. upsert_habit_session
     is called again on every update_calendar_event patch to a

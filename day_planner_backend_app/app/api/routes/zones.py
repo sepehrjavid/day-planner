@@ -17,7 +17,8 @@ field exists on the user record.
 Zones, unlike habits, have no soft-retire status and no referential
 integrity of their own to protect (a habit's allowed_zones names a zone
 by label, not by zone_id — see schemas/habits.py), so this is the one
-domain in A6.3 that gets a real DELETE. See db/store.py's `delete_zone`.
+domain in A6.3 that gets a real DELETE. See db/repositories/zones.py's
+`ZoneRepository.delete` (A6.5).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -55,7 +56,7 @@ async def create_zone(
     """Track a new named scheduling restriction for the signed-in user.
     See this module's docstring for the zone-conflict check this does
     NOT perform."""
-    zone = await store.create_zone(
+    zone = await store.zones.create(
         user_id=user_id,
         label=body.label,
         start_time=body.start_time,
@@ -70,7 +71,7 @@ async def list_zones(
     user_id: str = Depends(current_user_id), store: Store = Depends(get_store)
 ):
     """Every zone for the signed-in user."""
-    zones = await store.list_zones(user_id)
+    zones = await store.zones.list(user_id)
     return ZonesResponse(zones=[_to_zone_out(z) for z in zones])
 
 
@@ -82,7 +83,7 @@ async def update_zone(
 ):
     """Partial update of an existing zone. See this module's docstring
     for the zone-conflict check this does NOT perform."""
-    zone = await store.update_zone(
+    zone = await store.zones.update(
         user_id=user_id,
         zone_id=body.zone_id,
         label=body.label,
@@ -103,6 +104,6 @@ async def delete_zone(
 ):
     """Remove a zone. No corresponding /agent route — deletion is not
     something the agent does on a user's behalf."""
-    deleted = await store.delete_zone(user_id=user_id, zone_id=zone_id)
+    deleted = await store.zones.delete(user_id=user_id, zone_id=zone_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)

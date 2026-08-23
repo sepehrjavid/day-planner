@@ -30,7 +30,7 @@ def _upsert(store, **overrides):
         "planned_end": _dt("2026-08-04T07:30:00-07:00"),
     }
     body.update(overrides)
-    return store.upsert_habit_session(**body)
+    return store.habit_sessions.upsert(**body)
 
 
 def _set_status(store, **overrides):
@@ -42,7 +42,7 @@ def _set_status(store, **overrides):
         "marked_by": "user",
     }
     body.update(overrides)
-    return store.set_habit_session_status(**body)
+    return store.habit_sessions.set_status(**body)
 
 
 async def test_upsert_habit_session_creates(store):
@@ -77,7 +77,7 @@ async def test_list_habit_sessions_filters_by_planned_start_range(store):
     # A different user's session must never show up in this list.
     await _upsert(store, user_id="u2", event_id="e-other-user")
 
-    sessions = await store.list_habit_sessions(
+    sessions = await store.habit_sessions.list(
         "u1",
         planned_from=_dt("2026-08-01T00:00:00+00:00"),
         planned_to=_dt("2026-08-08T00:00:00+00:00"),
@@ -86,7 +86,7 @@ async def test_list_habit_sessions_filters_by_planned_start_range(store):
 
 
 async def test_list_habit_sessions_empty_by_default(store):
-    sessions = await store.list_habit_sessions(
+    sessions = await store.habit_sessions.list(
         "u1",
         planned_from=_dt("2026-08-01T00:00:00+00:00"),
         planned_to=_dt("2026-08-08T00:00:00+00:00"),
@@ -129,7 +129,7 @@ async def test_set_habit_session_status_not_found_never_creates_a_session(store)
     update_calendar_event tagging a habit session) is the only writer of
     the plan fields."""
     await _set_status(store, event_id="never-planned")
-    sessions = await store.list_habit_sessions(
+    sessions = await store.habit_sessions.list(
         "u1",
         planned_from=_dt("2026-01-01T00:00:00+00:00"),
         planned_to=_dt("2027-01-01T00:00:00+00:00"),

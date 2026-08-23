@@ -10,7 +10,7 @@ resolve user_id only from the session token, the status route never
 trusts a client-supplied marked_by, and a missing session 404s rather
 than being silently created.
 
-Calling store.upsert_habit_session directly (not through a route) means
+Calling store.habit_sessions.upsert directly (not through a route) means
 planned_start/planned_end must be real datetime objects, not ISO
 strings — nothing here parses them the way a Pydantic schema would.
 """
@@ -27,7 +27,7 @@ def _upsert_session(store, *, user_id, **overrides):
         "planned_end": datetime.fromisoformat("2026-08-04T07:30:00-07:00"),
     }
     body.update(overrides)
-    return store.upsert_habit_session(user_id=user_id, **body)
+    return store.habit_sessions.upsert(user_id=user_id, **body)
 
 
 def test_requires_auth(anon_client):
@@ -62,8 +62,8 @@ async def test_identity_comes_from_session_token_not_body(anon_client, user, sto
     )
 
     assert response.status_code == 200, response.text
-    assert store.habit_sessions[user_id]["me@gmail.com__e1"]["status"] == "completed"
-    assert store.habit_sessions["someone-else"]["me@gmail.com__e1"]["status"] == "pending"
+    assert store._habit_sessions[user_id]["me@gmail.com__e1"]["status"] == "completed"
+    assert store._habit_sessions["someone-else"]["me@gmail.com__e1"]["status"] == "pending"
 
 
 async def test_marked_by_is_always_user_never_client_supplied(anon_client, user, store):
@@ -82,7 +82,7 @@ async def test_marked_by_is_always_user_never_client_supplied(anon_client, user,
     )
 
     assert response.status_code == 200, response.text
-    assert store.habit_sessions[user_id]["me@gmail.com__e1"]["marked_by"] == "user"
+    assert store._habit_sessions[user_id]["me@gmail.com__e1"]["marked_by"] == "user"
 
 
 def test_returns_404_when_session_not_found(anon_client, user):

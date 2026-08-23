@@ -2,7 +2,7 @@
 /agent/sleep-schedule (A6.2). See routes/sleep_schedule.py's own
 docstring for why the two route bodies are nearly byte-identical.
 
-test_sleep_schedule.py already covers Store.get_sleep_schedule/
+test_sleep_schedule.py already covers store.sleep_schedule.get/
 set_sleep_schedule directly; these exercise the same store methods
 through the route, so what's new here is auth scoping.
 """

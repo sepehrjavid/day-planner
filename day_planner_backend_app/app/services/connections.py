@@ -52,7 +52,7 @@ async def mint_connect_link(
     Deliver it privately — a DM or an ephemeral Slack message. Anyone who can
     click this link attaches *their* calendar account to this user_id.
     """
-    state = await store.create_oauth_state(
+    state = await store.oauth_states.create(
         user_id=user_id,
         provider=provider,
         code_verifier=pkce.new_code_verifier(),
@@ -84,7 +84,7 @@ async def complete_connection(
     state_nonce: str,
 ) -> ConnectResult:
     """Exchange the authorization code and persist the connected account."""
-    oauth_state = await store.consume_oauth_state(state_nonce)
+    oauth_state = await store.oauth_states.consume(state_nonce)
     if oauth_state is None or oauth_state.is_expired:
         raise ConnectFailed("That connect link has expired or already been used.")
     if oauth_state.provider != provider.name:
@@ -123,7 +123,7 @@ async def complete_connection(
     encrypted = await crypto.encrypt(
         settings.kms_key_name, tokens.refresh_token, oauth_state.user_id
     )
-    account_id = await store.save_account(
+    account_id = await store.accounts.save(
         user_id=oauth_state.user_id,
         provider=provider.name,
         credential_type=provider.credential_type,
@@ -171,7 +171,7 @@ async def disconnect_account(
     leave a live grant sitting in the user's Google account with nothing to
     show for it.
     """
-    account = await store.get_account(user_id=user_id, account_id=account_id)
+    account = await store.accounts.get(user_id=user_id, account_id=account_id)
     if account is None:
         return False
 
@@ -188,5 +188,5 @@ async def disconnect_account(
             # worse than one we couldn't revoke remotely.
             logger.warning("revocation failed for %s: %s", user_id, exc)
 
-    await store.delete_account(user_id=user_id, account_id=account_id)
+    await store.accounts.delete(user_id=user_id, account_id=account_id)
     return True

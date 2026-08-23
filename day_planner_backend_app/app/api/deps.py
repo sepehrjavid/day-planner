@@ -101,7 +101,7 @@ async def current_user_id(
     acceptable source of identity there — a user_id in a request body would let
     any logged-in user act on any other account.
     """
-    user_id = await store.resolve_session(token)
+    user_id = await store.sessions.resolve(token)
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

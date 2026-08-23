@@ -36,7 +36,7 @@ async def start(
     link, gets distracted, and clicks again should not be told it's dead.
     Consumption happens once, at the callback.
     """
-    state = await store.peek_oauth_state(s)
+    state = await store.oauth_states.peek(s)
     if state is None or state.is_expired or state.provider != provider.name:
         return HTMLResponse(
             pages.failed("That connect link has expired or already been used."),
