@@ -67,3 +67,31 @@ resource "google_firestore_field" "login_throttle_ttl" {
 
   ttl_config {}
 }
+
+# Password reset tokens (A6.4). Consumed tokens are deleted transactionally
+# by consume_password_reset_token, but a token nobody clicks — the common
+# case, since most reset requests are abandoned or mistyped — would
+# otherwise sit forever. This endpoint is publicly triggerable with no
+# account ownership check (that's the whole point — it works for someone
+# who's locked out), so unbounded growth here is attacker-reachable, not
+# just user-behavior-driven.
+resource "google_firestore_field" "password_resets_ttl" {
+  project    = var.project_id
+  database   = local.firestore_database
+  collection = "password_resets"
+  field      = "expires_at"
+
+  ttl_config {}
+}
+
+# Password-reset throttle counters (A6.4) — same shape and same reasoning
+# as login_throttle_ttl above, keyed more generally (an email or an IP; see
+# db/store.py's check_reset_throttle/record_reset_attempt).
+resource "google_firestore_field" "password_reset_throttle_ttl" {
+  project    = var.project_id
+  database   = local.firestore_database
+  collection = "password_reset_throttle"
+  field      = "locked_until"
+
+  ttl_config {}
+}

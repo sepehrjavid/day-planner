@@ -113,6 +113,22 @@ resource "google_cloud_run_v2_service" "default" {
         }
       }
 
+      # Password reset (A6.4) — SendGrid Mail Send. Same mount pattern as
+      # GOOGLE_OAUTH_CLIENT_SECRET above.
+      env {
+        name = "SENDGRID_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.sendgrid_api_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name  = "PASSWORD_RESET_FROM_EMAIL"
+        value = var.password_reset_from_email
+      }
+
       # Comma-separated (see day_planner_backend_app's
       # Settings.agent_callers). Gates /agent/* (A6.2) — day_planner_agent
       # is the only caller, invoking on a user's behalf with user_id taken
@@ -159,6 +175,7 @@ resource "google_cloud_run_v2_service" "default" {
 
   depends_on = [
     google_secret_manager_secret_iam_member.backend_accessor,
+    google_secret_manager_secret_iam_member.backend_sendgrid_accessor,
     google_kms_crypto_key_iam_member.backend,
     google_project_iam_member.backend_firestore,
     google_vertex_ai_reasoning_engine_iam_member.backend_query,

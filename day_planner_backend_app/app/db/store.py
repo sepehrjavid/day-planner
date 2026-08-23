@@ -79,6 +79,8 @@ Collection layout:
   sessions/{token_hash}                          opaque login sessions, TTL'd
   login_throttle/{normalized_email}              failed-attempt counter
   oauth_states/{nonce}                           single-use connect links, TTL'd
+  password_resets/{token_hash}                   opaque reset tokens, TTL'd (A6.4)
+  password_reset_throttle/{email-or-ip key}      reset-request attempt counter (A6.4)
 
 Two things are deliberately never stored: provider access tokens (they last an
 hour; the refresh token can always mint another) and raw session tokens.
@@ -121,6 +123,8 @@ USER_EMAILS = "user_emails"
 SESSIONS = "sessions"
 LOGIN_THROTTLE = "login_throttle"
 OAUTH_STATES = "oauth_states"
+PASSWORD_RESETS = "password_resets"
+PASSWORD_RESET_THROTTLE = "password_reset_throttle"
 CONNECTED_ACCOUNTS = "connected_accounts"
 HABITS = "habits"
 HABIT_SESSIONS = "habit_sessions"
@@ -338,6 +342,25 @@ class Store:
             hash_session_token(token)
         ).delete()
 
+    async def delete_sessions(self, *, user_id: str, except_token: str | None = None) -> None:
+        """Evict every session for this user, optionally keeping the one
+        whose raw token is except_token. Called after a password change
+        (keeping the caller's own session) and after a password reset
+        (keeping none — A6.4's "I lost control of this account" case).
+
+        sessions/{token_hash} has no user_id-scoped subcollection (see
+        create_session's own docstring for why session tokens are opaque
+        and unkeyed by account), so this queries the flat `sessions`
+        collection by its user_id field. Firestore indexes every field
+        for single-field equality queries by default, so this needs no
+        Terraform change to work."""
+        keep = hash_session_token(except_token) if except_token is not None else None
+        async for doc in self._db.collection(SESSIONS).where(
+            "user_id", "==", user_id
+        ).stream():
+            if doc.id != keep:
+                await doc.reference.delete()
+
     # ------------------------------------------------------------------
     # Login throttling
     # ------------------------------------------------------------------
@@ -448,6 +471,104 @@ class Store:
             code_verifier=data["code_verifier"],
             expires_at=data["expires_at"],
         )
+
+    # ------------------------------------------------------------------
+    # Password reset (A6.4)
+    #
+    # Same shape as sessions: only the token's hash is persisted, and
+    # only its hash is ever looked up, so a Firestore dump can't be
+    # replayed as a set of live reset links. Consumption mirrors
+    # consume_oauth_state's read-and-delete transaction above — a
+    # captured or logged reset link must never be usable twice.
+    # ------------------------------------------------------------------
+
+    async def create_password_reset_token(
+        self, *, user_id: str, ttl_seconds: int
+    ) -> tuple[str, datetime]:
+        """Returns (raw token, expiry). hash_session_token is reused here
+        despite its name — it's a generic sha256 digest of an opaque
+        token, the same operation this needs, and introducing a second
+        identical function under a different name would just be the kind
+        of drift A6.3's shared-validation reasoning warns about."""
+        token = secrets.token_urlsafe(32)
+        expires_at = utcnow() + timedelta(seconds=ttl_seconds)
+        await self._db.collection(PASSWORD_RESETS).document(
+            hash_session_token(token)
+        ).set({"user_id": user_id, "created_at": utcnow(), "expires_at": expires_at})
+        return token, expires_at
+
+    async def consume_password_reset_token(self, token: str) -> str | None:
+        """Read and delete atomically. Returns the user_id, or None if the
+        token is unknown, already used, or expired.
+
+        Expiry is enforced on read even though the transaction already
+        deleted the document by the time that check runs — the same
+        "TTL sweeper can lag by hours, don't trust it for correctness"
+        reasoning resolve_session documents, applied to a token that's
+        single-use to begin with, so there's no separate branch that
+        skips the delete."""
+        ref = self._db.collection(PASSWORD_RESETS).document(hash_session_token(token))
+
+        @firestore.async_transactional
+        async def _consume(transaction) -> dict | None:
+            snapshot = await ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return None
+            data = snapshot.to_dict() or {}
+            transaction.delete(ref)
+            return data
+
+        data = await _consume(self._db.transaction())
+        if data is None:
+            return None
+        if data.get("expires_at") and utcnow() >= data["expires_at"]:
+            return None
+        return data.get("user_id")
+
+    # ------------------------------------------------------------------
+    # Password reset request throttling (A6.4)
+    #
+    # Deliberately a separate collection and separate methods from
+    # login_throttle above, not a generalisation of it: reset requests are
+    # throttled per an arbitrary caller-supplied key (an email, or an IP
+    # address — see routes/auth.py's request_password_reset), where login
+    # throttling is always keyed by email specifically. Same
+    # counter-plus-locked_until shape as check_login_throttle/
+    # record_login_failure, just keyed more generally.
+    # ------------------------------------------------------------------
+
+    async def check_reset_throttle(
+        self, key: str, *, max_attempts: int, lockout_seconds: int
+    ) -> ThrottleState:
+        snapshot = await self._db.collection(PASSWORD_RESET_THROTTLE).document(key).get()
+        if not snapshot.exists:
+            return ThrottleState(locked=False)
+
+        locked_until = (snapshot.to_dict() or {}).get("locked_until")
+        if locked_until and utcnow() < locked_until:
+            return ThrottleState(
+                locked=True,
+                retry_after_seconds=int((locked_until - utcnow()).total_seconds()) + 1,
+            )
+        return ThrottleState(locked=False)
+
+    async def record_reset_attempt(
+        self, key: str, *, max_attempts: int, lockout_seconds: int
+    ) -> None:
+        ref = self._db.collection(PASSWORD_RESET_THROTTLE).document(key)
+
+        @firestore.async_transactional
+        async def _bump(transaction) -> None:
+            snapshot = await ref.get(transaction=transaction)
+            data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+            attempts = int(data.get("attempt_count", 0)) + 1
+            payload: dict = {"attempt_count": attempts, "updated_at": utcnow()}
+            if attempts >= max_attempts:
+                payload["locked_until"] = utcnow() + timedelta(seconds=lockout_seconds)
+                payload["attempt_count"] = 0
+            transaction.set(ref, payload, merge=True)
+
+        await _bump(self._db.transaction())
 
     # ------------------------------------------------------------------
     # Connected calendar accounts

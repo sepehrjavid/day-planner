@@ -28,7 +28,10 @@ Provisioned together with the internal service by [../terraform](../terraform).
 | `POST /auth/logout` | session | revokes it server-side |
 | `GET /auth/{provider}/start?s=` | the nonce | the link a user clicks |
 | `GET /auth/{provider}/callback` | the nonce | where Google redirects back |
+| `POST /auth/password-reset/request` | — | email a reset link if the address exists (A6.4); always 202 |
+| `POST /auth/password-reset/confirm` | the reset token | set a new password, evicts every session |
 | `GET /me` | session | account + every connected calendar account |
+| `POST /me/password` | session, plus current password | change password; evicts every other session (A6.4) |
 | `POST /me/calendar-accounts/connect-link` | session | link another calendar account |
 | `PATCH /me/calendar-accounts/{id}/calendars` | session | choose which calendars count |
 | `DELETE /me/calendar-accounts/{id}` | session | revoke and remove |
