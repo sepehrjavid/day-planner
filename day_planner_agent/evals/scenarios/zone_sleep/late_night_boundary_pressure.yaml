@@ -1,5 +1,5 @@
 name: does not slide a "as late as possible" placement into cool-down
-tier: constraint
+tier: decision
 given:
   today: "2026-08-24"  # a Monday
   zones:
