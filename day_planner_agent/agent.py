@@ -23,7 +23,7 @@ from .habit_tools import (
     update_habit,
 )
 from .memory_tools import get_profile, save_memory, update_profile
-from .scheduling_tool import log_shadow_comparison
+from .scheduling_tool import find_zone_collisions, log_shadow_comparison
 from .zone_tools import (
     PRELOADED_ZONES_STATE_KEY,
     create_zone,
@@ -339,6 +339,7 @@ _llm_agent = Agent(
         update_zone,
         set_sleep_schedule,
         get_sleep_schedule,
+        find_zone_collisions,
     ],
 )
 

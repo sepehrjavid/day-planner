@@ -1,22 +1,34 @@
 """Wires the scheduling engine (day_planner_agent/scheduling/, A4.1) into
-the agent, in shadow mode (A4.2).
+the agent — `get_available_slots` still in shadow mode, `find_zone_collisions`
+now a registered, model-callable tool (A4.3).
 
-**Shadow mode**: `get_available_slots` below is fully built and unit-
-tested, but is deliberately **not** registered in agent.py's
-`Agent(...).tools=[...]` list — the model never sees it and cannot call
-it. A same-day, controlled A3.1 run (with vs. without this module's tool
-registered) found double-digit-point tier regressions from merely adding
-an unexplained, uninstructed tool to the model's tool list; instruction.md
-was never going to be changed in this task either way, so the model would
-have had a capability it was never told how or when to use. See
-agent.py's `_log_schedule_shadow_comparison` for the full reasoning and
-for the actual shadow-mode mechanism: an `after_tool_callback` that calls
-this module's engine directly, out-of-band, whenever a real
+**get_available_slots stays in shadow mode**: fully built and unit-tested,
+but deliberately **not** registered in agent.py's `Agent(...).tools=[...]`
+list — the model never sees it and cannot call it. A same-day, controlled
+A3.1 run (with vs. without this module's tool registered) found
+double-digit-point tier regressions from merely adding an unexplained,
+uninstructed tool to the model's tool list; instruction.md was never
+going to be changed in that task either way, so the model would have had
+a capability it was never told how or when to use. See agent.py's
+`_log_schedule_shadow_comparison` for the full reasoning and for the
+actual shadow-mode mechanism: an `after_tool_callback` that calls this
+module's engine directly, out-of-band, whenever a real
 `add_calendar_event`/`update_calendar_event` call places or moves a
 habit-tagged session — never through the model, so there is no tool-list
-change for the model to react to at all. Exposing `get_available_slots`
-to the model is deferred to A4.3, alongside the instruction changes that
-would actually explain how to use it.
+change for the model to react to at all. Registering it requires the
+same add-then-cut discipline `find_zone_collisions` follows below:
+instruction text explaining it ships in the same PR as the registration,
+never before or after.
+
+**find_zone_collisions is different**: A4.3's roadmap entry requires the
+tool and its usage text to ship together (the exact gap that caused the
+regression above), so this one is registered in agent.py's tools=[...]
+list *and* instruction.md's paragraph 17 explains when to call it, in the
+same PR — see that paragraph for exactly what it replaces and what still
+needs the old prose. The old mechanical-detection prose for the zone case
+stays in place alongside it for now; a follow-up PR removes it once the
+tool is confirmed to hold the numbers (the "additive, then subtractive"
+pattern this task's roadmap entry calls for).
 
 `_compute_candidates` is the single source of truth for both
 `get_available_slots` and the shadow comparison — one code path, so a
@@ -377,6 +389,105 @@ async def get_available_slots(
         return {
             "status": "error",
             "error_message": "Could not compute candidate slots right now due to a backend error.",
+        }
+
+
+def _adapt_habit_tagged_sessions(
+    events: list[dict],
+) -> list[tuple[dict, scheduling.Interval]]:
+    """Pairs each habit-tagged, timed event (see get_calendar_events) with
+    its own Interval, for collisions_with. A plain event (no "habit_id")
+    can't be the "conflict you create by learning something new" case in
+    instruction.md's second placement paragraph — that's specifically
+    about sessions *you* placed for a tracked habit — so it's excluded
+    here rather than left for the caller to filter back out."""
+    paired: list[tuple[dict, scheduling.Interval]] = []
+    for event in events:
+        if not event.get("habit_id"):
+            continue
+        start, end = event.get("start_time"), event.get("end_time")
+        if not start or not end or "T" not in start or "T" not in end:
+            continue
+        try:
+            start_dt, end_dt = datetime.fromisoformat(start), datetime.fromisoformat(end)
+        except ValueError:
+            continue
+        if start_dt.tzinfo is None or end_dt.tzinfo is None or end_dt < start_dt:
+            continue
+        paired.append((event, scheduling.Interval(start_dt, end_dt)))
+    return paired
+
+
+async def _compute_zone_collisions(
+    tool_context: ToolContext, user_id: str, zone_label: str, date_from: str, date_to: str
+) -> dict:
+    zones = await domain_client.list_zones(user_id)
+    zone_raw = next((z for z in zones if z["label"] == zone_label), None)
+    if zone_raw is None:
+        return {"status": "not_found", "message": f"No zone named {zone_label!r}."}
+
+    tz_name = await calendar_tool.resolve_reference_timezone(tool_context, user_id)
+    if tz_name is None:
+        return {
+            "status": "needs_auth",
+            "message": "No connected calendar to resolve a reference timezone from.",
+        }
+    tz = ZoneInfo(tz_name)
+
+    calendar_state = await calendar_tool.get_calendar_events(tool_context, date_from, date_to)
+    if calendar_state["status"] != "success":
+        return calendar_state
+
+    occurrences = scheduling.zone_occurrences(
+        _adapt_zone(zone_raw), (date.fromisoformat(date_from), date.fromisoformat(date_to)), tz=tz
+    )
+    paired = _adapt_habit_tagged_sessions(calendar_state["events"])
+    colliding = scheduling.collisions_with(occurrences, paired)
+
+    return {"status": "success", "colliding_sessions": colliding}
+
+
+async def find_zone_collisions(
+    tool_context: ToolContext, zone_label: str, date_from: str, date_to: str
+) -> dict:
+    """Which already-placed habit sessions a zone's window now collides
+    with, computed by the scheduling engine rather than by scanning
+    get_calendar_events yourself.
+
+    For the "conflict you create by learning something new" case in
+    instruction.md's second placement paragraph — call this right after
+    create_zone or update_zone, over at least the next 1-2 weeks, the
+    same range you'd otherwise scan by hand. It covers a zone specifically;
+    a changed profile preference or sleep schedule still needs the manual
+    check described there.
+
+    Args:
+        zone_label: The zone to check, by its label (see create_zone,
+            update_zone, list_zones).
+        date_from: Start date, inclusive, "YYYY-MM-DD".
+        date_to: End date, exclusive, "YYYY-MM-DD".
+
+    Returns:
+        dict with "status". On "success", "colliding_sessions" is every
+        habit-tagged event (see get_calendar_events — same shape:
+        event_id, calendar_id, title, start_time, end_time, habit_id)
+        whose time falls inside one of the zone's occurrences in this
+        range, ready to act on without a second lookup. An empty list
+        means no collision, not that the check failed. On "not_found", no
+        zone named zone_label exists for this user. On "needs_auth"/
+        "error", handle the same as get_calendar_events — the check could
+        not run, not that nothing collides.
+    """
+    user_id = tool_context.session.user_id
+    try:
+        return await _compute_zone_collisions(tool_context, user_id, zone_label, date_from, date_to)
+    except backend_client.NeedsAuth as exc:
+        return {"status": "needs_auth", "connect_url": exc.connect_url, "message": exc.message}
+    except domain_client.BACKEND_ERROR:
+        logger.warning("find_zone_collisions backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": "Could not check for zone collisions right now due to a backend error.",
         }
 
 

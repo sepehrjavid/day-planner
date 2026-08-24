@@ -548,3 +548,82 @@ already representative of what this design should produce. A future
 task depending on a confirmed number for this exact commit should run
 the suite once against it rather than assume the control row still
 applies verbatim.
+
+---
+
+## A4.3 — a regression that looked like A4.2's, and wasn't
+
+Registering `find_zone_collisions` (paragraph 17's zone-collision check,
+`day_planner_agent/scheduling_tool.py`) is A4.3's first "additive" step —
+unlike A4.2's `get_available_slots`, this one ships **with** the
+instruction text explaining it, in the same PR, specifically to avoid
+the mechanism A4.2's finding blamed. Verifying it against
+`basic_week_placement` and `plain_appointment_not_tagged` (both
+previously ~100%) at repeat=15 instead looked like the same regression
+happening again: 83.3% constraint-tier pass rate, with the model calling
+zero tools at all in several trials — the identical failure shape A4.2
+saw.
+
+A same-session, same-day comparison across four conditions (all
+repeat=15 on the same two scenarios, all in `history.jsonl` dated
+2026-08-24, commit `0b8fc69d6b` on every row since each was an
+uncommitted working-tree variant under test):
+
+| tools | thinking_budget | instruction | constraint pass | zero-call fails |
+|---|---|---|---|---|
+| 18 (new tool) | 1024 | mentions the tool | 83.3% | 5/30 |
+| 18 (new tool) | 1024 | doesn't mention it | 83.3% | 5/30 |
+| 17 (control) | 1024 | doesn't mention it | 90.0% | 3/30 |
+| 18 (new tool) | 8192 | mentions the tool | 93.3% | 2/30 |
+
+Two things this rules out cleanly: instruction text made no difference
+(identical 83.3%/5-fail result with and without it) and thinking-budget
+exhaustion isn't the mechanism either — average `thinking_tokens` per
+trial across all four conditions was 679–777, well under the 1024 cap,
+and didn't rise when the cap was lifted to 8192.
+
+What the 17-vs-18-tool gap (90.0% vs 83.3%, 3 vs 5 failures out of 30)
+looked like it might confirm — tool-list size as a hard reliability
+ceiling — didn't survive a power check: at a roughly 10-15% baseline
+failure rate, the standard error on a 30-trial count is large enough
+that a 2-failure spread is well within one standard error, and a
+two-proportion test on the extremes (2/30 vs 5/30) gives p ≈ 0.4.
+Detecting a true 3-5 point effect at this base rate needs samples in
+the high hundreds per arm — not a reasonable spend for a single PR's
+verification step.
+
+**What the failures actually were**: a scratch script (not part of the
+committed suite) reran `plain_appointment_not_tagged` while printing the
+full event trace — including Gemini's `thought` parts — for any trial
+that placed nothing. The one zero-call trial it caught did not fail
+mechanically at all:
+
+> `[text] 'I can add "Drinks with friends" for tomorrow at 7 PM. What
+> time should it end?'`
+
+The scenario's fixture utterance, `"Drinks with friends at 7pm
+tomorrow."`, never states an end time. That trial, the model asked a
+legitimate clarifying question about the missing duration instead of
+guessing one — a reasonable response the scenario's
+`tool_calls: [{add_calendar_event, min_count: 1}]` expectation doesn't
+accommodate. This has nothing to do with tool count, budget, or
+`find_zone_collisions`; it's a pre-existing ambiguity in a fixture that
+happened to have never drawn that response before this session ran it
+at higher sample sizes than usual.
+
+**Resolution**: `find_zone_collisions` is registered
+(`agent.py`'s `tools=[...]`), `thinking_budget` stays at 1024 (no
+evidence it needs raising), and the full suite confirms no regression —
+constraint tier moved from 89.3% (the last clean full-suite baseline,
+2026-08-23) to 92.0%. `plain_appointment_not_tagged`'s underspecified-
+duration ambiguity is a separate, pre-existing issue, not fixed here;
+tightening that fixture (an explicit end time, or an invariant that
+accepts a clarifying question as a valid outcome) is a candidate for a
+future, unrelated small fix.
+
+The broader lesson: a same-day, controlled A/B comparison is necessary
+to take a suspected regression seriously (as A4.2 established), but it
+is not sufficient on its own to confirm a specific mechanism — reading
+what the model actually did in the failing trials, not just the
+aggregate rate, is what separated a real design flaw (A4.2) from ordinary
+sampling noise plus one legitimate fixture ambiguity (this one).

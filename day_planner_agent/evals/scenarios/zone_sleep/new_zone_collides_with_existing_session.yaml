@@ -1,0 +1,25 @@
+name: a newly stated work schedule collides with an already-placed Gym session
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  zones: []
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits:
+    - {label: Gym, goal: "180 min/week, sessions 30-60 minutes"}
+  calendar_events:
+    # Falls inside the work hours the user is about to state — the
+    # "conflict you create by learning something new" case (instruction.md's
+    # second placement paragraph, A4.3's find_zone_collisions).
+    - {summary: Gym, start: "2026-08-25T10:00:00", end: "2026-08-25T10:45:00", habit_id: "h1"}
+when:
+  user_says: >
+    I just started a new job — I'll be working 9 to 5, Monday through
+    Friday, starting this week.
+expect:
+  tool_calls:
+    - {name: create_zone, min_count: 1}
+  invariants:
+    - no_silent_edit_of_pre_existing_habit_session
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id

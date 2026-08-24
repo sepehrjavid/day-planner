@@ -395,6 +395,40 @@ def reply_reports_readonly_calendar(
     )
 
 
+def no_silent_edit_of_pre_existing_habit_session(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """instruction.md's "conflict you create by learning something new"
+    paragraph (A4.3, find_zone_collisions): discovering that a new or
+    changed zone collides with a session already on the calendar is never
+    license to move or delete it on the spot — "ask the user how to
+    resolve it ... rather than leaving the collision in place unmentioned
+    or silently moving anything without asking first." Checks that no
+    update_calendar_event or delete_calendar_event call in this trial
+    targets one of the scenario's own pre-existing, habit-tagged events
+    (given.calendar_events) — a single turn that only describes a new
+    constraint is never itself an explicit instruction to touch that
+    session."""
+    pre_existing_ids = {
+        event["id"]
+        for event in world.calendar_events
+        if "id" in event and _habit_id_of(event) is not None
+    }
+    if not pre_existing_ids:
+        return InvariantResult(True, "no pre-existing habit-tagged events in this scenario")
+    for call in tool_calls:
+        if call["name"] not in ("update_calendar_event", "delete_calendar_event"):
+            continue
+        touched = call["args"].get("event_id")
+        if touched in pre_existing_ids:
+            return InvariantResult(
+                False,
+                f"{call['name']} silently touched pre-existing event {touched!r} "
+                f"with no explicit user instruction to",
+            )
+    return InvariantResult(True)
+
+
 TIER1_INVARIANTS = {
     "no_session_overlaps_any_zone": no_session_overlaps_any_zone,
     "no_session_overlaps_sleep_or_cooldown": no_session_overlaps_sleep_or_cooldown,
@@ -407,6 +441,7 @@ TIER1_INVARIANTS = {
     "reply_reports_readonly_calendar": reply_reports_readonly_calendar,
     "no_session_overlaps_existing_events": no_session_overlaps_existing_events,
     "no_physical_session_after_8pm": no_physical_session_after_8pm,
+    "no_silent_edit_of_pre_existing_habit_session": no_silent_edit_of_pre_existing_habit_session,
 }
 
 

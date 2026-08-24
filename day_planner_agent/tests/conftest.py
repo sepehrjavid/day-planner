@@ -188,6 +188,15 @@ class ScenarioFixture:
     This is what lets a failure-mode scenario exercise "a backend call
     fails mid-conversation" distinctly from A3.2's zone_fetch_fails,
     which is about the preload path specifically.
+
+    create_zone/update_zone (A4.3) mutate self.zones the same way
+    create_habit/update_habit already mutate self.habits — needed so a
+    scenario whose user_says causes the model to call create_zone or
+    update_zone mid-conversation actually has that zone reflected in a
+    later list_zones or find_zone_collisions call within the same trial,
+    rather than the fixture silently staying on its `given.zones`
+    snapshot. Not needed before A4.3: no prior scenario relied on the
+    model's own zone edits taking effect within the same run.
     """
 
     def __init__(
@@ -277,6 +286,24 @@ class ScenarioFixture:
                 return h
         return None
 
+    async def create_zone(self, user_id, *, label, start_time, end_time, days_of_week):
+        zone = {
+            "zone_id": f"z-{len(self.zones) + 1}",
+            "label": label,
+            "start_time": start_time,
+            "end_time": end_time,
+            "days_of_week": days_of_week,
+        }
+        self.zones.append(zone)
+        return zone
+
+    async def update_zone(self, user_id, zone_id, **kwargs):
+        for z in self.zones:
+            if z["zone_id"] == zone_id:
+                z.update({k: v for k, v in kwargs.items() if v is not None})
+                return z
+        return None
+
     async def upsert_habit_session(self, user_id, **kwargs):
         self.habit_sessions.append(kwargs)
         return {"habit_session_id": f"hs-{len(self.habit_sessions)}"}
@@ -309,6 +336,8 @@ class ScenarioFixture:
         monkeypatch.setattr(domain_client, "list_habits", self.list_habits)
         monkeypatch.setattr(domain_client, "create_habit", self.create_habit)
         monkeypatch.setattr(domain_client, "update_habit", self.update_habit)
+        monkeypatch.setattr(domain_client, "create_zone", self.create_zone)
+        monkeypatch.setattr(domain_client, "update_zone", self.update_zone)
         monkeypatch.setattr(domain_client, "upsert_habit_session", self.upsert_habit_session)
         monkeypatch.setattr(
             domain_client, "set_habit_session_status", self.set_habit_session_status
