@@ -388,6 +388,8 @@ def test_repeatedly_bumped_slot_scores_lower():
     scored_without_history = score_candidates([candidate])
     assert scored_with_history[0].score < scored_without_history[0].score
     assert scored_with_history[0].repeat_bump_penalty > 0
+    assert scored_with_history[0].repeat_bump_reason == "Standup"
+    assert scored_without_history[0].repeat_bump_reason is None
 
 
 def test_a_single_bump_is_not_a_pattern():

@@ -49,6 +49,15 @@ class ScoredCandidate:
     day_load_minutes: float
     is_weekend: bool
     repeat_bump_penalty: float
+    # The bumped_by name that triggered the penalty, for a human-readable
+    # reason string (e.g. "repeatedly bumped by Standup") — informational
+    # only, never read back into the score itself. None whenever
+    # repeat_bump_penalty is 0. If more than one bumped_by independently
+    # cleared the threshold for the same slot, this is whichever was seen
+    # first (insertion order) — a real case, but rare enough that picking
+    # one deterministically over reporting a list was judged not worth
+    # the added shape complexity here (A4.2).
+    repeat_bump_reason: str | None = None
 
 
 def _slot_key(dt: datetime) -> tuple[str, str]:
@@ -62,13 +71,18 @@ def _slot_key(dt: datetime) -> tuple[str, str]:
 
 def _weak_slots(
     prior_review: Sequence[ReviewEntry], known_habit_labels: frozenset[str]
-) -> frozenset[tuple[str, str]]:
+) -> dict[tuple[str, str], str]:
     """Slots bumped _REPEAT_BUMP_THRESHOLD+ times by the same
     bumped_by — excluding "kept" entries (nothing to penalize), entries
     with no bumped_by at all (there's no repeat pattern to name), and any
     bumped_by that names one of the user's own tracked habits, which is
     the guardrails working as intended, not the "unrelated conflict"
-    instruction.md's repeat-bump rule is about."""
+    instruction.md's repeat-bump rule is about.
+
+    Maps each weak slot to the bumped_by that made it weak (first one
+    seen, in prior_review's own order, if more than one independently
+    qualifies) — see ScoredCandidate.repeat_bump_reason for why this is
+    a single name rather than a list."""
     counts: dict[tuple[tuple[str, str], str], int] = {}
     for entry in prior_review:
         if entry.outcome == "kept" or not entry.bumped_by:
@@ -77,7 +91,11 @@ def _weak_slots(
             continue
         key = (_slot_key(entry.planned_start), entry.bumped_by)
         counts[key] = counts.get(key, 0) + 1
-    return frozenset(slot for (slot, _bumped_by), n in counts.items() if n >= _REPEAT_BUMP_THRESHOLD)
+    weak: dict[tuple[str, str], str] = {}
+    for (slot, bumped_by), n in counts.items():
+        if n >= _REPEAT_BUMP_THRESHOLD and slot not in weak:
+            weak[slot] = bumped_by
+    return weak
 
 
 def score_candidates(
@@ -116,9 +134,8 @@ def score_candidates(
         day = iv.start.date()
         load = day_loads.get(day, 0.0)
         is_weekend = DAYS_OF_WEEK[iv.start.weekday()] in ("sat", "sun")
-        penalty = (
-            _REPEAT_BUMP_PENALTY_MINUTES if _slot_key(iv.start) in weak_slots else 0.0
-        )
+        bump_reason = weak_slots.get(_slot_key(iv.start))
+        penalty = _REPEAT_BUMP_PENALTY_MINUTES if bump_reason is not None else 0.0
 
         score = (
             -load * iv.duration_minutes / 60.0
@@ -132,6 +149,7 @@ def score_candidates(
                 day_load_minutes=load,
                 is_weekend=is_weekend,
                 repeat_bump_penalty=penalty,
+                repeat_bump_reason=bump_reason,
             )
         )
 

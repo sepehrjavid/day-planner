@@ -441,3 +441,124 @@ def test_thinking_budget_is_set_explicitly_not_defaulted():
     assert config is not None
     assert config.thinking_config is not None
     assert config.thinking_config.thinking_budget == 1024
+
+
+# ---------------------------------------------------------------------------
+# get_available_slots registration and the shadow-comparison callback (A4.2)
+# ---------------------------------------------------------------------------
+
+
+def test_get_available_slots_is_not_registered_as_a_model_tool():
+    """A same-day, controlled A3.1 comparison found double-digit-point
+    tier regressions from merely adding this tool to the model's tool
+    list, with instruction.md unchanged — see agent.py's
+    _log_schedule_shadow_comparison and scheduling_tool.py's own module
+    docstring for the full reasoning. The function itself is still
+    fully built and tested (test_scheduling_tool.py); shadow mode's
+    actual mechanism is the after_tool_callback below, which calls it
+    directly, never through the model."""
+    tool_names = {getattr(t, "__name__", None) for t in agent._llm_agent.tools}
+    assert "get_available_slots" not in tool_names
+    assert "get_available_slots" not in agent._build_instruction(FakeReadonlyContext({}))
+
+
+class FakeTool:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+async def test_shadow_comparison_callback_fires_for_add_calendar_event(
+    tool_context, monkeypatch
+):
+    calls = []
+
+    async def fake_log(ctx, user_id, habit_id, event):
+        calls.append((user_id, habit_id, event))
+
+    monkeypatch.setattr(agent, "log_shadow_comparison", fake_log)
+
+    result = await agent._log_schedule_shadow_comparison(
+        FakeTool("add_calendar_event"),
+        {"habit_id": "h1"},
+        tool_context,
+        {"status": "success", "event": {"event_id": "e1"}},
+    )
+
+    assert result is None
+    assert calls == [("user-1", "h1", {"event_id": "e1"})]
+
+
+async def _noop_log_shadow_comparison(*args, **kwargs) -> None:
+    return None
+
+
+async def test_shadow_comparison_callback_skips_non_calendar_tools(tool_context, monkeypatch):
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append(1)
+
+    monkeypatch.setattr(agent, "log_shadow_comparison", fake_log)
+
+    await agent._log_schedule_shadow_comparison(
+        FakeTool("list_habits"),
+        {"habit_id": "h1"},
+        tool_context,
+        {"status": "success"},
+    )
+
+    assert calls == []
+
+
+async def test_shadow_comparison_callback_skips_failed_calls(tool_context, monkeypatch):
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append(1)
+
+    monkeypatch.setattr(agent, "log_shadow_comparison", fake_log)
+
+    await agent._log_schedule_shadow_comparison(
+        FakeTool("add_calendar_event"),
+        {"habit_id": "h1"},
+        tool_context,
+        {"status": "error"},
+    )
+
+    assert calls == []
+
+
+async def test_shadow_comparison_callback_skips_plain_appointments(tool_context, monkeypatch):
+    """No habit_id means this wasn't a habit session — nothing to
+    shadow-compare against the engine, which only ranks habit
+    placements."""
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append(1)
+
+    monkeypatch.setattr(agent, "log_shadow_comparison", fake_log)
+
+    await agent._log_schedule_shadow_comparison(
+        FakeTool("add_calendar_event"),
+        {},
+        tool_context,
+        {"status": "success", "event": {"event_id": "e1"}},
+    )
+
+    assert calls == []
+
+
+async def test_shadow_comparison_callback_never_overrides_the_real_result(
+    tool_context, monkeypatch
+):
+    monkeypatch.setattr(agent, "log_shadow_comparison", _noop_log_shadow_comparison)
+
+    result = await agent._log_schedule_shadow_comparison(
+        FakeTool("update_calendar_event"),
+        {"habit_id": "h1"},
+        tool_context,
+        {"status": "success", "event": {"event_id": "e1"}},
+    )
+
+    assert result is None

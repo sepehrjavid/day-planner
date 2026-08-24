@@ -527,3 +527,67 @@ async def test_args_fingerprint_differs_for_different_arguments(caplog):
     record = _one_record(caplog)
     fingerprints = [c["args_fingerprint"] for c in record["tool_calls"]]
     assert fingerprints[0] != fingerprints[1]
+
+
+# ---------------------------------------------------------------------------
+# schedule_shadow_comparisons (A4.2)
+# ---------------------------------------------------------------------------
+
+
+def _schedule_shadow_comparisons_event(comparisons: list[dict]) -> dict:
+    return {"actions": {"state_delta": {"day_planner:schedule_shadow_comparisons": comparisons}}}
+
+
+async def test_schedule_shadow_comparisons_surfaces_from_state_delta(caplog):
+    comparisons = [
+        {
+            "habit_id": "h1",
+            "actual_start": "2026-08-03T06:00:00-04:00",
+            "engine_status": "success",
+            "zone_anchored": False,
+            "engine_candidate_count": 3,
+            "engine_top_candidate_start": "2026-08-03T06:00:00-04:00",
+            "engine_top_candidate_score": 12.5,
+            "agrees_with_top_candidate": True,
+        }
+    ]
+    events = [_schedule_shadow_comparisons_event(comparisons), _model_text_event("ok")]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="plan my gym")
+
+    record = _one_record(caplog)
+    assert record["schedule_shadow_comparisons"] == comparisons
+
+
+async def test_schedule_shadow_comparisons_empty_when_never_observed(caplog):
+    client, app = _agent_client([_model_text_event("ok")])
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    assert record["schedule_shadow_comparisons"] == []
+
+
+async def test_schedule_shadow_comparisons_second_call_replaces_not_extends(caplog):
+    """Unlike habit_session_outcomes, log_shadow_comparison (scheduling_
+    tool.py) writes the *whole cumulative list* into state on every
+    habit-tagged placement, not just its own new entry — so the second
+    event's state_delta already includes the first comparison. Extending
+    here the way habit_session_outcomes does would double-count it."""
+    first = {"habit_id": "h1", "actual_start": "t1", "engine_status": "success"}
+    second = {"habit_id": "h2", "actual_start": "t2", "engine_status": "success"}
+    events = [
+        _schedule_shadow_comparisons_event([first]),
+        _schedule_shadow_comparisons_event([first, second]),
+        _model_text_event("ok"),
+    ]
+    client, app = _agent_client(events)
+
+    with caplog.at_level("INFO", logger="day_planner.turn"):
+        await client.send_message(user_id="user-1", session_id="s1", message="hi")
+
+    record = _one_record(caplog)
+    assert record["schedule_shadow_comparisons"] == [first, second]

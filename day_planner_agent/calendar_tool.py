@@ -240,6 +240,42 @@ async def get_calendar_events(
     return result
 
 
+async def resolve_reference_timezone(tool_context: ToolContext, user_id: str) -> str | None:
+    """The IANA timezone to interpret zones/sleep-schedule wall-clock
+    times in — used by scheduling_tool.py's get_available_slots (A4.2).
+
+    Nothing in this codebase's data model carries a per-user timezone of
+    its own; zones and the sleep schedule store bare "HH:MM" strings (see
+    A6.3's zones.py docstring for that gap). The least surprising stand-in
+    is the timezone of the user's own primary calendar — the same
+    calendar add_calendar_event defaults to when calendar_summary is
+    omitted (see _candidate_calendars), so a habit session the engine
+    proposes and one the model places by hand land in the same frame of
+    reference.
+
+    Returns None if no connected calendar's timezone could be read at all
+    (nothing to resolve a reference from — the caller decides what that
+    means for its own response). NeedsAuth/BACKEND_ERROR from the
+    underlying calendar-list/token calls are not caught here; they
+    propagate to the caller like every other calendar_tool function.
+    """
+    calendars = await _cached_list_calendars(tool_context, user_id)
+    for candidate in _candidate_calendars(calendars["calendars"], None):
+        token = await backend_client.access_token(user_id, candidate["account_id"])
+        if token is None:
+            continue
+        try:
+            entry = await _cached_calendar_list_entry(
+                tool_context, candidate["account_id"], token, candidate["calendar_id"]
+            )
+        except HttpError:
+            continue
+        tz_name = entry.get("timeZone")
+        if tz_name:
+            return tz_name
+    return None
+
+
 async def add_calendar_event(
     tool_context: ToolContext,
     summary: str,

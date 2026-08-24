@@ -33,6 +33,19 @@ single token to what the model sees — see habit_tools.py's
 _emit_habit_session_telemetry and turn_log_queries.sql for the queries
 this feeds.
 
+schedule_shadow_comparisons (A4.2) is the same channel again:
+day_planner_agent/scheduling_tool.py's log_shadow_comparison — invoked
+from agent.py's after_tool_callback whenever a real
+add_calendar_event/update_calendar_event places or moves a habit-tagged
+session — records what the scheduling engine (day_planner_agent/
+scheduling/, A4.1) would have suggested for that day and whether the
+model's real placement agrees, entirely in shadow mode: nothing in
+instruction.md tells the model to use the engine, and nothing here gates
+placement on it. This is the data A4.2's own acceptance criterion
+("disagreement rate is measured and reviewed") depends on existing at
+all — reviewing it is a separate, later step once enough of it has
+accumulated from real usage.
+
 retry_count itself comes straight off the tool's own return value (not
 state_delta, unlike preload_ok/habit_session_outcomes above) — set by
 calendar_tool.py's add_calendar_event only when a transient failure had
@@ -89,6 +102,11 @@ _PRELOAD_OK_STATE_KEY = "day_planner:preload_ok"
 # data reaches here without adding a single token to what
 # review_habit_week returns to the model.
 _HABIT_SESSION_OUTCOMES_STATE_KEY = "day_planner:habit_session_outcomes"
+
+# Shadow-mode engine-vs-model comparisons written by
+# day_planner_agent/scheduling_tool.py's log_shadow_comparison (A4.2) —
+# same state_delta channel, same reason: zero-token telemetry.
+_SCHEDULE_SHADOW_COMPARISONS_STATE_KEY = "day_planner:schedule_shadow_comparisons"
 
 # Tools whose call arguments must never be logged even in diagnostic mode.
 # Response payloads are never logged for any tool (see module docstring),
@@ -149,6 +167,7 @@ class TurnRecorder:
     cached_tokens: int = field(default=0, init=False)
     preload_ok: bool | None = field(default=None, init=False)
     habit_session_outcomes: list = field(default_factory=list, init=False)
+    schedule_shadow_comparisons: list = field(default_factory=list, init=False)
 
     def observe(self, event: dict) -> None:
         """Call once per event yielded by async_stream_query, in order."""
@@ -179,6 +198,17 @@ class TurnRecorder:
             # unlike preload_ok, which is only ever set once per session.
             self.habit_session_outcomes.extend(
                 state_delta[_HABIT_SESSION_OUTCOMES_STATE_KEY] or []
+            )
+        if _SCHEDULE_SHADOW_COMPARISONS_STATE_KEY in state_delta:
+            # log_shadow_comparison itself appends to the full list on
+            # every habit-tagged placement in the turn (see its own
+            # docstring), so each event's state_delta already carries
+            # the whole list-so-far, not just its own new entry —
+            # replacing (not extending) this accumulator each time is
+            # what keeps a turn with several placements from
+            # over-counting the earlier ones.
+            self.schedule_shadow_comparisons = (
+                state_delta[_SCHEDULE_SHADOW_COMPARISONS_STATE_KEY] or []
             )
 
     def _start_call(self, call: dict) -> None:
@@ -259,6 +289,7 @@ class TurnRecorder:
             "wall_ms": round(wall_ms, 1),
             "loop_detected": loop_detected,
             "habit_session_outcomes": self.habit_session_outcomes,
+            "schedule_shadow_comparisons": self.schedule_shadow_comparisons,
         }
         # WARNING severity for a detected loop makes it visually distinct
         # in Cloud Logging on top of the boolean field itself — the
