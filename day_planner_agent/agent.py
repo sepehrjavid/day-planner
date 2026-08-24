@@ -5,7 +5,7 @@ from pathlib import Path
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
-from google.adk.tools import load_memory
+from google.adk.tools import ToolContext, load_memory
 from google.genai import types as genai_types
 from vertexai.agent_engines import AdkApp
 
@@ -23,6 +23,7 @@ from .habit_tools import (
     update_habit,
 )
 from .memory_tools import get_profile, save_memory, update_profile
+from .scheduling_tool import log_shadow_comparison
 from .zone_tools import (
     PRELOADED_ZONES_STATE_KEY,
     create_zone,
@@ -166,6 +167,58 @@ async def _preload_zones(callback_context: CallbackContext) -> None:
     _refresh_preload_ok(callback_context)
 
 
+# Which tool calls a habit session can actually come from — see
+# _log_schedule_shadow_comparison below.
+_SHADOW_COMPARISON_TOOL_NAMES = frozenset({"add_calendar_event", "update_calendar_event"})
+
+
+async def _log_schedule_shadow_comparison(
+    tool, args: dict, tool_context: ToolContext, tool_response: dict
+) -> None:
+    """after_tool_callback (A4.2, shadow mode): after a real
+    add_calendar_event/update_calendar_event call successfully places or
+    moves a habit-tagged session, silently compares it against what
+    scheduling_tool.py's engine would have suggested for that day.
+
+    This is shadow mode's *entire* mechanism — scheduling_tool.py's
+    get_available_slots is deliberately not in this Agent's tools=[...]
+    list below. It's fully built and unit-tested, but a same-day,
+    controlled before/after A3.1 run found double-digit-point tier
+    regressions from merely adding an unexplained, uninstructed tool to
+    the model's tool list (17+ schemas and a 6,270-token instruction
+    already; an unfamiliar capability the model was never told how to
+    use is a known way to degrade its reliability at using the *other*
+    tools). This callback gets the same disagreement data without that
+    risk: it calls scheduling_tool.py's engine directly, out-of-band,
+    never through the model, so there is no tool-list change for the
+    model to react to at all. Registering the tool for the model to call
+    itself is deferred to A4.3, alongside the instruction changes that
+    would actually explain how to use it — a single attributable change
+    at that point, not conflated with shadow-mode data collection.
+
+    Lives here rather than inside calendar_tool.py's own functions:
+    scheduling_tool.py already imports calendar_tool for its calendar/
+    timezone helpers, so calendar_tool calling back into
+    scheduling_tool would be an import cycle. An after_tool_callback
+    observes every tool call from outside both modules instead.
+
+    Always returns None — ADK only replaces a tool's real result when a
+    callback returns something other than None, and this must never
+    affect the model's actual tool response, only observe it.
+    """
+    if tool.name not in _SHADOW_COMPARISON_TOOL_NAMES:
+        return None
+    if tool_response.get("status") != "success":
+        return None
+    habit_id = args.get("habit_id")
+    if not habit_id:
+        return None
+    await log_shadow_comparison(
+        tool_context, tool_context.session.user_id, habit_id, tool_response["event"]
+    )
+    return None
+
+
 def _build_instruction(ctx: ReadonlyContext) -> str:
     # A plain f-string here would bake in whatever date the process happened
     # to import this module on — Agent Engine keeps this Agent instance alive
@@ -266,6 +319,7 @@ _llm_agent = Agent(
     ),
     instruction=_build_instruction,
     before_agent_callback=[_preload_profile, _preload_zones],
+    after_tool_callback=_log_schedule_shadow_comparison,
     tools=[
         get_calendar_events,
         add_calendar_event,

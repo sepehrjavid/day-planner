@@ -2178,3 +2178,109 @@ async def test_delete_calendar_event_access_token_backend_failure(tool_context, 
 
     result = await calendar_tool.delete_calendar_event(tool_context, "e1", "me@gmail.com")
     assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# resolve_reference_timezone (A4.2) — scheduling_tool.py's own reference
+# for interpreting zone/sleep-schedule wall-clock times.
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_reference_timezone_uses_primary_calendar(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-work",
+                    "calendar_id": "me@work.com",
+                    "summary": "Work",
+                    "is_primary": False,
+                },
+                {
+                    "account_id": "acct-personal",
+                    "calendar_id": "me@gmail.com",
+                    "summary": "Personal",
+                    "is_primary": True,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return f"AT-{account_id}"
+
+    service = FakeCalendarService(
+        calendar_list_entries={
+            "me@gmail.com": {"accessRole": "owner", "timeZone": "America/New_York"},
+            "me@work.com": {"accessRole": "owner", "timeZone": "America/Los_Angeles"},
+        }
+    )
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    tz = await calendar_tool.resolve_reference_timezone(tool_context, "user-1")
+
+    assert tz == "America/New_York"
+    # Never even had to check the non-primary calendar.
+    assert service.calendarList().get_calls == [{"calendarId": "me@gmail.com"}]
+
+
+async def test_resolve_reference_timezone_falls_back_past_a_stale_account(
+    tool_context, monkeypatch
+):
+    async def list_calendars(user_id):
+        return {
+            "connected": True,
+            "needs_reauth": [],
+            "calendars": [
+                {
+                    "account_id": "acct-stale",
+                    "calendar_id": "gone@gmail.com",
+                    "summary": "Gone",
+                    "is_primary": True,
+                },
+                {
+                    "account_id": "acct-live",
+                    "calendar_id": "me@work.com",
+                    "summary": "Work",
+                    "is_primary": False,
+                },
+            ],
+        }
+
+    async def access_token(user_id, account_id):
+        return None if account_id == "acct-stale" else f"AT-{account_id}"
+
+    service = FakeCalendarService(
+        calendar_list_entries={"me@work.com": {"accessRole": "owner", "timeZone": "UTC"}}
+    )
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+    monkeypatch.setattr(backend_client, "access_token", access_token)
+    monkeypatch.setattr(calendar_tool, "build", lambda *a, **k: service)
+
+    tz = await calendar_tool.resolve_reference_timezone(tool_context, "user-1")
+
+    assert tz == "UTC"
+
+
+async def test_resolve_reference_timezone_none_when_nothing_connected(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        return {"connected": False, "needs_reauth": [], "calendars": []}
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    tz = await calendar_tool.resolve_reference_timezone(tool_context, "user-1")
+
+    assert tz is None
+
+
+async def test_resolve_reference_timezone_propagates_needs_auth(tool_context, monkeypatch):
+    async def list_calendars(user_id):
+        raise backend_client.NeedsAuth("https://connect.example/start", "not connected")
+
+    monkeypatch.setattr(backend_client, "list_calendars", list_calendars)
+
+    with pytest.raises(backend_client.NeedsAuth):
+        await calendar_tool.resolve_reference_timezone(tool_context, "user-1")

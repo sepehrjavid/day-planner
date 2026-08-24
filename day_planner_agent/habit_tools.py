@@ -274,6 +274,27 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
         the review could not be performed due to a backend failure, not
         that nothing was planned; don't report it as an empty period.
     """
+    result = await compute_habit_review(tool_context, date_from, date_to)
+    if result.get("status") == "success":
+        # A1.4: telemetry only, never touches what's returned to the model
+        # above — see _emit_habit_session_telemetry. Deliberately not
+        # inside compute_habit_review itself: scheduling_tool.py's shadow
+        # comparison (A4.2) calls that same function for a period the
+        # model never actually asked to review, and must not have that
+        # internal bookkeeping call overwrite the telemetry a genuine
+        # review_habit_week call already recorded for this turn.
+        _emit_habit_session_telemetry(tool_context, result["sessions"])
+    return result
+
+
+async def compute_habit_review(tool_context: ToolContext, date_from: str, date_to: str) -> dict:
+    """The actual review computation behind review_habit_week above, with
+    no telemetry side effect — shared with scheduling_tool.py's shadow-
+    mode comparison (A4.2), which needs the same prior-period outcome
+    data for its repeat-bump signal (see scheduling.score_candidates)
+    but must never be attributed to the model reviewing anything, since
+    it never asked to. See review_habit_week's own docstring for the
+    return shape; this returns exactly that, sessions and all."""
     user_id = tool_context.session.user_id
 
     try:
@@ -337,10 +358,6 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
         if outcome != "kept":
             entry["bumped_by"] = _find_conflict(events, session)
         results.append(entry)
-
-    # A1.4: telemetry only, never touches what's returned to the model
-    # above — see _emit_habit_session_telemetry.
-    _emit_habit_session_telemetry(tool_context, results)
 
     return {"status": "success", "sessions": results}
 

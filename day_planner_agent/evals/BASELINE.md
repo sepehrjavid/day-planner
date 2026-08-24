@@ -490,3 +490,61 @@ zero-tool-call rate is new information this update surfaced by testing a
 wider variety of prompts (allowed_zones overrides, cool-down overrides,
 narrower session ranges, multi-habit asks) than the original 9
 zone/sleep-focused scenarios exercised.
+
+## A4.2 — a same-day, controlled comparison caught a real design mistake
+
+While verifying A4.2's own acceptance criterion ("A3.1 pass rates are
+unchanged versus baseline"), the first implementation registered the new
+`get_available_slots` tool (`day_planner_agent/scheduling_tool.py`) in
+`agent.py`'s `Agent(...).tools=[...]` list — "shadow mode" as originally
+read meant the model *could* call it, just that instruction.md wouldn't
+tell it to and nothing would gate placement on it. Running the full
+suite against that design, then again against the same day's code with
+just that one change reverted (`git stash` / `git stash pop`, no other
+change), gave:
+
+| | constraint tier | decision tier |
+|---|---|---|
+| tool registered (initial design) | 80.0% | 66.7% |
+| tool not registered (control, same day/model) | 89.3% | 80.0% |
+
+Both entries are in `history.jsonl`, dated 2026-08-23 — commit_sha
+`870191c...` on both rows because neither run was against a committed
+state (the working tree carried the uncommitted change under test each
+time); read the two rows together as this comparison, not as two
+independent baseline points.
+
+A single run per condition isn't enough to rule out ordinary
+run-to-run variance on its own — 40 scenarios × 3 repeats split across
+two tiers is a few dozen trials per tier, and a double-digit-point swing
+is a plausible amount of noise at that sample size on its own. What made
+this worth treating seriously rather than shrugging off: the drop was
+consistent in direction across *both* tiers, and a genuinely plausible
+mechanism exists — an unexplained, uninstructed tool sitting in an
+already-large tool list (17+ schemas, a 6,270-token instruction) is a
+known way to degrade a model's reliability at using its *other* tools,
+and the dominant failure mode in both runs' failing trials was "the
+model placed zero events at all," a blunt kind of failure consistent
+with that theory.
+
+**Resolution**: `get_available_slots` is not registered as a model-
+callable tool. It's fully built and unit-tested
+(`tests/test_scheduling_tool.py`), and shadow mode's actual data
+collection — comparing the engine's candidates against what the model
+really placed — happens entirely out-of-band via an `after_tool_callback`
+(`agent._log_schedule_shadow_comparison`) that calls the engine directly
+whenever `add_calendar_event`/`update_calendar_event` places a
+habit-tagged session. Nothing about that mechanism touches the model's
+tool list or instruction.md, so it carries none of the risk the
+controlled comparison found. Exposing the tool to the model is deferred
+to A4.3, alongside the instruction changes that would actually explain
+how to use it — at that point it's one attributable change, not
+conflated with shadow-mode telemetry.
+
+No fresh eval run was recorded against this final (tool-not-registered)
+design specifically — by construction it makes no change to the tool
+list or instruction.md versus the control row above, so that row is
+already representative of what this design should produce. A future
+task depending on a confirmed number for this exact commit should run
+the suite once against it rather than assume the control row still
+applies verbatim.
