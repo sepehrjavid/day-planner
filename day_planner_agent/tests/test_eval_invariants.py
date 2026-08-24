@@ -738,3 +738,68 @@ def test_review_habit_week_precedes_replan_not_applicable_with_no_prior_sessions
     tool_calls = [_call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1")]
     result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
     assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# no_silent_edit_of_pre_existing_habit_session (A4.3, find_zone_collisions)
+# ---------------------------------------------------------------------------
+
+
+def _event_with_id(event_id, summary, start, end, habit_id=None):
+    item = _event(summary, start, end, habit_id=habit_id)
+    item["id"] = event_id
+    return item
+
+
+def test_no_silent_edit_passes_trivially_with_no_pre_existing_habit_sessions():
+    scenario = _world(today="2026-08-24")
+    tool_calls = [_call("create_zone", label="Work")]
+    result = inv.no_silent_edit_of_pre_existing_habit_session(scenario, [], tool_calls)
+    assert result.passed is True
+
+
+def test_no_silent_edit_passes_when_the_session_is_left_alone():
+    pre_existing = _event_with_id(
+        "e1", "Gym", "2026-08-25T10:00:00", "2026-08-25T10:45:00", habit_id="h1"
+    )
+    scenario = _world(calendar_events=[pre_existing], today="2026-08-24")
+    tool_calls = [
+        _call("create_zone", label="Work", start_time="09:00", end_time="17:00"),
+        _call("find_zone_collisions", zone_label="Work"),
+    ]
+    result = inv.no_silent_edit_of_pre_existing_habit_session(scenario, [], tool_calls)
+    assert result.passed is True
+
+
+def test_no_silent_edit_fails_on_silent_update():
+    pre_existing = _event_with_id(
+        "e1", "Gym", "2026-08-25T10:00:00", "2026-08-25T10:45:00", habit_id="h1"
+    )
+    scenario = _world(calendar_events=[pre_existing], today="2026-08-24")
+    tool_calls = [
+        _call("create_zone", label="Work", start_time="09:00", end_time="17:00"),
+        _call("update_calendar_event", event_id="e1", start_time="2026-08-25T18:00:00"),
+    ]
+    result = inv.no_silent_edit_of_pre_existing_habit_session(scenario, [], tool_calls)
+    assert result.passed is False
+
+
+def test_no_silent_edit_fails_on_silent_delete():
+    pre_existing = _event_with_id(
+        "e1", "Gym", "2026-08-25T10:00:00", "2026-08-25T10:45:00", habit_id="h1"
+    )
+    scenario = _world(calendar_events=[pre_existing], today="2026-08-24")
+    tool_calls = [
+        _call("create_zone", label="Work", start_time="09:00", end_time="17:00"),
+        _call("delete_calendar_event", event_id="e1"),
+    ]
+    result = inv.no_silent_edit_of_pre_existing_habit_session(scenario, [], tool_calls)
+    assert result.passed is False
+
+
+def test_no_silent_edit_ignores_edits_to_plain_appointments():
+    plain = _event_with_id("e1", "Dentist", "2026-08-25T10:00:00", "2026-08-25T10:45:00")
+    scenario = _world(calendar_events=[plain], today="2026-08-24")
+    tool_calls = [_call("update_calendar_event", event_id="e1", start_time="2026-08-25T18:00:00")]
+    result = inv.no_silent_edit_of_pre_existing_habit_session(scenario, [], tool_calls)
+    assert result.passed is True

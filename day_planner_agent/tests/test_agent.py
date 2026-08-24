@@ -462,6 +462,16 @@ def test_get_available_slots_is_not_registered_as_a_model_tool():
     assert "get_available_slots" not in agent._build_instruction(FakeReadonlyContext({}))
 
 
+def test_find_zone_collisions_is_registered_with_instruction_text():
+    """Unlike get_available_slots, find_zone_collisions ships as a
+    registered tool in the same PR as the instruction text explaining it
+    (A4.3's add-then-cut rule) — the exact discipline the regression
+    above exists to enforce."""
+    tool_names = {getattr(t, "__name__", None) for t in agent._llm_agent.tools}
+    assert "find_zone_collisions" in tool_names
+    assert "find_zone_collisions" in agent._build_instruction(FakeReadonlyContext({}))
+
+
 class FakeTool:
     def __init__(self, name: str) -> None:
         self.name = name

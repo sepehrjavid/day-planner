@@ -1,12 +1,13 @@
-"""Coverage of scheduling_tool.py (A4.2) — get_available_slots and the
-shadow-mode comparison hook.
+"""Coverage of scheduling_tool.py — get_available_slots and the shadow-mode
+comparison hook (A4.2), and find_zone_collisions (A4.3).
 
 calendar_tool's own plumbing (Google Calendar API, timezone resolution)
 isn't re-tested here — test_calendar_tool.py already covers
 resolve_reference_timezone and get_calendar_events directly. What's
 tested here is scheduling_tool.py's own integration: adapting domain
 dicts into scheduling's dataclasses, zone-anchored detection, candidate
-slicing, and the shadow comparison's agreement check.
+slicing, the shadow comparison's agreement check, and find_zone_collisions'
+own habit-tagged/plain-appointment filtering.
 """
 
 from datetime import datetime
@@ -306,6 +307,109 @@ async def test_shadow_comparison_accumulates_across_calls(tool_context, monkeypa
     await scheduling_tool.log_shadow_comparison(tool_context, "user-1", "h1", event)
 
     assert len(tool_context.state[scheduling_tool.SHADOW_COMPARISONS_STATE_KEY]) == 2
+
+
+
+# ---------------------------------------------------------------------------
+# find_zone_collisions
+# ---------------------------------------------------------------------------
+
+
+async def test_find_zone_collisions_zone_not_found(tool_context, monkeypatch):
+    _install(monkeypatch, zones=[WORK_ZONE])
+    result = await scheduling_tool.find_zone_collisions(
+        tool_context, "Ghost Zone", "2026-08-03", "2026-08-10"
+    )
+    assert result["status"] == "not_found"
+
+
+async def test_find_zone_collisions_needs_auth_when_no_calendar_connected(
+    tool_context, monkeypatch
+):
+    _install(monkeypatch, zones=[WORK_ZONE], tz=None)
+    result = await scheduling_tool.find_zone_collisions(
+        tool_context, "Work", "2026-08-03", "2026-08-10"
+    )
+    assert result["status"] == "needs_auth"
+
+
+async def test_find_zone_collisions_propagates_calendar_events_failure_status(
+    tool_context, monkeypatch
+):
+    _install(monkeypatch, zones=[WORK_ZONE])
+
+    async def failing_get_calendar_events(tool_context, date_from, date_to):
+        return {"status": "error", "error_message": "boom"}
+
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", failing_get_calendar_events)
+
+    result = await scheduling_tool.find_zone_collisions(
+        tool_context, "Work", "2026-08-03", "2026-08-10"
+    )
+    assert result == {"status": "error", "error_message": "boom"}
+
+
+async def test_find_zone_collisions_finds_a_habit_tagged_session_inside_the_zone(
+    tool_context, monkeypatch
+):
+    # 2026-08-03 is a Monday, inside WORK_ZONE's 09:00-17:00.
+    colliding_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Gym",
+        "habit_id": "h1",
+        "start_time": "2026-08-03T10:00:00-04:00",
+        "end_time": "2026-08-03T10:45:00-04:00",
+    }
+    _install(monkeypatch, zones=[WORK_ZONE], events=[colliding_event])
+
+    result = await scheduling_tool.find_zone_collisions(
+        tool_context, "Work", "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == [colliding_event]
+
+
+async def test_find_zone_collisions_ignores_plain_appointments(tool_context, monkeypatch):
+    # Same window as the zone, but no habit_id — not what this check is for.
+    plain_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Dentist",
+        "start_time": "2026-08-03T10:00:00-04:00",
+        "end_time": "2026-08-03T10:45:00-04:00",
+    }
+    _install(monkeypatch, zones=[WORK_ZONE], events=[plain_event])
+
+    result = await scheduling_tool.find_zone_collisions(
+        tool_context, "Work", "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == []
+
+
+async def test_find_zone_collisions_ignores_sessions_outside_the_zone_window(
+    tool_context, monkeypatch
+):
+    # Before WORK_ZONE opens (09:00) — habit-tagged, but no collision.
+    early_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Gym",
+        "habit_id": "h1",
+        "start_time": "2026-08-03T07:00:00-04:00",
+        "end_time": "2026-08-03T07:45:00-04:00",
+    }
+    _install(monkeypatch, zones=[WORK_ZONE], events=[early_event])
+
+    result = await scheduling_tool.find_zone_collisions(
+        tool_context, "Work", "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == []
 
 
 async def test_shadow_comparison_never_raises_on_backend_failure(tool_context, monkeypatch):
