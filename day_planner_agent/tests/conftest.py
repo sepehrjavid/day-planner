@@ -161,6 +161,89 @@ class FakeCalendarService:
         return list(self._events.inserted)
 
 
+class _FakeProfileRecord:
+    """Matches the shape memory_tools.get_profile reads off whatever
+    service.retrieve_profiles(...) returns: .schema_id and .profile."""
+
+    def __init__(self, profile: dict) -> None:
+        self.schema_id = "day-planner-profile"
+        self.profile = profile
+
+
+class _FakeMemoryService:
+    """Stands in for the VertexAiMemoryBankService memory_tools.py's
+    _memory_service() looks for — real code gates on
+    hasattr(service, "_agent_engine_id"), which InMemoryRunner's own
+    default memory service doesn't have, so every get_profile/
+    update_profile/save_memory call errored with "Memory Bank is not
+    configured" in every eval trial until this fixture existed (A4.3
+    follow-up investigation, see evals/BASELINE.md). _project/_location/
+    _agent_engine_id are read by update_profile/save_memory to construct
+    a (also faked, see _FakeVertexaiModule below) write client; values
+    here are arbitrary, never used to reach a real service."""
+
+    def __init__(self, profile: dict) -> None:
+        self._project = "test-proj"
+        self._location = "us-central1"
+        self._agent_engine_id = "fake-engine-id"
+        self._profile = profile
+
+    async def retrieve_profiles(self, *, app_name, user_id):
+        if not self._profile:
+            return []
+        return [_FakeProfileRecord(dict(self._profile))]
+
+
+class _FakeMemoryOperation:
+    """Matches the .error attribute memory_tools._write_with_retry checks
+    on whatever agent_engines.memories.generate/create returns."""
+
+    error = None
+
+
+class _FakeAgentEngineMemories:
+    async def generate(self, **kwargs):
+        return _FakeMemoryOperation()
+
+    async def create(self, **kwargs):
+        return _FakeMemoryOperation()
+
+
+class _FakeVertexaiAio:
+    def __init__(self) -> None:
+        self.agent_engines = type("_", (), {"memories": _FakeAgentEngineMemories()})()
+
+
+class _FakeVertexaiClient:
+    def __init__(self, project=None, location=None) -> None:
+        self.aio = _FakeVertexaiAio()
+
+
+class _FakePermissiveConstruct:
+    """Accepts and discards any kwargs — stands in for
+    vertexai.types.GenerateMemoriesRequestDirectContentsSource(Event) in
+    update_profile's write path. The fake generate() below never
+    inspects direct_contents_source's contents, so there's nothing to
+    reproduce here beyond "doesn't raise."""
+
+    def __init__(self, **kwargs) -> None:
+        pass
+
+
+class _FakeVertexaiTypes:
+    GenerateMemoriesRequestDirectContentsSource = _FakePermissiveConstruct
+    GenerateMemoriesRequestDirectContentsSourceEvent = _FakePermissiveConstruct
+
+
+class _FakeVertexaiModule:
+    """Replaces memory_tools' own `vertexai` import wholesale — only
+    .Client(...) and .types.* are ever used by update_profile/
+    save_memory, and never with real credentials in a test/eval run."""
+
+    Client = _FakeVertexaiClient
+    types = _FakeVertexaiTypes()
+
+
 class ScenarioFixture:
     """Builds the fake backend_client/calendar_tool state one eval
     scenario's `given` block describes, and installs it via monkeypatch —
@@ -197,6 +280,19 @@ class ScenarioFixture:
     rather than the fixture silently staying on its `given.zones`
     snapshot. Not needed before A4.3: no prior scenario relied on the
     model's own zone edits taking effect within the same run.
+
+    get_profile/update_profile/save_memory (memory_tools.py) are faked
+    via _memory_service/vertexai below, not a method on this class the
+    way zones/habits are — a follow-up to A4.3's paragraph-13 work found
+    every eval trial's get_profile call had silently been returning
+    "Memory Bank is not configured" (InMemoryRunner's default memory
+    service lacks the `_agent_engine_id` attribute memory_tools.py's own
+    `_memory_service()` checks for), and any scenario whose utterance
+    triggered update_profile mid-conversation got a hard, visible error.
+    load_memory (ADK's own built-in tool) needed no fix — it goes through
+    ToolContext.search_memory/InMemoryMemoryService instead, which
+    InMemoryRunner already backs with a working, empty-by-default
+    implementation.
     """
 
     def __init__(
@@ -206,6 +302,7 @@ class ScenarioFixture:
         sleep_schedule: dict | None = None,
         habits: list[dict] | None = None,
         calendar_events: list[dict] | None = None,
+        profile: dict | None = None,
         zones_fetch_fails: bool = False,
         habits_fetch_fails: bool = False,
         needs_auth: bool = False,
@@ -219,6 +316,7 @@ class ScenarioFixture:
         self.zones_fetch_fails = zones_fetch_fails
         self.habits_fetch_fails = habits_fetch_fails
         self.needs_auth = needs_auth
+        self._memory_service = _FakeMemoryService(dict(profile or {}))
 
     # -- backend_client fakes --------------------------------------------
 
@@ -327,7 +425,7 @@ class ScenarioFixture:
         # audienced to day_planner_backend_app's /agent/*) are two
         # separate clients now — see backend_client.py's own module
         # docstring for why they must never be confused.
-        from day_planner_agent import backend_client, calendar_tool, domain_client
+        from day_planner_agent import backend_client, calendar_tool, domain_client, memory_tools
 
         monkeypatch.setattr(backend_client, "list_calendars", self.list_calendars)
         monkeypatch.setattr(backend_client, "access_token", self.access_token)
@@ -344,6 +442,10 @@ class ScenarioFixture:
         )
         monkeypatch.setattr(domain_client, "list_habit_sessions", self.list_habit_sessions)
         monkeypatch.setattr(calendar_tool, "build", self.build)
+        monkeypatch.setattr(
+            memory_tools, "_memory_service", lambda tool_context: self._memory_service
+        )
+        monkeypatch.setattr(memory_tools, "vertexai", _FakeVertexaiModule())
 
 
 class FakeSession:

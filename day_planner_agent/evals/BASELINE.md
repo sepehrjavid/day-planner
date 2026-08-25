@@ -658,3 +658,94 @@ share of the ~35 are the same kind of under-specified fixture rather
 than a genuine model miss, this suite has been under-reporting its true
 pass rate throughout, in both directions of every comparison in this
 file.
+
+---
+
+## Follow-up investigation — the zero-call rate has a real, mechanical cause (Category C), and a separate, real behavioral one (Category A)
+
+Reading full event traces (not just pass/fail) for every zero-`add_calendar_event`-call
+trial across the full 41-scenario corpus (repeat=3, 36 scenarios actually
+expect the call — 108 trials) found the "missing end time" hypothesis
+above was real but a minor contributor, not the dominant mechanism.
+19/108 trials (17.6%) had zero calls. Three categories, by reading what
+the model actually did in each:
+
+**Category C — a real, mechanical, always-on infrastructure gap.**
+`memory_tools.py`'s `get_profile`/`update_profile`/`save_memory` all gate
+on `_memory_service(tool_context)` returning something with an
+`_agent_engine_id` attribute — the marker of a real
+`VertexAiMemoryBankService`. `ScenarioFixture` (`tests/conftest.py`)
+never faked this; `InMemoryRunner`'s own default memory service doesn't
+have that attribute, so **every single eval trial in this project's
+history has run with `get_profile` silently returning "Memory Bank is
+not configured"** (visible as "Profile preload returned non-success
+status: error" on every trial, present in every eval run's output
+throughout this project, never previously flagged as a problem because
+most scenarios don't depend on profile-derived preferences). Any
+scenario whose utterance triggers `update_profile` mid-conversation hit
+a *visible*, hard error the model then had to work around.
+
+**Fix**: `ScenarioFixture` now fakes `memory_tools._memory_service` (a
+service object with the right shape) and `memory_tools.vertexai` (a
+permissive fake client so the fire-and-forget background write never
+raises), the same "patch the dependency one level inside the tool
+function's own body" technique `create_zone`/`update_zone` already used
+— patching `memory_tools.get_profile` directly wouldn't work, since
+`agent.py`'s `tools=[...]` list holds a frozen reference to that
+function object captured at import time, unaffected by reassigning the
+module attribute afterward.
+
+**Re-baseline after the fix** (day_planner_agent/evals/scenarios,
+repeat=3, commit `36f9909` — the fix was uncommitted at measurement
+time, see the caveat this file already carries about `commit_sha`
+reflecting HEAD, not necessarily what was tested):
+
+| | constraint tier | decision tier |
+|---|---|---|
+| before (PR A, degraded) | 92.0% | 66.7% |
+| before (PR B, degraded) | 85.3% | 70.8% |
+| **after Category C fix** | **92.0%** | **77.1%** |
+
+Decision tier moved meaningfully; constraint tier didn't move at all in
+this sample. **Every full-suite and targeted number recorded earlier in
+this file — the A4.2 finding, A4.3's PR A and PR B verification, the
+late_night_boundary_pressure work — was measured under this degraded
+condition.** None of those conclusions relied on profile-preference
+behavior specifically, so they stand, but the raw pass-rate numbers
+themselves are a floor, not the true rate, and should not be compared
+directly against any future post-fix number without this caveat.
+
+**Category A — the dominant pattern, re-checked and confirmed real.**
+The model calls the right lookup tools, reasons correctly through zones/
+sleep/day-load, states a specific, compliant plan in prose — then asks
+*"Would you like me to add these?"* / *"Does this sound good?"* instead
+of calling `add_calendar_event`, contradicting paragraph 13 ("your job is
+to actually place the sessions... summarize... after"). The hypothesis
+this might be downstream of Category C's profile-failure text (a milder
+warning than the zone/sleep one, but still "something failed, go
+re-check") was tested directly, not assumed: re-running the same
+trace-capture investigation after the fix found 11/108 zero-call trials
+(down from 19/108 — a real, substantial drop) — but **the proportion
+that are Category A held**: roughly 8/11 (~73%) post-fix vs. roughly
+12/19 (~63%) pre-fix. Per the test this investigation was designed
+around — if the rate collapsed, there was nothing to fix; since it
+held — **Category A is a genuine, separate instruction-following gap**,
+only partly (if at all) explained by Category C.
+
+**Category B — skip `list_habits` (or every tool) entirely, ask for
+info already on file.** Also held proportionally (roughly 3/11 post-fix
+vs. roughly 5/19 pre-fix). The clearest evidence this is non-deterministic
+model behavior rather than a fixture gap: the identical scenario
+("still avoids work hours and sleep when the week already has conflicts")
+produced a full, correct, tool-backed plan in one trial and a bare
+"how many minutes per week do you aim for?" with zero tool calls in
+another, word-for-word the same clarifying-question shape both before
+and after the Category C fix.
+
+**Not acted on yet, by design**: neither instruction.md nor any
+invariant was changed as part of this investigation — see the spawned
+follow-up task. Category A is now confirmed real and worth fixing
+directly (paragraph 13 could be more explicit that placing precedes
+explaining, not the reverse); Category B is harder to address cleanly
+and probably worth monitoring rather than chasing. Both decisions are
+left to a future task, not decided here.
