@@ -627,3 +627,34 @@ is not sufficient on its own to confirm a specific mechanism — reading
 what the model actually did in the failing trials, not just the
 aggregate rate, is what separated a real design flaw (A4.2) from ordinary
 sampling noise plus one legitimate fixture ambiguity (this one).
+
+**PR B's full-suite reading and why it's not gated on**: removing the
+now-superseded manual-scan prose (the subtractive half of this same
+rule, see instruction.md's paragraph 17) showed constraint tier at
+85.3% on the same full suite — down from PR A's 92.0%. The failures
+were scattered across scenarios with no relationship to paragraph 17 at
+all (weekend-only zone avoidance, session-length sizing, no-zone/no-
+sleep placement, heavy-day-load sizing — none touch create_zone,
+update_zone, or find_zone_collisions), which is the wrong shape for a
+regression caused by this specific cut. At a ~12% background zero-call
+rate (see above), 15 vs. 20 failures out of 123 trials is roughly 1.4
+standard errors apart — not distinguishable from noise at this sample
+size, and re-running the full suite again would just produce another
+number in the same band. What actually verifies a cut is repeat=15+ on
+the scenario it affects, not the full-suite aggregate at repeat=3:
+`new_zone_collides_with_existing_session` held at 100% (15/15). **Going
+forward in A4.3, each cut is gated on its own targeted scenarios; the
+full-suite run is kept for trend-watching and cross-rule interaction
+effects, not as a per-PR pass/fail signal** — the aggregate is too noisy
+at repeat=3 to serve as one, and treating it as a gate would make every
+cut in this task look ambiguous regardless of whether it actually is.
+
+The zero-`add_calendar_event`-call failure rate itself (~35 traces
+across the PR A and PR B full-suite runs combined) is tracked as its own
+follow-up, separate from A4.3 — see the spawned investigation task. PR
+A's trace read already found one instance was a legitimate clarifying
+question about a missing end time, not a real failure; if a meaningful
+share of the ~35 are the same kind of under-specified fixture rather
+than a genuine model miss, this suite has been under-reporting its true
+pass rate throughout, in both directions of every comparison in this
+file.
