@@ -24,11 +24,14 @@ never before or after.
 tool and its usage text to ship together (the exact gap that caused the
 regression above), so this one is registered in agent.py's tools=[...]
 list *and* instruction.md's paragraph 17 explains when to call it, in the
-same PR — see that paragraph for exactly what it replaces and what still
-needs the old prose. The old mechanical-detection prose for the zone case
-stays in place alongside it for now; a follow-up PR removes it once the
-tool is confirmed to hold the numbers (the "additive, then subtractive"
-pattern this task's roadmap entry calls for).
+same PR ("PR A" — additive, see evals/BASELINE.md's "A4.3" section for
+the verification that PR did). A follow-up "PR B" removed the old
+mechanical-scan prose for the zone case specifically once those numbers
+held — see paragraph 17's current text for exactly what's left: it still
+directs a manual get_calendar_events scan for the update_profile/
+set_sleep_schedule cases, which this tool doesn't cover, and the
+"ask the user how to resolve it" clause was kept verbatim across both
+PRs since it sits in the same sentence flow as the part that changed.
 
 `_compute_candidates` is the single source of truth for both
 `get_available_slots` and the shadow comparison — one code path, so a
