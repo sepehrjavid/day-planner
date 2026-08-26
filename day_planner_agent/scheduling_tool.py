@@ -48,7 +48,7 @@ timezone field to do better with yet (see A6.3's zones.py docstring).
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from google.adk.tools import ToolContext
@@ -99,21 +99,64 @@ def _adapt_sleep_schedule(raw: dict | None) -> scheduling.SleepSchedule | None:
     )
 
 
-def _adapt_busy_events(events: list[dict]) -> list[scheduling.Interval]:
-    """Timed events only — an all-day event's "date"-only start_time/
-    end_time (see calendar_tool.py's _trim_google_event) has no
-    wall-clock time to compare against, so it's not a scheduling
-    constraint here the way a real meeting is."""
+def _adapt_busy_events(events: list[dict], *, tz: ZoneInfo) -> list[scheduling.Interval]:
+    """Every event that blocks time, as an Interval in the reference tz.
+
+    Two shapes calendar_tool.py's _trim_google_event can produce for
+    start_time/end_time, both handled here rather than dropped:
+
+    - A "date"-only string ("2026-08-29", no "T") for an all-day event —
+      Google Calendar has no dateTime field at all for these, only date.
+      Treated as a whole-day block from midnight to midnight in the
+      reference tz (the end date is exclusive, matching every other
+      half-open interval in this codebase), not skipped: a real all-day
+      "Vacation" or "Conference" is exactly the kind of thing a habit
+      session must never get placed on top of. Originally (wrongly)
+      excluded here as "not a scheduling constraint" (A4.2) — found via a
+      full-suite run's genuine no_session_overlaps_existing_events
+      violation once this tool started actually driving placement
+      instead of only shadow-comparing.
+    - A full dateTime string for a timed event — offset-aware if it came
+      from a real Google Calendar response (the API always includes one),
+      naive if it's this project's own plain-local-wall-clock convention
+      (e.g. every eval fixture's calendar_events; see instruction.md's
+      "give start_time/end_time as plain local wall-clock time" rule for
+      add_calendar_event). A naive value is localized to `tz` — the same
+      reference timezone resolve_reference_timezone already resolves
+      zones/sleep-schedule wall-clock strings against — rather than
+      silently dropped, which is what every naive-format busy event got
+      before this fix: invisible to this engine's free-interval
+      computation, in every eval scenario, with nothing to reveal it
+      until a real placement actually landed on top of one.
+    """
     intervals: list[scheduling.Interval] = []
     for event in events:
         start, end = event.get("start_time"), event.get("end_time")
-        if not start or not end or "T" not in start or "T" not in end:
+        if not start or not end:
+            continue
+        if "T" not in start or "T" not in end:
+            try:
+                start_day, end_day = date.fromisoformat(start), date.fromisoformat(end)
+            except ValueError:
+                continue
+            if end_day < start_day:
+                continue
+            intervals.append(
+                scheduling.Interval(
+                    datetime.combine(start_day, time.min, tzinfo=tz),
+                    datetime.combine(end_day, time.min, tzinfo=tz),
+                )
+            )
             continue
         try:
             start_dt, end_dt = datetime.fromisoformat(start), datetime.fromisoformat(end)
         except ValueError:
             continue
-        if start_dt.tzinfo is None or end_dt.tzinfo is None or end_dt < start_dt:
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=tz)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=tz)
+        if end_dt < start_dt:
             continue
         intervals.append(scheduling.Interval(start_dt, end_dt))
     return intervals
@@ -287,7 +330,7 @@ async def _compute_candidates(
     resolved_min = max(1, resolved_min)
     resolved_max = max(resolved_min, resolved_max)
 
-    busy = _adapt_busy_events(calendar_state["events"])
+    busy = _adapt_busy_events(calendar_state["events"], tz=tz)
     free = scheduling.free_intervals(
         (start_date, end_date),
         tz=tz,
