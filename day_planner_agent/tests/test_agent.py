@@ -444,29 +444,40 @@ def test_thinking_budget_is_set_explicitly_not_defaulted():
 
 
 # ---------------------------------------------------------------------------
-# get_available_slots registration and the shadow-comparison callback (A4.2)
+# get_available_slots / find_zone_collisions registration (A4.2/A4.3) and
+# the shadow-comparison callback
 # ---------------------------------------------------------------------------
 
 
-def test_get_available_slots_is_not_registered_as_a_model_tool():
-    """A same-day, controlled A3.1 comparison found double-digit-point
-    tier regressions from merely adding this tool to the model's tool
-    list, with instruction.md unchanged — see agent.py's
-    _log_schedule_shadow_comparison and scheduling_tool.py's own module
-    docstring for the full reasoning. The function itself is still
-    fully built and tested (test_scheduling_tool.py); shadow mode's
-    actual mechanism is the after_tool_callback below, which calls it
-    directly, never through the model."""
+def test_get_available_slots_is_registered_with_instruction_text():
+    """Originally shadow-mode-only (A4.2) after a same-day, controlled
+    A3.1 comparison found double-digit-point tier regressions from
+    merely adding this tool to the model's tool list with instruction.md
+    unchanged. Registered for real in A4.3, but only once instruction.md
+    explains every field its response carries in one go (zone_anchored,
+    candidates/score/reasons/constraints_applied, remaining_target_minutes)
+    — see scheduling_tool.py's own module docstring for why this one
+    couldn't ship piecemeal the way find_zone_collisions did."""
     tool_names = {getattr(t, "__name__", None) for t in agent._llm_agent.tools}
-    assert "get_available_slots" not in tool_names
-    assert "get_available_slots" not in agent._build_instruction(FakeReadonlyContext({}))
+    assert "get_available_slots" in tool_names
+    instruction = agent._build_instruction(FakeReadonlyContext({}))
+    assert "get_available_slots" in instruction
+    for field in (
+        "zone_anchored",
+        "candidates",
+        "score",
+        "reasons",
+        "constraints_applied",
+        "remaining_target_minutes",
+    ):
+        assert field in instruction, f"{field!r} not mentioned in instruction.md"
 
 
 def test_find_zone_collisions_is_registered_with_instruction_text():
-    """Unlike get_available_slots, find_zone_collisions ships as a
-    registered tool in the same PR as the instruction text explaining it
-    (A4.3's add-then-cut rule) — the exact discipline the regression
-    above exists to enforce."""
+    """find_zone_collisions shipped as a registered tool in the same PR
+    as the instruction text explaining it (A4.3's add-then-cut rule) —
+    its response has one job, so unlike get_available_slots it didn't
+    need every field explained across a separate step."""
     tool_names = {getattr(t, "__name__", None) for t in agent._llm_agent.tools}
     assert "find_zone_collisions" in tool_names
     assert "find_zone_collisions" in agent._build_instruction(FakeReadonlyContext({}))

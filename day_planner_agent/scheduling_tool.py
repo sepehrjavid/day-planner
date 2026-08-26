@@ -1,37 +1,47 @@
 """Wires the scheduling engine (day_planner_agent/scheduling/, A4.1) into
-the agent — `get_available_slots` still in shadow mode, `find_zone_collisions`
-now a registered, model-callable tool (A4.3).
+the agent — both `get_available_slots` and `find_zone_collisions` are now
+registered, model-callable tools (A4.3).
 
-**get_available_slots stays in shadow mode**: fully built and unit-tested,
-but deliberately **not** registered in agent.py's `Agent(...).tools=[...]`
-list — the model never sees it and cannot call it. A same-day, controlled
-A3.1 run (with vs. without this module's tool registered) found
-double-digit-point tier regressions from merely adding an unexplained,
-uninstructed tool to the model's tool list; instruction.md was never
-going to be changed in that task either way, so the model would have had
-a capability it was never told how or when to use. See agent.py's
-`_log_schedule_shadow_comparison` for the full reasoning and for the
-actual shadow-mode mechanism: an `after_tool_callback` that calls this
-module's engine directly, out-of-band, whenever a real
+**get_available_slots's history**: originally built in shadow mode (A4.2)
+— fully unit-tested but deliberately **not** registered in agent.py's
+`Agent(...).tools=[...]` list, because a same-day, controlled A3.1 run
+(with vs. without this module's tool registered) found double-digit-point
+tier regressions from merely adding an unexplained, uninstructed tool to
+the model's tool list, with instruction.md never going to be changed in
+that task either way. Shadow mode's actual data-collection mechanism —
+`agent._log_schedule_shadow_comparison`, an `after_tool_callback` that
+calls this module's engine directly, out-of-band, whenever a real
 `add_calendar_event`/`update_calendar_event` call places or moves a
-habit-tagged session — never through the model, so there is no tool-list
-change for the model to react to at all. Registering it requires the
-same add-then-cut discipline `find_zone_collisions` follows below:
-instruction text explaining it ships in the same PR as the registration,
-never before or after.
+habit-tagged session — is unaffected by registration and still runs; it
+never depended on the model being unable to call this function itself.
 
-**find_zone_collisions is different**: A4.3's roadmap entry requires the
-tool and its usage text to ship together (the exact gap that caused the
-regression above), so this one is registered in agent.py's tools=[...]
-list *and* instruction.md's paragraph 17 explains when to call it, in the
-same PR ("PR A" — additive, see evals/BASELINE.md's "A4.3" section for
-the verification that PR did). A follow-up "PR B" removed the old
-mechanical-scan prose for the zone case specifically once those numbers
-held — see paragraph 17's current text for exactly what's left: it still
-directs a manual get_calendar_events scan for the update_profile/
-set_sleep_schedule cases, which this tool doesn't cover, and the
-"ask the user how to resolve it" clause was kept verbatim across both
-PRs since it sits in the same sentence flow as the part that changed.
+**Registered for real in A4.3, all five return fields explained at
+once**: `get_available_slots` returns `zone_anchored`, `candidates`
+(`score`, `reasons`, `constraints_applied` per candidate), and
+`remaining_target_minutes` in a single response — it cannot be
+registered for just one of them without handing the model the rest
+unexplained, which is the exact condition that caused the regression
+above. So this "PR A" explains the whole response in one instruction.md
+paragraph (inserted after the placement paragraph, all of that
+paragraph's own prose left in place — additive only) rather than
+piecemeal across several PRs. `find_zone_collisions` was different: its
+response has one job, so it shipped tool + text together in one PR
+(see evals/BASELINE.md's "A4.3" section). What follows for
+get_available_slots is five separate subtractive PRs, one per paragraph
+13 sub-rule it makes redundant (target accounting, zone-anchored
+expansion, repeat-bump penalty, day-load/weekend sizing, then free-
+interval derivation last, since only that one backs a tier-1 safety
+invariant) — each removing that sub-rule's now-superseded prose once its
+own targeted eval confirms the numbers hold, the same additive-then-
+subtractive pattern find_zone_collisions already went through.
+
+**A real engine bug was found and fixed along the way**: registering
+this tool surfaced a genuine defect in `_adapt_busy_events` below (it
+silently dropped naive-datetime and all-day busy events, so the engine
+had been treating the calendar as empty in every eval scenario since
+A4.1/A4.2) — see evals/BASELINE.md's "A real engine bug, found by
+finally registering get_available_slots" section for the full story.
+Fixed and merged separately, before this registration.
 
 `_compute_candidates` is the single source of truth for both
 `get_available_slots` and the shadow comparison — one code path, so a
@@ -390,11 +400,11 @@ async def get_available_slots(
     """Ranked candidate time slots for placing a habit's next session(s),
     computed by the scheduling engine rather than derived in prose.
 
-    **Not currently registered as a model-callable tool (A4.2) — see
-    this module's own docstring for why.** This function is exercised
-    directly by agent.py's shadow-comparison callback and by its own
-    tests, not by the model. A future task (A4.3) may register it
-    alongside instruction.md changes that explain how to use it.
+    **Registered as a model-callable tool (A4.3) — see this module's own
+    docstring for the shadow-mode history and why registration was
+    deferred until instruction.md could explain every field below.**
+    Also still exercised directly by agent.py's shadow-comparison
+    callback, unaffected by registration.
 
     Args:
         date_from: Start date, inclusive, "YYYY-MM-DD".
