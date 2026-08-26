@@ -133,6 +133,46 @@ async def test_success_returns_ranked_candidates(tool_context, monkeypatch):
         assert not (23 <= start.hour or start.hour < 7)
 
 
+async def test_naive_wall_clock_busy_event_is_respected(tool_context, monkeypatch):
+    # No explicit UTC offset — this project's own convention for locally
+    # authored event data (every eval fixture's calendar_events; see
+    # instruction.md's "plain local wall-clock time" rule) and, before
+    # the fix this test guards, silently invisible to this engine: a
+    # session could land right on top of it.
+    events = [{"summary": "Early call", "start_time": "2026-08-03T07:00:00", "end_time": "2026-08-03T08:00:00"}]
+    _install(monkeypatch, zones=[WORK_ZONE], sleep_schedule=SLEEP_SCHEDULE, events=events)
+
+    result = await scheduling_tool.get_available_slots(
+        tool_context, "2026-08-03", "2026-08-04", "h1", min_minutes=30, max_minutes=30
+    )
+
+    assert result["status"] == "success"
+    assert len(result["candidates"]) > 0
+    busy_start = datetime.fromisoformat("2026-08-03T07:00:00-04:00")
+    busy_end = datetime.fromisoformat("2026-08-03T08:00:00-04:00")
+    for c in result["candidates"]:
+        start = datetime.fromisoformat(c["start"])
+        end = datetime.fromisoformat(c["end"])
+        assert not (start < busy_end and busy_start < end), c
+
+
+async def test_all_day_event_blocks_the_whole_day(tool_context, monkeypatch):
+    # Google Calendar's all-day shape: "date", never "dateTime" — see
+    # calendar_tool.py's _trim_google_event. Must block the entire day,
+    # not be silently excluded as "no wall-clock time to compare against"
+    # (A4.2's original, wrong reasoning — a real all-day "Conference" or
+    # "Vacation" is exactly the kind of thing a session must not land on).
+    events = [{"summary": "Conference", "start_time": "2026-08-03", "end_time": "2026-08-04"}]
+    _install(monkeypatch, zones=[WORK_ZONE], sleep_schedule=SLEEP_SCHEDULE, events=events)
+
+    result = await scheduling_tool.get_available_slots(
+        tool_context, "2026-08-03", "2026-08-04", "h1"
+    )
+
+    assert result["status"] == "success"
+    assert result["candidates"] == []
+
+
 async def test_candidates_sorted_best_first(tool_context, monkeypatch):
     _install(monkeypatch)
     result = await scheduling_tool.get_available_slots(

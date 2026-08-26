@@ -493,6 +493,23 @@ zone/sleep-focused scenarios exercised.
 
 ## A4.2 — a same-day, controlled comparison caught a real design mistake
 
+**Correction added later (A4.3 follow-up)**: the "disagreement data"
+this section's shadow-mode mechanism was built to collect
+(`agent._log_schedule_shadow_comparison` comparing the engine's
+candidate against what the model actually placed) was computed against
+an engine that treated the existing calendar as empty in every case —
+`scheduling_tool.py`'s `_adapt_busy_events` silently dropped every busy
+event, both offset-naive timed ones (this project's own wall-clock
+convention, used throughout the eval fixtures) and all-day ones (Google
+Calendar's "date"-only shape, with no `dateTime` at all). Any
+"agreement" or "disagreement" rate drawn from that shadow data reflects
+an engine blind to real conflicts, not a meaningful signal about
+placement quality. See "A real engine bug, found by finally
+registering get_available_slots" below for the fix and how it was
+found — a genuine tier-1 safety-invariant violation (a placed session
+overlapping an existing event) in a full-suite run, once this tool
+started actually driving placement instead of only shadow-comparing.
+
 While verifying A4.2's own acceptance criterion ("A3.1 pass rates are
 unchanged versus baseline"), the first implementation registered the new
 `get_available_slots` tool (`day_planner_agent/scheduling_tool.py`) in
@@ -749,3 +766,72 @@ directly (paragraph 13 could be more explicit that placing precedes
 explaining, not the reverse); Category B is harder to address cleanly
 and probably worth monitoring rather than chasing. Both decisions are
 left to a future task, not decided here.
+
+---
+
+## A real engine bug, found by finally registering get_available_slots
+
+Verifying A4.3's paragraph-13 "PR A" (registering `get_available_slots`,
+all five response fields explained in one instruction.md paragraph, all
+of paragraph 13's existing prose left in place) surfaced a genuine,
+previously-undetected defect in already-merged A4.1/A4.2 code — not
+something this PR's own instruction text caused.
+
+**Symptom**: a full-suite run showed `no_session_overlaps_existing_events`
+(tier 1) failing 3/3 on `perturbations/weekend_filled_calendar_wins.yaml`
+— a placed Gym session at 07:15–08:15 genuinely overlapping a "Wedding"
+event at 08:00–22:00 the same day. A trace confirmed `get_available_slots`
+itself returned that exact 60-minute candidate; the model placed exactly
+what the tool recommended. Not model misuse — the tool's own output was
+wrong.
+
+**Root cause**: `scheduling_tool.py`'s `_adapt_busy_events` silently
+dropped busy events in two shapes, both real:
+
+1. A timed event whose `start_time`/`end_time` has no UTC offset —
+   `datetime.fromisoformat("2026-08-29T08:00:00")` parses with
+   `tzinfo=None`, and the old code explicitly skipped anything without
+   tzinfo. This is this project's own wall-clock convention (see
+   instruction.md's "give start_time/end_time as plain local wall-clock
+   time" rule for `add_calendar_event`), used by **every** eval
+   scenario's `calendar_events` fixture — so `get_available_slots` had
+   silently treated the existing calendar as empty in every eval
+   scenario since A4.1/A4.2, invisible until now because the tool never
+   drove real placement before (shadow mode only logged agreement/
+   disagreement — see the correction added to the A4.2 section above),
+   and because `test_scheduling_tool.py`'s own unit tests happen to use
+   offset-aware strings throughout, masking it there too.
+2. An all-day event — Google Calendar returns `start.date` ("2026-08-29",
+   no `dateTime` at all) for these, which `calendar_tool.py`'s
+   `_trim_google_event` passes through as a bare date string, caught by
+   the old code's `"T" not in start` check and dropped. This one is a
+   **live production risk**, not just a harness gap: a real all-day
+   "Conference" or "Vacation" is invisible to `get_available_slots`
+   exactly the same way, in production, right now, for any user. The
+   original A4.2 docstring called this deliberate ("not a scheduling
+   constraint here") — that reasoning was wrong.
+
+**Fix**: `_adapt_busy_events` now takes the already-resolved reference
+`tz` (the same one `resolve_reference_timezone` — A4.2 — resolves for
+zones/sleep-schedule wall-clock strings) and handles both shapes instead
+of dropping them: a naive timed value is localized to `tz` rather than
+skipped; a bare date is treated as a whole-day block from midnight to
+midnight in `tz` (end date exclusive, matching every other half-open
+interval in this codebase), not excluded. Two new unit tests
+(`test_naive_wall_clock_busy_event_is_respected`,
+`test_all_day_event_blocks_the_whole_day` in `test_scheduling_tool.py`)
+both fail against the pre-fix code and pass after — confirmed by
+temporarily reverting the fix and re-running them.
+
+**Verification**: re-running `weekend_filled_calendar_wins.yaml` at
+repeat=10 after the fix: `no_session_overlaps_existing_events` passes
+10/10 (was 0/3). The remaining 3/10 failures in that run are the
+already-documented zero-`add_calendar_event`-call background pattern
+(Category A/B above) plus one more transient `502 Bad Gateway` from
+Vertex AI mid-run — both unrelated to this fix, both already
+characterized elsewhere in this file.
+
+Shipped as its own PR, before resuming paragraph-13 PR A verification —
+a defect in already-merged code causing a tier-1 violation is a bug fix,
+independently verifiable on its own merits, not a feature to bundle with
+new work.
