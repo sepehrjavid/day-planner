@@ -835,3 +835,35 @@ Shipped as its own PR, before resuming paragraph-13 PR A verification —
 a defect in already-merged code causing a tier-1 violation is a bug fix,
 independently verifiable on its own merits, not a feature to bundle with
 new work.
+
+---
+
+## Paragraph-13 PR A shipped — and two invariants now need updating, not the behaviour
+
+With the busy-events fix above merged, a full-suite re-run for
+`get_available_slots`'s registration (all five response fields
+explained in one instruction.md paragraph, all of paragraph 13's
+existing prose left in place) landed at 90.7%/70.8% — close to the
+clean, no-tool baseline (92.0%/77.1%) and no longer showing the
+`no_session_overlaps_existing_events` violation at all (0 failures, was
+3/3 before the engine fix).
+
+Two invariants fire in this run that didn't before, and will keep
+firing going forward: `calendar_checked_before_habit_placement` and
+`review_habit_week_precedes_replan` both assert a *separate, visible*
+`get_calendar_events`/`review_habit_week` tool call precedes placement.
+`get_available_slots`'s own `_compute_candidates` calls both internally
+(confirmed by reading the code, not assumed) — the underlying behaviour
+these invariants exist to verify still happens, just not as a
+model-initiated call the trace can see. This is an eval-authoring gap,
+not a regression: both invariants need a "did this happen, whether via
+a direct call or via get_available_slots" check. Left for a follow-up —
+not fixed here, and not blocking this PR, since the safety-relevant
+guarantee (the model didn't act blind) still holds.
+
+Remaining failures in the 90.7%/70.8% run are the already-documented
+zero-`add_calendar_event`-call background pattern and its downstream
+`placed_minutes_meets_target` failures, plus five more transient
+`502 Bad Gateway`/`DynamicNodeFailError` hits from Vertex AI mid-run —
+both already characterized elsewhere in this file, neither caused by
+this change.

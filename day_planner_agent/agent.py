@@ -23,7 +23,7 @@ from .habit_tools import (
     update_habit,
 )
 from .memory_tools import get_profile, save_memory, update_profile
-from .scheduling_tool import find_zone_collisions, log_shadow_comparison
+from .scheduling_tool import find_zone_collisions, get_available_slots, log_shadow_comparison
 from .zone_tools import (
     PRELOADED_ZONES_STATE_KEY,
     create_zone,
@@ -175,26 +175,25 @@ _SHADOW_COMPARISON_TOOL_NAMES = frozenset({"add_calendar_event", "update_calenda
 async def _log_schedule_shadow_comparison(
     tool, args: dict, tool_context: ToolContext, tool_response: dict
 ) -> None:
-    """after_tool_callback (A4.2, shadow mode): after a real
+    """after_tool_callback (originally A4.2, shadow mode): after a real
     add_calendar_event/update_calendar_event call successfully places or
     moves a habit-tagged session, silently compares it against what
     scheduling_tool.py's engine would have suggested for that day.
 
-    This is shadow mode's *entire* mechanism — scheduling_tool.py's
-    get_available_slots is deliberately not in this Agent's tools=[...]
-    list below. It's fully built and unit-tested, but a same-day,
-    controlled before/after A3.1 run found double-digit-point tier
-    regressions from merely adding an unexplained, uninstructed tool to
-    the model's tool list (17+ schemas and a 6,270-token instruction
-    already; an unfamiliar capability the model was never told how to
-    use is a known way to degrade its reliability at using the *other*
-    tools). This callback gets the same disagreement data without that
-    risk: it calls scheduling_tool.py's engine directly, out-of-band,
-    never through the model, so there is no tool-list change for the
-    model to react to at all. Registering the tool for the model to call
-    itself is deferred to A4.3, alongside the instruction changes that
-    would actually explain how to use it — a single attributable change
-    at that point, not conflated with shadow-mode data collection.
+    This mechanism predates and is independent of get_available_slots's
+    own registration below (A4.3) — it calls scheduling_tool.py's engine
+    directly, out-of-band, never through the model, so it never depended
+    on the model being unable to call get_available_slots itself. It
+    originally existed specifically because that tool *wasn't*
+    registered yet: a same-day, controlled before/after A3.1 run had
+    found double-digit-point tier regressions from merely adding an
+    unexplained, uninstructed tool to the model's tool list, so this
+    callback was how shadow-mode comparison data got collected without
+    that risk. Kept running unchanged now that the tool is registered —
+    it costs nothing and the comparison data (did the model's own choice
+    agree with the engine's top candidate) is still useful independent
+    of whether the model could have called the tool for that specific
+    turn.
 
     Lives here rather than inside calendar_tool.py's own functions:
     scheduling_tool.py already imports calendar_tool for its calendar/
@@ -340,6 +339,7 @@ _llm_agent = Agent(
         set_sleep_schedule,
         get_sleep_schedule,
         find_zone_collisions,
+        get_available_slots,
     ],
 )
 
