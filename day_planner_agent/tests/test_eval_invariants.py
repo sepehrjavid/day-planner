@@ -649,6 +649,28 @@ def test_calendar_checked_before_habit_placement_not_applicable_with_no_placemen
     assert inv.calendar_checked_before_habit_placement(scenario, [], []).passed is True
 
 
+def test_calendar_checked_before_habit_placement_passes_via_get_available_slots():
+    """A4.3: get_available_slots forwards its own date_from/date_to
+    straight into an internal get_calendar_events call — checking the
+    calendar still happened, just not as a separately visible call."""
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    tool_calls = [
+        _call("get_available_slots", date_from="2026-08-24", date_to="2026-08-31", habit_id="h1"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    assert inv.calendar_checked_before_habit_placement(scenario, [], tool_calls).passed is True
+
+
+def test_calendar_checked_before_habit_placement_fails_when_get_available_slots_range_too_narrow():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    tool_calls = [
+        _call("get_available_slots", date_from="2026-08-24", date_to="2026-08-26", habit_id="h1"),
+        _call("add_calendar_event", start_time="2026-08-28T18:00:00", habit_id="h1"),
+    ]
+    result = inv.calendar_checked_before_habit_placement(scenario, [], tool_calls)
+    assert result.passed is False
+
+
 # ---------------------------------------------------------------------------
 # list_habits_precedes_placement (A3.6)
 # ---------------------------------------------------------------------------
@@ -738,6 +760,35 @@ def test_review_habit_week_precedes_replan_not_applicable_with_no_prior_sessions
     tool_calls = [_call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1")]
     result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
     assert result.passed is True
+
+
+def test_review_habit_week_precedes_replan_passes_via_get_available_slots():
+    """A4.3: scheduling_tool.py's _compute_candidates reviews exactly
+    [date_from - (date_to - date_from), date_from) internally — the
+    reviewed period's own end is the call's date_from, so a
+    get_available_slots call with date_from <= today is "genuinely
+    preceding" the same way a review_habit_week call with date_to <=
+    today is."""
+    scenario = _world(habits=[GYM_HABIT], calendar_events=[PRIOR_GYM_SESSION], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    tool_calls = [
+        _call("get_available_slots", date_from="2026-08-24", date_to="2026-08-31", habit_id="h1"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is True
+
+
+def test_review_habit_week_precedes_replan_fails_when_get_available_slots_period_not_preceding():
+    scenario = _world(habits=[GYM_HABIT], calendar_events=[PRIOR_GYM_SESSION], today="2026-08-24")
+    events = [_event("Gym", "2026-08-25T18:00:00", "2026-08-25T18:30:00", habit_id="h1")]
+    # date_from is in the future relative to today — not "preceding".
+    tool_calls = [
+        _call("get_available_slots", date_from="2026-08-25", date_to="2026-09-01", habit_id="h1"),
+        _call("add_calendar_event", start_time="2026-08-25T18:00:00", habit_id="h1"),
+    ]
+    result = inv.review_habit_week_precedes_replan(scenario, events, tool_calls)
+    assert result.passed is False
 
 
 # ---------------------------------------------------------------------------

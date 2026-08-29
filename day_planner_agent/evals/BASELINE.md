@@ -867,3 +867,33 @@ zero-`add_calendar_event`-call background pattern and its downstream
 `502 Bad Gateway`/`DynamicNodeFailError` hits from Vertex AI mid-run —
 both already characterized elsewhere in this file, neither caused by
 this change.
+
+**Follow-up, fixed rather than left open**: decomposing the 70.8% run
+first — both `process:` scenarios these invariants live in scored 0%
+(3/3 trials each) with every *other* check passing every time, so all
+6 failing trials were attributable to these two invariants alone.
+Correcting for that by hand: 34/48 passing decision-tier trials becomes
+40/48 — 83.3%, above the clean no-tool baseline (77.1%). That's a
+prediction, not a fix, so the invariants were actually rewritten rather
+than left as a known gap: per the finding above, `get_available_slots`
+forwards its own `date_from`/`date_to` straight into an internal
+`get_calendar_events` call, and reviews exactly
+`[date_from - (date_to - date_from), date_from)` internally — so a
+`get_available_slots` call is accepted in both invariants, but only
+when its own arguments actually cover the placed period /
+actually end at or before `today`, the same "genuinely preceding"
+assertion as before, now checked against the tool call's arguments
+instead of dropped. Two new unit tests per invariant confirm the new
+acceptance path only passes when those arguments are actually correct,
+not merely present.
+
+**Re-baseline, real run** (`day_planner_agent/evals/scenarios`,
+repeat=3, commit `001eeb8`): decision tier **81.2%** — up from 70.8%,
+close to the 83.3% hand-decomposed prediction and above the 77.1%
+clean baseline. Both invariants show zero failures in this run.
+Constraint tier read 82.7% in this same run (no infra noise this time,
+zero occurrences of the two fixed invariants or the busy-events
+violation) — entirely explained by a higher-than-usual draw of the
+already-documented zero-call background pattern (21 occurrences here
+vs. 15 in the prior post-engine-fix run), consistent with this suite's
+established noise floor at repeat=3, not a new issue.
