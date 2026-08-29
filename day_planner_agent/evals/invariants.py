@@ -682,7 +682,16 @@ def calendar_checked_before_habit_placement(
     earlier in the trace than the first habit-tagged add_calendar_event,
     with a [date_from, date_to) range that fully covers every date a
     habit session actually landed on — not merely that the tool was
-    called at all."""
+    called at all.
+
+    A get_available_slots call covering the same range counts equally
+    (A4.3): scheduling_tool.py's _compute_candidates forwards that call's
+    own date_from/date_to straight into its own get_calendar_events call
+    (verified by reading the source, not assumed) — the calendar check
+    still happens, just inside the tool rather than as a separately
+    visible call. Accepting only a direct get_calendar_events call here
+    would fail a trial that did exactly what instruction.md's new
+    get_available_slots paragraph tells it to prefer."""
     add_indices = _habit_tagged_add_indices(tool_calls)
     if not add_indices:
         return InvariantResult(True, "no habit-tagged placement in this trial — not applicable")
@@ -698,7 +707,7 @@ def calendar_checked_before_habit_placement(
     period_start, period_end = min(placed_dates), max(placed_dates)
 
     for call in tool_calls[:first_add_index]:
-        if call["name"] != "get_calendar_events":
+        if call["name"] not in ("get_calendar_events", "get_available_slots"):
             continue
         try:
             date_from = date.fromisoformat(call["args"]["date_from"])
@@ -709,8 +718,9 @@ def calendar_checked_before_habit_placement(
             return InvariantResult(True)
     return InvariantResult(
         False,
-        f"no get_calendar_events call before the first habit placement (index "
-        f"{first_add_index}) covers the placed period {period_start}..{period_end}",
+        f"no get_calendar_events/get_available_slots call before the first habit "
+        f"placement (index {first_add_index}) covers the placed period "
+        f"{period_start}..{period_end}",
     )
 
 
@@ -744,7 +754,17 @@ def review_habit_week_precedes_replan(
     fixture's static given state) tagged with a habit_id and dated before
     `today`. Checks the call precedes the first new placement for that
     habit and covers a period ending at or before today — "genuinely
-    preceding," not merely called at some point."""
+    preceding," not merely called at some point.
+
+    A get_available_slots call counts equally (A4.3), but only if its own
+    date_from is at or before today — not merely that it was called.
+    scheduling_tool.py's _compute_candidates reviews exactly
+    [date_from - (date_to - date_from), date_from) internally (verified
+    by reading the source): the reviewed period's own end is that call's
+    date_from, so checking date_from <= today here is the equivalent of
+    checking review_habit_week's date_to <= today above — the "genuinely
+    preceding" assertion moves inside the tool call's own arguments
+    rather than being dropped."""
     if not world.today:
         return InvariantResult(True, "no `today` on this scenario — not applicable")
     today = date.fromisoformat(world.today)
@@ -769,17 +789,24 @@ def review_habit_week_precedes_replan(
     first_add_index = min(relevant_add_indices)
 
     for call in tool_calls[:first_add_index]:
-        if call["name"] != "review_habit_week":
-            continue
-        try:
-            date_to = date.fromisoformat(call["args"]["date_to"])
-        except (KeyError, ValueError):
-            continue
-        if date_to <= today:
-            return InvariantResult(True)
+        if call["name"] == "review_habit_week":
+            try:
+                date_to = date.fromisoformat(call["args"]["date_to"])
+            except (KeyError, ValueError):
+                continue
+            if date_to <= today:
+                return InvariantResult(True)
+        elif call["name"] == "get_available_slots":
+            try:
+                date_from = date.fromisoformat(call["args"]["date_from"])
+            except (KeyError, ValueError):
+                continue
+            if date_from <= today:
+                return InvariantResult(True)
     return InvariantResult(
         False,
-        f"no review_habit_week call for a period ending by {today} found before the "
+        f"no review_habit_week call for a period ending by {today}, nor a "
+        f"get_available_slots call starting by {today}, found before the "
         f"first replacement of {replanned_habit_ids} (index {first_add_index})",
     )
 
