@@ -100,6 +100,11 @@ class TrialResult:
     output_tokens: int = 0
     thinking_tokens: int = 0
     wall_s: float = 0.0
+    # A3.8: the full event stream, in order — {"type": "thought"|"tool_call"|
+    # "text", ...}. Cheap to collect (already streaming through these events
+    # for tool_calls/reply_texts above); persisted to disk only for failing
+    # trials, by main() below, so routine passing runs don't grow the file.
+    trace: list[dict] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -178,6 +183,7 @@ async def run_trial(
 
     tool_calls: list[dict] = []
     reply_texts: list[str] = []
+    trace: list[dict] = []
     input_tokens = output_tokens = thinking_tokens = 0
     started = time.monotonic()
     exception_repr: str | None = None
@@ -195,12 +201,23 @@ async def run_trial(
             if not content:
                 continue
             for part in content.parts or []:
+                # A "thought" part carries .text too (Gemini's own
+                # reasoning trace) — captured for the trace below, but
+                # kept out of reply_texts, which invariants like
+                # explanation_cites_real_entities read as "what the user
+                # actually saw," not the model's internal reasoning.
+                if getattr(part, "thought", False):
+                    trace.append({"type": "thought", "text": part.text or ""})
+                    continue
                 call = getattr(part, "function_call", None)
                 if call is not None:
-                    tool_calls.append({"name": call.name, "args": dict(call.args or {})})
+                    args = dict(call.args or {})
+                    tool_calls.append({"name": call.name, "args": args})
+                    trace.append({"type": "tool_call", "name": call.name, "args": args})
                 text = getattr(part, "text", None)
                 if text:
                     reply_texts.append(text)
+                    trace.append({"type": "text", "text": text})
     except Exception as exc:  # noqa: BLE001
         # Recorded, not swallowed — but deliberately doesn't bail out of
         # checking whatever the run did manage to do before it broke
@@ -283,7 +300,32 @@ async def run_trial(
         output_tokens=output_tokens,
         thinking_tokens=thinking_tokens,
         wall_s=wall_s,
+        trace=trace,
     )
+
+
+# A3.8: one JSON line per *failing* trial, append-only — same convention as
+# HISTORY_PATH below. Before this, investigating a zero-call failure meant a
+# fresh scratch script and a fresh live-model run every time (see BASELINE.md's
+# A4.2/A4.3 investigations); this makes every future one free — the trace is
+# already sitting in this file the moment a trial fails.
+FAILURE_TRACES_PATH = Path(__file__).parent / "failure_traces.jsonl"
+
+
+def _append_failure_trace(scenario: Scenario, trial_index: int, trial: TrialResult) -> None:
+    record = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "commit_sha": _git_commit_sha(),
+        "scenario_name": scenario.name,
+        "tier": scenario.tier,
+        "trial_index": trial_index,
+        "user_says": scenario.user_says,
+        "failed_checks": [c.description for c in trial.checks if not c.passed],
+        "exception": trial.exception,
+        "trace": trial.trace,
+    }
+    with FAILURE_TRACES_PATH.open("a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 async def run_scenario(
@@ -294,10 +336,11 @@ async def run_scenario(
     model: str | None = None,
 ) -> ScenarioResult:
     result = ScenarioResult(scenario=scenario)
-    for _ in range(repeat):
-        result.trials.append(
-            await run_trial(scenario, instruction_template=instruction_template, model=model)
-        )
+    for i in range(repeat):
+        trial = await run_trial(scenario, instruction_template=instruction_template, model=model)
+        if not trial.passed:
+            _append_failure_trace(scenario, i + 1, trial)
+        result.trials.append(trial)
     return result
 
 
