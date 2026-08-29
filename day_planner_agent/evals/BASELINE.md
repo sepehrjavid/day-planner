@@ -897,3 +897,90 @@ violation) — entirely explained by a higher-than-usual draw of the
 already-documented zero-call background pattern (21 occurrences here
 vs. 15 in the prior post-engine-fix run), consistent with this suite's
 established noise floor at repeat=3, not a new issue.
+
+---
+
+## A3.8 — the zero-call rate has a real, mechanistic cause, not just fixture ambiguity
+
+**Trace persistence, built into the runner rather than another scratch
+script.** `evals/runner.py`'s `run_trial` now collects the full event
+stream in order (`thought`/`tool_call`/`text` parts) into
+`TrialResult.trace`; `run_scenario` appends one JSON line per *failing*
+trial to `evals/failure_traces.jsonl` (gitignored — a regenerable local
+diagnostic log, not a durable record the way `history.jsonl` is).
+Every future zero-call investigation is now free: no fresh scratch
+script, no fresh live-model spend just to see what happened. Thought
+parts are captured for the trace but kept out of `reply_text` (they
+were never excluded before — a latent bug this incidentally fixed,
+since a thought part carries `.text` too and would otherwise pollute
+what invariants like `explanation_cites_real_entities` read as "what
+the user actually saw").
+
+**Run**: the six named offenders from this task's own problem
+statement — `weekend_only_zone`, `avoids_the_busiest_day`,
+`heavier_load_three_days`, `narrow_session_range`,
+`no_zones_no_sleep_schedule`, `plain_appointment_not_tagged` — at
+repeat=15 (90 trials), tracing on by default. 20 failing trials
+captured with full traces. Categorised by reading every one:
+
+| Category | Count | Scenario(s) |
+|---|---|---|
+| Legitimate clarifying question, genuinely underspecified fixture | 3/20 | `plain_appointment_not_tagged` — "Drinks with friends at 7pm tomorrow," no end time |
+| Describes a fully-formed, correct plan, then asks permission instead of placing | 5/20 | `does_not_choose_the_busiest_day`, `narrow_session_range` |
+| **`get_available_slots` recommends a literal-midnight candidate; model declines and asks for sleep-schedule/preference info** | **10/20** | `no_zones_no_sleep_schedule` |
+| Hallucinated "no habit set up," zero tool calls, contradicted by every other trial of the same fixture | 1/20 | `no_zones_no_sleep_schedule` |
+| `429 RESOURCE_EXHAUSTED` from Vertex AI | 1/20 | `narrow_session_range` |
+
+The first row confirms A4.3's original hand-caught trace. The second
+row is the already-documented "describes then asks permission" pattern
+from A4.3's Category A — this run adds 5 more independent instances,
+same shape, same scenarios' family.
+
+**The third row is new, and it's the dominant one in this sample.**
+`no_zones_no_sleep_schedule.yaml` sets `sleep_schedule: null` and
+`zones: []` deliberately, to test that placement still works with
+nothing to constrain it. With both empty, `free_intervals` leaves the
+entire day open, and `_slice_candidates` anchors each candidate at "the
+gap's own start" — literally `00:00`. Read `scheduling/scoring.py`'s
+`score_candidates` directly to confirm: its only components are
+day-load, weekend preference, and repeat-bump penalty — **nothing
+scores time-of-day reasonableness at all**, because the codebase's
+whole design assumes the sleep schedule is what excludes unreasonable
+hours. Absent one, midnight surfaces as a legitimate, often top-ranked
+candidate, and the model — reasonably — declines to place a workout at
+literal midnight and asks for sleep-schedule or time-preference
+information instead, in 10 of 14 trials on this fixture. This is not
+model error and not fixture ambiguity in the A3.8-problem-statement
+sense; it's a real gap in the engine's candidate ranking, invisible
+until a scenario actually omits the sleep schedule.
+
+**Recommendation, not applied — two separate things need separate
+fixes:**
+
+1. `plain_appointment_not_tagged` (row 1): tighten the fixture, per
+   this task's own default guidance — give the utterance an explicit
+   end time, since that scenario tests `habit_id` tagging, not
+   ambiguity handling. A clarifying-question invariant would mask real
+   failures (asking is correct when genuinely underspecified, wrong
+   when the model had everything it needed, and no invariant can tell
+   those apart) — the fixture is the thing to fix.
+2. `no_zones_no_sleep_schedule` (row 3) needs a different kind of fix,
+   outside this task's "propose a fixture change" framing: either give
+   `get_available_slots`/`score_candidates` a sensible default
+   time-of-day preference when no sleep schedule exists (an engine
+   change), or reconsider the scenario's own expectation — asking for a
+   sleep schedule before placing anything may be the *correct* behavior
+   for a user with literally none on file, in which case
+   `add_calendar_event called >= 2 times` is testing the wrong thing
+   and the scenario should expect a clarifying question instead. Not
+   decided here — flagged as its own follow-up task, since it's a
+   design question, not a measurement one.
+
+**Effect on historical baselines**: the "~12-16% background zero-call
+rate" was never uniform across the suite the way earlier write-ups
+implied — it's concentrated in specific fixtures for specific, now-
+understood reasons (this scenario alone accounted for half of this
+run's 20 failures). Scenarios that don't touch a null sleep schedule or
+a truly-underspecified utterance likely have a materially lower true
+noise floor than the blended rate suggested. Worth remembering when
+reading any full-suite number in this file as a single aggregate.

@@ -122,3 +122,73 @@ def test_append_history_record_appends_never_overwrites(tmp_path, monkeypatch):
     assert json.loads(lines[1]) == second
     assert first["model"] == "gemini-2.5-flash"
     assert second["model"] == "gemini-2.5-pro"
+
+
+# ---------------------------------------------------------------------------
+# _append_failure_trace (A3.8)
+# ---------------------------------------------------------------------------
+
+
+def test_append_failure_trace_writes_one_json_line(tmp_path, monkeypatch):
+    traces_path = tmp_path / "failure_traces.jsonl"
+    monkeypatch.setattr(runner, "FAILURE_TRACES_PATH", traces_path)
+
+    scenario = _scenario("plain_appointment_not_tagged", "constraint")
+    trial = runner.TrialResult(
+        tool_calls=[],
+        placed_events=[],
+        checks=[runner.Check("add_calendar_event called >= 1 time(s)", False, "actual count: 0")],
+        trace=[{"type": "text", "text": "What time should it end?"}],
+    )
+
+    runner._append_failure_trace(scenario, 2, trial)
+
+    lines = traces_path.read_text().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["scenario_name"] == "plain_appointment_not_tagged"
+    assert record["tier"] == "constraint"
+    assert record["trial_index"] == 2
+    assert record["user_says"] == "plan my week"
+    assert record["failed_checks"] == ["add_calendar_event called >= 1 time(s)"]
+    assert record["trace"] == [{"type": "text", "text": "What time should it end?"}]
+    assert "commit_sha" in record and "date" in record
+
+
+def test_append_failure_trace_appends_never_overwrites(tmp_path, monkeypatch):
+    traces_path = tmp_path / "failure_traces.jsonl"
+    monkeypatch.setattr(runner, "FAILURE_TRACES_PATH", traces_path)
+
+    scenario = _scenario("s1", "constraint")
+    trial = runner.TrialResult(
+        tool_calls=[], placed_events=[], checks=[runner.Check("c", False)]
+    )
+    runner._append_failure_trace(scenario, 1, trial)
+    runner._append_failure_trace(scenario, 2, trial)
+
+    lines = traces_path.read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["trial_index"] == 1
+    assert json.loads(lines[1])["trial_index"] == 2
+
+
+async def test_run_scenario_persists_trace_only_for_failing_trials(tmp_path, monkeypatch):
+    traces_path = tmp_path / "failure_traces.jsonl"
+    monkeypatch.setattr(runner, "FAILURE_TRACES_PATH", traces_path)
+
+    scenario = _scenario("s1", "constraint")
+    outcomes = iter([True, False, True])
+
+    async def fake_run_trial(scenario, *, instruction_template=None, model=None):
+        return runner.TrialResult(
+            tool_calls=[], placed_events=[], checks=[runner.Check("c", next(outcomes))]
+        )
+
+    monkeypatch.setattr(runner, "run_trial", fake_run_trial)
+
+    result = await runner.run_scenario(scenario, repeat=3)
+
+    assert len(result.trials) == 3
+    lines = traces_path.read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["trial_index"] == 2

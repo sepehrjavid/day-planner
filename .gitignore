@@ -20,3 +20,8 @@ day_planner_backend_internal/.env
 */.adk/day_planner_agent.tar.gz
 day_planner_agent.tar.gz
 *-providers.tf
+
+# A3.8: raw per-failing-trial traces from evals/runner.py — a regenerable
+# local diagnostic log, not a durable record like evals/history.jsonl.
+# Findings from reading it belong in evals/BASELINE.md instead.
+day_planner_agent/evals/failure_traces.jsonl
