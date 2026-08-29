@@ -984,3 +984,48 @@ run's 20 failures). Scenarios that don't touch a null sleep schedule or
 a truly-underspecified utterance likely have a materially lower true
 noise floor than the blended rate suggested. Worth remembering when
 reading any full-suite number in this file as a single aggregate.
+
+---
+
+## A4.3 — paragraph 13, cut 1 of 5: target accounting
+
+Per the cut order (most independent first): removed "while adding up to
+the period's target" from paragraph 13's placement sentence — `For any
+other habit, ... choose the day, time, and length of each session ...
+so the sessions fit around existing commitments while adding up to the
+period's target.` becomes the same sentence without that clause.
+`get_available_slots`'s `remaining_target_minutes` (explained in PR A's
+own paragraph) now carries the target-tracking job; nothing else in
+paragraph 13 states it.
+
+**Targeted run** (6 scenarios touching `placed_minutes_meets_target`,
+repeat=10, 60 trials): constraint 72.5%, decision 95.0%. Two scenarios
+stood out — `multiple_habits_independent` (40%) and `three_habits_at_once`
+(60%) — both failing the same specific way: one of several requested
+habits gets completely skipped (`'Tennis': placed 0 min, target 60
+min/week`), not a wrong total, a missing one.
+
+**Controlled check, before shipping**: read literally, that pattern
+looks like exactly what a target-accounting cut would cause. It isn't
+— a same-session control against the pre-cut instruction.md (the
+`--instruction` swap-in technique already used for A2.5's and A3.5's
+comparisons) reproduces the identical failure signature on both
+scenarios, old prose and all: `multiple_habits_independent` 70% control
+vs. 40% post-cut, `three_habits_at_once` 80% control vs. 60% post-cut.
+**The one-habit-neglected bug is confirmed pre-existing, not caused by
+this cut.** Both runs show the same-direction drop large enough (20-30
+points at n=10 each) that a small incremental effect from the cut can't
+be fully ruled out either — but the underlying failure mode itself
+predates it and shows up with the target-accounting sentence still in
+place. Safety invariants (`no_session_overlaps_any_zone`,
+`no_session_overlaps_sleep_or_cooldown`, `every_habit_session_passes_
+habit_id`) hold in every trial across every run — this is a
+completeness gap, not a safety one.
+
+**Decision**: ship the cut. The pre-existing bug is real and worth
+its own investigation (likely: the model doesn't reliably loop back to
+call `get_available_slots` again for every habit named in a multi-habit
+request), but it isn't this cut's to fix, and blocking an independently-
+verified, safety-clean cut on an unrelated, already-present bug would
+conflate two different questions. Flagged as its own follow-up task,
+not fixed here.
