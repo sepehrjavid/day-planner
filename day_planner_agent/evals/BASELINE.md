@@ -1005,27 +1005,67 @@ stood out — `multiple_habits_independent` (40%) and `three_habits_at_once`
 habits gets completely skipped (`'Tennis': placed 0 min, target 60
 min/week`), not a wrong total, a missing one.
 
-**Controlled check, before shipping**: read literally, that pattern
-looks like exactly what a target-accounting cut would cause. It isn't
-— a same-session control against the pre-cut instruction.md (the
+**Controlled check, and why it's unresolved rather than settled**: read
+literally, that pattern looks like exactly what a target-accounting cut
+would cause — the removed sentence ("adding up to the period's target")
+maps directly onto the observed failure ("Tennis: placed 0 min"). A
+same-session control against the pre-cut instruction.md (the
 `--instruction` swap-in technique already used for A2.5's and A3.5's
-comparisons) reproduces the identical failure signature on both
-scenarios, old prose and all: `multiple_habits_independent` 70% control
-vs. 40% post-cut, `three_habits_at_once` 80% control vs. 60% post-cut.
-**The one-habit-neglected bug is confirmed pre-existing, not caused by
-this cut.** Both runs show the same-direction drop large enough (20-30
-points at n=10 each) that a small incremental effect from the cut can't
-be fully ruled out either — but the underlying failure mode itself
-predates it and shows up with the target-accounting sentence still in
-place. Safety invariants (`no_session_overlaps_any_zone`,
+comparisons) reproduces the same failure signature on both scenarios
+with the old prose still in place: `multiple_habits_independent` 70%
+control vs. 40% post-cut, `three_habits_at_once` 80% control vs. 60%
+post-cut. Both moved in the same direction, but at n=10 **neither gap is
+individually significant** — Fisher's exact test gives p ≈ 0.37 and p ≈
+0.63 respectively. This is genuinely ambiguous: not proof the bug
+predates the cut, and not proof the cut caused it either. Safety
+invariants (`no_session_overlaps_any_zone`,
 `no_session_overlaps_sleep_or_cooldown`, `every_habit_session_passes_
-habit_id`) hold in every trial across every run — this is a
-completeness gap, not a safety one.
+habit_id`) hold in every trial across every run regardless — this is a
+completeness gap, not a safety one — but five more cuts build on this
+one, so the ambiguity doesn't get to stand. See the next section for
+the follow-up investigation this led to and its result.
 
-**Decision**: ship the cut. The pre-existing bug is real and worth
-its own investigation (likely: the model doesn't reliably loop back to
-call `get_available_slots` again for every habit named in a multi-habit
-request), but it isn't this cut's to fix, and blocking an independently-
-verified, safety-clean cut on an unrelated, already-present bug would
-conflate two different questions. Flagged as its own follow-up task,
-not fixed here.
+**Resolution — interleaved n=20, both conditions, one investigation
+answering both the mechanism and whether the cut matters**: reran
+`multiple_habits_independent` and `three_habits_at_once` at repeat=20,
+old and new instruction interleaved trial-by-trial (not run back-to-back)
+so time-of-day variation cancels between conditions, using A3.8's trace
+persistence to categorize every neglect three ways — (1)
+`get_available_slots` never called for the neglected habit, (2) called,
+but no `add_calendar_event` followed, (3) placed, but under target.
+
+| Scenario | new (post-cut) | old (pre-cut) | Fisher p |
+|---|---|---|---|
+| `multiple_habits_independent` | 18/20 (90%) | 15/20 (75%) | 0.41 |
+| `three_habits_at_once` | 10/20 (50%) | 13/20 (65%) | 0.52 |
+
+`multiple_habits_independent` **reversed direction** at n=20 (new now
+*ahead* of old, not behind) — the n=10 reading that started this whole
+check was noise. `three_habits_at_once` still reads new-worse-than-old,
+same direction as the n=10 run, but the gap is, if anything, smaller
+relative to its own noise and nowhere near significant (p=0.52) even at
+double the sample. Neither scenario shows a real, direction-consistent
+effect from the cut.
+
+**The categorization is unanimous and answers the mechanism question
+cleanly**: of 22 total neglect instances across both scenarios and both
+conditions, **every single one is category 2** — `get_available_slots`
+*was* called for the neglected habit (ruling out "the model isn't
+iterating over habits," the leading hypothesis going in) but no
+`add_calendar_event` ever followed for it. The model gets valid
+candidates for every requested habit and then simply doesn't close the
+loop for one of them, in roughly the same proportion whether the
+target-accounting sentence is present or not — further evidence this is
+independent of the cut, not entangled with it.
+
+**Decision, now settled rather than provisional**: merge the cut as-is.
+Two independent scenarios at n=20 each, interleaved to cancel time-of-
+day noise, show no significant effect in either direction, one reverses
+entirely, and the neglect mechanism is confirmed identical and
+pre-existing under both instruction conditions. The multi-habit-neglect
+bug is real, common (it's the dominant zero-call failure shape in these
+two scenarios specifically), and worth fixing on its own — but it is
+conclusively not this cut's to fix. Flagged as its own follow-up task
+with the mechanism now precisely characterized: "gets candidates,
+doesn't place" (category 2), not "doesn't ask for candidates" — a
+narrower, more actionable lead than the original hypothesis.
