@@ -166,6 +166,7 @@ async def run_trial(
         sleep_schedule=scenario.given.sleep_schedule,
         habits=scenario.given.habits,
         calendar_events=scenario.given.calendar_events,
+        habit_sessions=scenario.given.habit_sessions,
         zones_fetch_fails=scenario.given.zones_fetch_fails,
         habits_fetch_fails=scenario.given.habits_fetch_fails,
         needs_auth=scenario.given.needs_auth,
@@ -282,6 +283,7 @@ async def run_trial(
         habits=fixture.habits,
         calendar_events=scenario.given.calendar_events,
         today=scenario.given.today,
+        habit_sessions=scenario.given.habit_sessions,
     )
     for name in scenario.expect.invariants:
         fn = ALL_INVARIANTS.get(name)

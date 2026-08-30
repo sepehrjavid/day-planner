@@ -1,0 +1,35 @@
+name: a slot repeatedly bumped by the same unrelated event in the past is avoided going forward
+tier: decision
+given:
+  today: "2026-08-24"  # a Monday
+  zones:
+    - {label: Work, start: "09:00", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits:
+    - {label: Gym, goal: "180 min/week, sessions 45-60 minutes"}
+  # Two prior Mondays (both inside the preceding two-week period
+  # get_available_slots reviews for a "next two weeks" request), each
+  # planned at 18:00 and each bumped by the same unrelated "Standup" —
+  # not a habit, not a stated preference, just a recurring conflict. The
+  # Standup events themselves are only on those two past Mondays, not on
+  # any upcoming one: the future Monday 18:00 slot is genuinely free,
+  # just weaker, the same distinction the soft-tie-breaker rule draws.
+  habit_sessions:
+    - {habit_id: "h1", event_id: "gym-mon-1", calendar_id: "me@gmail.com", planned_start: "2026-08-10T18:00:00", planned_end: "2026-08-10T18:45:00"}
+    - {habit_id: "h1", event_id: "gym-mon-2", calendar_id: "me@gmail.com", planned_start: "2026-08-17T18:00:00", planned_end: "2026-08-17T18:45:00"}
+  calendar_events:
+    - {summary: Standup, start: "2026-08-10T18:00:00", end: "2026-08-10T18:30:00"}
+    - {summary: Standup, start: "2026-08-17T18:00:00", end: "2026-08-17T18:30:00"}
+when:
+  user_says: "Plan my gym sessions for the next two weeks."
+expect:
+  tool_calls:
+    # Deliberately lenient (session-count completeness is a separate,
+    # already-tracked issue) — this scenario is specifically about
+    # *where* a session lands, not how many get placed.
+    - {name: add_calendar_event, min_count: 1}
+  invariants:
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id
+    - avoids_repeatedly_bumped_slot

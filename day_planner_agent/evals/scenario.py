@@ -71,6 +71,24 @@ def normalize_habit(raw: dict, *, habit_id: str) -> dict:
     }
 
 
+def normalize_habit_session(raw: dict) -> dict:
+    """raw: {habit_id, event_id, calendar_id?, planned_start, planned_end}
+    — a *previously placed* habit session, in the shape
+    domain_client.list_habit_sessions/upsert_habit_session already use.
+    Distinct from calendar_events (the current state of the calendar):
+    this is what the agent originally planned, so compute_habit_review
+    (habit_tools.py) can diff the two and derive a real "moved"/"gone"
+    outcome with a genuine bumped_by — needed for A4.3's repeat-bump cut,
+    which nothing in this suite could exercise before this existed."""
+    return {
+        "habit_id": raw["habit_id"],
+        "event_id": raw["event_id"],
+        "calendar_id": raw.get("calendar_id", "me@gmail.com"),
+        "planned_start": raw["planned_start"],
+        "planned_end": raw["planned_end"],
+    }
+
+
 def normalize_calendar_event(raw: dict, *, event_id: str) -> dict:
     """raw: {summary, start, end, habit_id?} with start/end as local
     wall-clock ISO datetimes (matching add_calendar_event's own
@@ -94,6 +112,7 @@ class Given:
     sleep_schedule: dict | None = None
     habits: list[dict] = field(default_factory=list)
     calendar_events: list[dict] = field(default_factory=list)
+    habit_sessions: list[dict] = field(default_factory=list)
     # A3.2/A2.6 failure injection — see conftest.py's ScenarioFixture for
     # what each of these actually does to the fixture's backend_client fakes.
     zones_fetch_fails: bool = False
@@ -155,6 +174,9 @@ def _parse_scenario(raw: dict, source_file: Path) -> Scenario:
         calendar_events=[
             normalize_calendar_event(e, event_id=f"evt{i + 1}")
             for i, e in enumerate(given_raw.get("calendar_events", []))
+        ],
+        habit_sessions=[
+            normalize_habit_session(hs) for hs in given_raw.get("habit_sessions", [])
         ],
         zones_fetch_fails=given_raw.get("zones_fetch_fails", False),
         habits_fetch_fails=given_raw.get("habits_fetch_fails", False),

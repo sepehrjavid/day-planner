@@ -8,7 +8,8 @@ from day_planner_agent.evals import invariants as inv
 
 
 def _world(
-    *, zones=None, sleep_schedule=None, habits=None, calendar_events=None, today=None
+    *, zones=None, sleep_schedule=None, habits=None, calendar_events=None, today=None,
+    habit_sessions=None,
 ) -> inv.World:
     return inv.World(
         zones=zones or [],
@@ -16,6 +17,7 @@ def _world(
         habits=habits or [],
         calendar_events=calendar_events or [],
         today=today,
+        habit_sessions=habit_sessions or [],
     )
 
 
@@ -853,4 +855,92 @@ def test_no_silent_edit_ignores_edits_to_plain_appointments():
     scenario = _world(calendar_events=[plain], today="2026-08-24")
     tool_calls = [_call("update_calendar_event", event_id="e1", start_time="2026-08-25T18:00:00")]
     result = inv.no_silent_edit_of_pre_existing_habit_session(scenario, [], tool_calls)
+    assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# avoids_repeatedly_bumped_slot (A4.3, repeat-bump cut)
+# ---------------------------------------------------------------------------
+
+
+def _session(habit_id, event_id, planned_start, planned_end, calendar_id="me@gmail.com"):
+    return {
+        "habit_id": habit_id,
+        "event_id": event_id,
+        "calendar_id": calendar_id,
+        "planned_start": planned_start,
+        "planned_end": planned_end,
+    }
+
+
+# Two prior Mondays (2026-08-10, 2026-08-17), each "gone" — the planned
+# session's event_id never appears in calendar_events — with a "Standup"
+# overlapping the exact planned window both times.
+TWO_BUMPED_MONDAYS_SESSIONS = [
+    _session("h1", "gym-mon-1", "2026-08-10T18:00:00", "2026-08-10T18:45:00"),
+    _session("h1", "gym-mon-2", "2026-08-17T18:00:00", "2026-08-17T18:45:00"),
+]
+TWO_BUMPED_MONDAYS_EVENTS = [
+    _event_with_id("standup-1", "Standup", "2026-08-10T18:00:00", "2026-08-10T18:30:00"),
+    _event_with_id("standup-2", "Standup", "2026-08-17T18:00:00", "2026-08-17T18:30:00"),
+]
+
+
+def test_avoids_repeatedly_bumped_slot_passes_with_no_prior_sessions():
+    scenario = _world(habits=[GYM_HABIT], today="2026-08-24")
+    result = inv.avoids_repeatedly_bumped_slot(scenario, [], [])
+    assert result.passed is True
+
+
+def test_avoids_repeatedly_bumped_slot_detects_violation():
+    scenario = _world(
+        habits=[GYM_HABIT],
+        habit_sessions=TWO_BUMPED_MONDAYS_SESSIONS,
+        calendar_events=TWO_BUMPED_MONDAYS_EVENTS,
+        today="2026-08-24",
+    )
+    # Placed right back on the repeatedly-bumped weekday+time.
+    placed = [_event_with_id("new-mon", "Gym", "2026-08-24T18:00:00", "2026-08-24T18:45:00", habit_id="h1")]
+    result = inv.avoids_repeatedly_bumped_slot(scenario, placed, [])
+    assert result.passed is False
+    assert "mon" in result.detail
+
+
+def test_avoids_repeatedly_bumped_slot_passes_when_new_slot_chosen():
+    scenario = _world(
+        habits=[GYM_HABIT],
+        habit_sessions=TWO_BUMPED_MONDAYS_SESSIONS,
+        calendar_events=TWO_BUMPED_MONDAYS_EVENTS,
+        today="2026-08-24",
+    )
+    placed = [_event_with_id("new-wed", "Gym", "2026-08-26T18:00:00", "2026-08-26T18:45:00", habit_id="h1")]
+    result = inv.avoids_repeatedly_bumped_slot(scenario, placed, [])
+    assert result.passed is True
+
+
+def test_avoids_repeatedly_bumped_slot_ignores_a_single_bump():
+    scenario = _world(
+        habits=[GYM_HABIT],
+        habit_sessions=TWO_BUMPED_MONDAYS_SESSIONS[:1],  # only one Monday, not a pattern
+        calendar_events=TWO_BUMPED_MONDAYS_EVENTS[:1],
+        today="2026-08-24",
+    )
+    placed = [_event_with_id("new-mon", "Gym", "2026-08-24T18:00:00", "2026-08-24T18:45:00", habit_id="h1")]
+    result = inv.avoids_repeatedly_bumped_slot(scenario, placed, [])
+    assert result.passed is True
+
+
+def test_avoids_repeatedly_bumped_slot_ignores_kept_sessions():
+    # The planned session still sits on the calendar, unmoved — "kept,"
+    # not bumped, even though a same-slot "Standup" also exists.
+    kept_session = _session("h1", "gym-mon-1", "2026-08-10T18:00:00", "2026-08-10T18:45:00")
+    kept_event = _event_with_id("gym-mon-1", "Gym", "2026-08-10T18:00:00", "2026-08-10T18:45:00", habit_id="h1")
+    scenario = _world(
+        habits=[GYM_HABIT],
+        habit_sessions=[kept_session, TWO_BUMPED_MONDAYS_SESSIONS[1]],
+        calendar_events=[kept_event, TWO_BUMPED_MONDAYS_EVENTS[1]],
+        today="2026-08-24",
+    )
+    placed = [_event_with_id("new-mon", "Gym", "2026-08-24T18:00:00", "2026-08-24T18:45:00", habit_id="h1")]
+    result = inv.avoids_repeatedly_bumped_slot(scenario, placed, [])
     assert result.passed is True
