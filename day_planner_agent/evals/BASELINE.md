@@ -1069,3 +1069,40 @@ conclusively not this cut's to fix. Flagged as its own follow-up task
 with the mechanism now precisely characterized: "gets candidates,
 doesn't place" (category 2), not "doesn't ask for candidates" — a
 narrower, more actionable lead than the original hypothesis.
+
+---
+
+## A4.3 — paragraph 13, cut 2 of 5: zone-anchored expansion
+
+Removed the mechanical placement instructions for a zone-anchored habit
+— "place exactly one session per occurrence of the zone within the
+period, at the zone's own start_time and end_time — not a time or
+length you choose — and do this for every zone it's anchored to if
+there's more than one (e.g. both commute directions). This is the one
+case where allowed_zones means 'place here, and only here,' not just
+'permitted here alongside other candidate times' the way it works for
+every other habit." — while keeping the recognition sentence just
+before it ("A zone-anchored habit skips everything in this paragraph
+from here on — one whose allowed_zones names a zone ... just 'whenever
+I have that zone'"), since paragraphs 15 and 17 both cross-reference
+"the placement paragraph above" specifically for *what a zone-anchored
+habit is*, not how to place one. `get_available_slots`'s own paragraph
+already states the mechanics this removes verbatim: "If the result's
+zone_anchored is true ... place one session at each returned
+candidate's own start and end, exactly as given, for every candidate."
+
+**Targeted run** (the two scenarios that directly exercise
+`zone_anchored_sessions_match_zone_times`, plus `basic_week_placement`
+and `plain_appointment_not_tagged` as general regression canaries,
+repeat=15, 60 trials): constraint 88.3%.
+`zone_anchored_commute` 100% (15/15), `zone_anchored_two_commute_zones`
+93% (14/15) — **`zone_anchored_sessions_match_zone_times` itself never
+failed once across all 30 relevant trials**, and the one miss on the
+two-zone scenario is the already-documented zero-`add_calendar_event`-
+call background pattern, not a placement-mechanics failure.
+`basic_week_placement` 100%. `plain_appointment_not_tagged` read 60%
+(9/15) — its own well-documented noise floor from A3.8's investigation,
+unrelated to this cut. No safety-invariant failures anywhere in the run.
+
+**Decision**: ship the cut. The one invariant this cut could plausibly
+have broken held at 100% across every trial that actually reached it.
