@@ -23,7 +23,11 @@ from .habit_tools import (
     update_habit,
 )
 from .memory_tools import get_profile, save_memory, update_profile
-from .scheduling_tool import find_zone_collisions, get_available_slots, log_shadow_comparison
+from .scheduling_tool import (
+    find_zone_collisions,
+    get_available_slots,
+    log_shadow_comparison,
+)
 from .zone_tools import (
     PRELOADED_ZONES_STATE_KEY,
     create_zone,
@@ -148,7 +152,10 @@ async def _preload_zones(callback_context: CallbackContext) -> None:
         _refresh_preload_ok(callback_context)
         return
 
-    if zones_result.get("status") != "success" or sleep_result.get("status") != "success":
+    if (
+        zones_result.get("status") != "success"
+        or sleep_result.get("status") != "success"
+    ):
         logger.warning(
             "Zones/sleep preload returned non-success status: zones=%s sleep=%s",
             zones_result.get("status"),
@@ -169,7 +176,9 @@ async def _preload_zones(callback_context: CallbackContext) -> None:
 
 # Which tool calls a habit session can actually come from — see
 # _log_schedule_shadow_comparison below.
-_SHADOW_COMPARISON_TOOL_NAMES = frozenset({"add_calendar_event", "update_calendar_event"})
+_SHADOW_COMPARISON_TOOL_NAMES = frozenset(
+    {"add_calendar_event", "update_calendar_event"}
+)
 
 
 async def _log_schedule_shadow_comparison(
@@ -278,7 +287,7 @@ def _build_instruction(ctx: ReadonlyContext) -> str:
         )
 
     return _INSTRUCTION_TEMPLATE.format(
-        today=_now().strftime("%B %d, %Y"),
+        today=_now().strftime("%A, %B %d, %Y"),
         profile_section=profile_section,
         zones_section=zones_section,
     )
