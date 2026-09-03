@@ -1106,3 +1106,51 @@ unrelated to this cut. No safety-invariant failures anywhere in the run.
 
 **Decision**: ship the cut. The one invariant this cut could plausibly
 have broken held at 100% across every trial that actually reached it.
+
+---
+
+## A4.3 — paragraph 13, cut 3 of 5: repeat-bump penalty
+
+Removed the entire repeat-bump tie-breaker sentence pair — "If the
+review you just pulled shows the same time slot bumped more than once
+by the same kind of unrelated conflict ... treat that slot as weaker
+than a comparably good alternative and prefer the alternative instead
+... A single bump, or one explained by another habit or a preference,
+isn't a pattern — don't avoid a slot on that alone." No cross-reference
+to preserve this time (unlike cut 2) — paragraph 21's separate use of
+`bumped_by` for *review interpretation* is untouched, unrelated to this
+placement-time tie-breaker. `get_available_slots`'s own scoring already
+penalizes a repeat-bumped slot and surfaces "repeatedly bumped by X" as
+a `reasons` string; the instruction.md paragraph explaining that tool
+already tells the model to use those reasons directly.
+
+**A real coverage gap, closed rather than worked around**: no eval
+scenario or invariant tested this rule at all before this cut — the
+only existing coverage was a unit test on `get_available_slots` itself.
+Closing it required extending the fixture format: `ScenarioFixture`
+gained a `habit_sessions` param (pre-seeded, previously-placed sessions,
+distinct from `calendar_events`, the calendar's *current* state) so
+`compute_habit_review` can derive a genuine "moved"/"gone" outcome with
+a real `bumped_by` — nothing before A4.3 needed a scenario where that
+diff was itself the thing under test. New invariant
+`avoids_repeatedly_bumped_slot` re-derives which slot(s) qualify as
+repeatedly-bumped directly from `world.habit_sessions`/
+`world.calendar_events` (mirroring `habit_tools.py`'s own diff logic,
+`_REPEAT_BUMP_THRESHOLD=2` matching `scheduling/scoring.py`'s constant
+of the same name) rather than trusting the scenario author's intent.
+New scenario `repeat_bump_avoided.yaml`: two prior Mondays bumped by the
+same "Standup," dated in the *past* only (not recurring into the future
+planning window) so the future Monday slot is genuinely available, just
+weaker — the same distinction the removed rule itself drew.
+
+**Verification**: `avoids_repeatedly_bumped_slot` held **15/15 (100%)**
+both pre-cut and post-cut, zero failures either time. Broader regression
+canaries (`basic_week_placement`, `plain_appointment_not_tagged`,
+`two_habits_weekend_split`, repeat=10, 30 trials): constraint tier
+100%, decision tier 70% — the only misses are the already-documented
+multi-habit-neglect pattern on `two_habits_weekend_split`, unrelated to
+this cut. No safety-invariant failures anywhere.
+
+**Decision**: ship the cut. Clean signal on the one invariant this cut
+could plausibly have broken, at both n=15 checkpoints, plus a clean
+broader regression check.

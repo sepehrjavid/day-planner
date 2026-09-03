@@ -58,6 +58,12 @@ class World:
     habits: list[dict] = field(default_factory=list)
     calendar_events: list[dict] = field(default_factory=list)
     today: str | None = None
+    # A4.3 (repeat-bump cut): pre-seeded, previously-placed sessions —
+    # static "given" state, like calendar_events, not what the model
+    # placed this trial. Lets an invariant re-derive which slots are
+    # genuinely repeatedly-bumped the same way compute_habit_review does,
+    # instead of hardcoding a scenario-specific slot.
+    habit_sessions: list[dict] = field(default_factory=list)
 
     def habit_by_id(self, habit_id: str) -> dict | None:
         for h in self.habits:
@@ -811,6 +817,93 @@ def review_habit_week_precedes_replan(
     )
 
 
+def _overlaps_window(start: datetime, end: datetime, other_start: datetime, other_end: datetime) -> bool:
+    return start < other_end and other_start < end
+
+
+def _bumped_by(
+    start: datetime, end: datetime, *, exclude_id: str, calendar_events: list[dict]
+) -> str | None:
+    """Mirrors habit_tools.py's _find_conflict: the title of whatever
+    else on the same calendar overlaps [start, end), excluding the
+    session's own event."""
+    for other in calendar_events:
+        if other.get("id") == exclude_id:
+            continue
+        try:
+            other_start = _parse_wall_clock(other["start"]["dateTime"])
+            other_end = _parse_wall_clock(other["end"]["dateTime"])
+        except (KeyError, ValueError):
+            continue
+        if _overlaps_window(start, end, other_start, other_end):
+            return other.get("summary")
+    return None
+
+
+def _same_wall_clock_instant(a: str, b: str) -> bool:
+    try:
+        return _parse_wall_clock(a) == _parse_wall_clock(b)
+    except (ValueError, TypeError):
+        return a == b
+
+
+def avoids_repeatedly_bumped_slot(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """instruction.md's placement paragraph (repeat-bump rule, A4.3): if
+    the prior review shows the same time slot bumped more than once by
+    the same unrelated conflict, treat it as weaker and prefer a
+    comparably good alternative. A soft tie-breaker, not a hard
+    guardrail — this only checks that a newly-placed session for the
+    affected habit doesn't land on the exact repeatedly-bumped
+    weekday+time, not that the target went unmet or that every
+    alternative was avoided too.
+
+    Derives which slot(s) actually qualify as repeatedly-bumped from
+    world.habit_sessions (the prior, previously-placed sessions) and
+    world.calendar_events (the calendar's current state) directly,
+    mirroring habit_tools.py's compute_habit_review diff (kept/moved/
+    gone, then _find_conflict for bumped_by) rather than trusting the
+    scenario author's own intent — stays correct if the fixture
+    changes. _REPEAT_BUMP_THRESHOLD matches scheduling/scoring.py's own
+    constant of the same name: 2, "more than once."""
+    events_by_id = {e["id"]: e for e in world.calendar_events if "id" in e}
+    counts: dict[tuple[str, tuple[str, str], str], int] = {}
+    for session in world.habit_sessions:
+        current = events_by_id.get(session["event_id"])
+        planned_start = _parse_wall_clock(session["planned_start"])
+        if current is not None and _same_wall_clock_instant(
+            current["start"]["dateTime"], session["planned_start"]
+        ):
+            continue  # "kept" — nothing to bump
+
+        planned_end = _parse_wall_clock(session["planned_end"])
+        bumped_by = _bumped_by(
+            planned_start, planned_end,
+            exclude_id=session["event_id"], calendar_events=world.calendar_events,
+        )
+        if not bumped_by:
+            continue
+
+        key = (session["habit_id"], (_day_key(planned_start.date()), planned_start.strftime("%H:%M")), bumped_by)
+        counts[key] = counts.get(key, 0) + 1
+
+    weak_slots = {(habit_id, slot) for (habit_id, slot, _bumper), n in counts.items() if n >= 2}
+    if not weak_slots:
+        return InvariantResult(True, "no slot in this fixture qualifies as repeatedly-bumped")
+
+    violations = []
+    for event, habit_id in _habit_tagged_events(placed_events):
+        start = _parse_wall_clock(event["start"]["dateTime"])
+        slot = (_day_key(start.date()), start.strftime("%H:%M"))
+        if (habit_id, slot) in weak_slots:
+            violations.append(
+                f"{event.get('summary')!r} placed at {event['start']['dateTime']} — "
+                f"weekday+time {slot} was repeatedly bumped for this habit"
+            )
+    return InvariantResult(not violations, "; ".join(violations))
+
+
 TIER2_INVARIANTS = {
     "heavier_load_on_lighter_days": heavier_load_on_lighter_days,
     "weekend_preferred_when_weekend_is_free": weekend_preferred_when_weekend_is_free,
@@ -819,6 +912,7 @@ TIER2_INVARIANTS = {
     "calendar_checked_before_habit_placement": calendar_checked_before_habit_placement,
     "list_habits_precedes_placement": list_habits_precedes_placement,
     "review_habit_week_precedes_replan": review_habit_week_precedes_replan,
+    "avoids_repeatedly_bumped_slot": avoids_repeatedly_bumped_slot,
 }
 
 ALL_INVARIANTS = {**TIER1_INVARIANTS, **TIER2_INVARIANTS}

@@ -293,6 +293,15 @@ class ScenarioFixture:
     ToolContext.search_memory/InMemoryMemoryService instead, which
     InMemoryRunner already backs with a working, empty-by-default
     implementation.
+
+    habit_sessions accepts pre-seeded, previously-placed sessions (A4.3's
+    repeat-bump cut) — distinct from calendar_events, the calendar's
+    *current* state. list_habit_sessions returns them (filtered by date),
+    so compute_habit_review (habit_tools.py) can genuinely diff "what was
+    planned" against "what's on the calendar now" and derive a real
+    "moved"/"gone" outcome with a real bumped_by, instead of the review
+    always coming back empty. Nothing before A4.3 needed a scenario where
+    that diff itself was the thing under test.
     """
 
     def __init__(
@@ -302,6 +311,7 @@ class ScenarioFixture:
         sleep_schedule: dict | None = None,
         habits: list[dict] | None = None,
         calendar_events: list[dict] | None = None,
+        habit_sessions: list[dict] | None = None,
         profile: dict | None = None,
         zones_fetch_fails: bool = False,
         habits_fetch_fails: bool = False,
@@ -312,7 +322,10 @@ class ScenarioFixture:
         self.sleep_schedule = sleep_schedule
         self.habits = list(habits or [])
         self.calendar_service = FakeCalendarService(calendar_events, access_role=calendar_access_role)
-        self.habit_sessions: list[dict] = []
+        # Pre-seeded ("given") sessions plus anything upsert_habit_session
+        # appends live during the trial — one list, matching how a real
+        # list_habit_sessions call would see both (A4.3, repeat-bump cut).
+        self.habit_sessions: list[dict] = list(habit_sessions or [])
         self.zones_fetch_fails = zones_fetch_fails
         self.habits_fetch_fails = habits_fetch_fails
         self.needs_auth = needs_auth
@@ -410,7 +423,16 @@ class ScenarioFixture:
         return {"status": kwargs.get("status")}
 
     async def list_habit_sessions(self, user_id, *, planned_from, planned_to):
-        return []
+        # Date-portion-only comparison, matching the "known limitation"
+        # this whole call chain already documents (scheduling_tool.py:
+        # planned_from/planned_to arrive as UTC-calendar-day strings, not
+        # the user's own local calendar days) — good enough for a test
+        # fixture, not meant to be a precise timezone-aware filter.
+        from_date, to_date = planned_from[:10], planned_to[:10]
+        return [
+            s for s in self.habit_sessions
+            if from_date <= s["planned_start"][:10] < to_date
+        ]
 
     # -- calendar_tool.build fake -----------------------------------------
 

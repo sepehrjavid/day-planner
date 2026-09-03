@@ -25,6 +25,7 @@ tar czf day_planner_agent.tar.gz \
   --exclude='day_planner_agent/token.json' \
   --exclude='day_planner_agent/pytest.ini' \
   --exclude='day_planner_agent/build_archive.sh' \
+  --exclude='day_planner_agent/evals' \
   --exclude='**/__pycache__' \
   day_planner_agent
 
