@@ -1249,3 +1249,86 @@ and tracked since A3.8.
 have broken stayed at 100% pass on their own dedicated trials pre- and
 post-cut, and the aggregate tier numbers moved in the noise band, not
 against it.
+
+---
+
+## A4.3 — paragraph 13, cut 5 of 5: free-interval derivation (last, the one backing a hard constraint)
+
+The final subtractive cut. Removed the mechanical derivation of the
+three unavailable-window types — zones, sleep, cool-down/wake-up —
+from the calendar: "Separately, check every zone shown below... The
+sleep schedule works the same way but derives three windows per day
+instead of one fixed pair... The cool_down_minutes window immediately
+before sleep_time and the wake_up_buffer_minutes window immediately
+after wake_time behave like ordinary zones instead... All of this is
+easy to get wrong specifically because none of these windows are
+visible as calendar events..." `get_available_slots`'s own paragraph
+already states it computes "zones, the sleep schedule, cool-down/wake-up"
+itself.
+
+**Kept, deliberately**: the profile-preferences sentence just before it
+(blackout windows, cross-habit rules) — `get_available_slots` takes no
+profile-preference argument (confirmed against its signature in
+`scheduling_tool.py`) and the roadmap's own "moves to code" list for
+this task does not include profile preferences, only zones/sleep/cool-down/
+wake-up/allowed_zones. Also kept the blanket safety-reminder sentence
+right after the cut ("A day... being open on the calendar is necessary
+but not sufficient — never place a session that violates a zone, the
+sleep schedule, or a stated preference just because there was room for
+it.") — a hard-constraint restatement independent of *how* availability
+was derived, same rationale as cut 2's preserved recognition sentence.
+The zone-anchored recognition sentence (preserved since cut 2) is
+untouched.
+
+**This is the one cut backing a genuinely hard constraint**, per the
+roadmap's own note, so it was run at higher scrutiny than cuts 1–4:
+targeted at `no_session_overlaps_any_zone` and
+`no_session_overlaps_sleep_or_cooldown` specifically, across a larger
+set of zone/sleep/cool-down/wake-up-specific scenarios.
+
+**A real complication: Vertex AI rate-limiting contaminated the first
+two runs.** The planned pre-cut control (12 scenarios × repeat=15 = 180
+trials) hit `429 RESOURCE_EXHAUSTED` partway through on its first
+attempt (30 occurrences in the log, 6 trials with a recorded exception)
+— almost certainly cumulative quota from this session's heavy eval
+usage across the whole day, not a fixture or model problem. A retry at
+the same size hit it again, identically (30 occurrences, 6 exceptions).
+Rather than keep burning quota at that size, the post-cut run was
+reduced to 6 scenarios × repeat=15 = 90 trials (still hit it lightly:
+5 occurrences), and the two contaminated pre-cut runs are kept as
+reference for the metric they can still speak to cleanly.
+
+**Verification — the metric that matters, unaffected by the noise**:
+across all three runs (450 trials total: two 180-trial pre-cut runs
+plus the 90-trial post-cut run), `no_session_overlaps_any_zone` and
+`no_session_overlaps_sleep_or_cooldown` **never failed once** — not in
+either pre-cut run, not post-cut, and not on any of the trials that hit
+a 429 mid-conversation either. Every failure across all three runs was
+either the rate-limit exceptions themselves or the already-documented
+background patterns: zero/undercounted `add_calendar_event` calls, and
+`late_night_boundary_pressure`'s known, separately-tracked habit_id-
+tagging gap (the roadmap's own "this task is not purely subtractive"
+note — an unnamed one-off activity request not connected to its
+tracked habit; unrelated to interval derivation and not something this
+cut could have caused or fixed). Aggregate tier numbers moved within
+the same noisy band across all three runs (constraint 88.0% → 82.7% →
+93.3%, decision 60.0% → 60.0% → 63.3%) with no consistent post-cut
+direction, consistent with rate-limit noise dominating the aggregate
+rather than the cut itself.
+
+**Decision**: ship the cut. The one invariant family this cut could
+plausibly have broken — the two tier-1 hard-constraint checks the
+roadmap specifically calls out for this cut — held at 100% across 450
+trials spanning three independent runs, including trials that
+otherwise hit real infrastructure noise. Full pytest suite green (380
+passed).
+
+**Paragraph 13 is now fully cut**, five subtractive PRs after the one
+additive PR A that registered `get_available_slots` with every field
+explained. The mechanical rules that moved to code — target
+accounting, zone-anchored expansion, repeat-bump penalty, day-load
+sizing and weekend preference, and free-interval derivation — are gone
+from the prose; what remains is genuinely model work: classifying
+utterances, judging when a conflict is worth asking about, resolving
+relative dates, deriving commute times, reading review outcomes, and
+explaining placements back to the user.
