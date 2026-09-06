@@ -1154,3 +1154,53 @@ this cut. No safety-invariant failures anywhere.
 **Decision**: ship the cut. Clean signal on the one invariant this cut
 could plausibly have broken, at both n=15 checkpoints, plus a clean
 broader regression check.
+
+---
+
+## A4.3 — paragraph 13, cut 4 of 5: day-load sizing and weekend preference
+
+Removed two sentences: "Give a packed day a shorter session — or skip
+it if one truly won't fit — and a light day a longer one; don't
+default to the same fixed length regardless of what else is on the
+calendar that day." and "When the period you're placing spans a
+weekend, prefer loading a larger share of the habit's target onto
+Saturday/Sunday before falling back to weekdays — a deliberate
+preference, not just whatever the packed-day/light-day rule above
+happens to produce that week, though it'll usually reinforce this too
+if weekends genuinely are lighter for this user." Kept the umbrella
+sentence just before them ("For any other habit, within whatever the
+preferences leave available, choose the day, time, and length of each
+session ... so the sessions fit around existing commitments") — that's
+the general placement instruction, not this specific sizing/weekend
+sub-rule. `get_available_slots`'s own paragraph already lists
+"day-load sizing, weekend preference" among the rules it computes, and
+each candidate's `reasons` (e.g. "light day", "weekend") already
+surfaces the same explanation this prose asked the model to construct
+by hand.
+
+Unlike cut 3, this rule already had eval coverage: invariants
+`heavier_load_on_lighter_days` and `weekend_preferred_when_weekend_is_free`
+(`evals/invariants.py`), exercised by five existing scenarios —
+`heavier_load_three_days`, `light_day_gets_longer_session`,
+`weekend_free_gets_loaded`, `two_habits_weekend_split`,
+`no_weekend_preference_when_weekend_busy` — so no new fixture or
+invariant work was needed, unlike cut 3's repeat-bump gap.
+
+**Verification**: targeted run of those five scenarios plus
+`basic_week_placement` and `plain_appointment_not_tagged` as general
+regression canaries, repeat=15, 105 trials each side. Pre-cut:
+constraint 93.3%, decision 90.7%. Post-cut: constraint 96.7%, decision
+93.3% — both tiers held or improved slightly, well within the
+run-to-run noise this suite already carries. **Zero failures on
+`heavier_load_on_lighter_days` or `weekend_preferred_when_weekend_is_free`
+in either run, and zero safety-invariant failures anywhere.** Every
+failure on both sides was the already-documented background
+under-placement pattern (`add_calendar_event` called fewer times than
+expected, or a habit's `placed_minutes_meets_target` reading 0 —
+`Tennis`/`Gym` neglected in a multi-habit turn), unrelated to this cut
+and tracked since A3.8.
+
+**Decision**: ship the cut. Both invariants this cut could plausibly
+have broken stayed at 100% pass on their own dedicated trials pre- and
+post-cut, and the aggregate tier numbers moved in the noise band, not
+against it.
