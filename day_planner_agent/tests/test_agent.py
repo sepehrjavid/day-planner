@@ -359,7 +359,7 @@ def test_build_instruction_uses_pinned_today(monkeypatch):
 
     monkeypatch.setattr(agent, "_now", lambda: datetime(2026, 8, 17))
     text = agent._build_instruction(FakeReadonlyContext({}))
-    assert "August 17, 2026" in text
+    assert "Monday, August 17, 2026" in text
 
 
 def test_build_instruction_re_resolves_today_every_call(monkeypatch):
@@ -374,8 +374,21 @@ def test_build_instruction_re_resolves_today_every_call(monkeypatch):
     first = agent._build_instruction(FakeReadonlyContext({}))
     second = agent._build_instruction(FakeReadonlyContext({}))
 
-    assert "August 17, 2026" in first
-    assert "August 18, 2026" in second
+    assert "Monday, August 17, 2026" in first
+    assert "Tuesday, August 18, 2026" in second
+
+
+def test_build_instruction_names_the_correct_weekday_not_just_the_date(monkeypatch):
+    """A2.7 regression test: reported from real use on 2026-08-30, the model
+    had the correct date but believed it was Saturday — it was a Sunday.
+    _build_instruction must render the weekday itself rather than leaving the
+    model to derive it from the date, which it does unreliably."""
+    from datetime import datetime
+
+    monkeypatch.setattr(agent, "_now", lambda: datetime(2026, 8, 30))
+    text = agent._build_instruction(FakeReadonlyContext({}))
+    assert "Sunday, August 30, 2026" in text
+    assert "Saturday, August 30, 2026" not in text
 
 
 # ---------------------------------------------------------------------------
