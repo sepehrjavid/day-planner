@@ -987,6 +987,51 @@ reading any full-suite number in this file as a single aggregate.
 
 ---
 
+## A2.7 — the model is never told what day of the week it is
+
+The date-format fix itself (`_build_instruction`'s `today=` rendering
+`"%A, %B %d, %Y"` instead of `"%B %d, %Y"`, so the weekday is stated
+rather than left for the model to derive) had already shipped directly
+to `agent.py` before this write-up. Two acceptance items remained open:
+a clock-pinned test, and the background-failure-rate re-check A2.7
+itself calls for.
+
+**Clock-pinned test**: `test_build_instruction_names_the_correct_weekday_not_just_the_date`
+(`tests/test_agent.py`) pins `_now()` to 2026-08-30 — the exact date
+from the reported live bug — and asserts the rendered instruction
+contains "Sunday, August 30, 2026" and not "Saturday, August 30, 2026".
+The two existing clock-pinning tests (`test_build_instruction_uses_pinned_today`,
+`test_build_instruction_re_resolves_today_every_call`) were also
+tightened to assert the full weekday-inclusive string rather than just
+the date, so a regression back to the bare date format would fail
+them too.
+
+**Background-failure-rate re-check**: no pre-fix trace corpus exists to
+compute a rate delta against — the fix landed (commit `37667de`, out
+of band) immediately after A3.8's trace-persistence machinery shipped
+and immediately before paragraph 13's cut 1, so every trace this
+project has ever persisted is already post-fix. What's checkable
+instead: scanning all 18 failing trials persisted in
+`evals/failure_traces.jsonl` so far (accumulated across cuts 1–4) for
+any reply mentioning a weekday name, and checking it against the
+actual calendar date. 12 of the 18 traces name a weekday (all in
+gym/tennis placement replies, e.g. "Saturday, August 29" /
+"Sunday, August 30" / "Tuesday, August 25"); **every single one is
+correct against the real calendar** — zero weekday-misidentification
+instances in the entire post-fix corpus. None of the 18 failures were
+weekday-reasoning failures; all match the already-documented background
+under-placement pattern (`add_calendar_event` undercounting, or a
+habit reading 0 placed minutes). Recorded here rather than as a rate
+comparison, since no "before" number exists to compare against — the
+result the task asked for either way.
+
+**Decision**: A2.7 fully closed. Both remaining acceptance items are
+satisfied; the live bug's specific failure mode (correct date, wrong
+weekday name) does not appear anywhere in the trace corpus gathered
+since the fix shipped.
+
+---
+
 ## A4.3 — paragraph 13, cut 1 of 5: target accounting
 
 Per the cut order (most independent first): removed "while adding up to
