@@ -3,7 +3,7 @@ normalization — pure, no model calls."""
 
 import textwrap
 
-from day_planner_agent.evals.scenario import load_scenario_file
+from day_planner_agent.evals.scenario import load_scenario_file, normalize_habit_session
 
 SCENARIO_YAML = textwrap.dedent(
     """\
@@ -102,6 +102,40 @@ def test_normalizes_calendar_events_to_google_item_shape(tmp_path):
             "end": {"dateTime": "2026-08-17T09:15:00"},
         }
     ]
+
+
+def test_normalize_habit_session_defaults_omit_status_fields():
+    """Matching compute_habit_review's own defaulting (session.get("status",
+    "pending")) — omitted means "let the tool default it", not "pending"
+    baked in here too, which would be a second place to keep in sync."""
+    session = normalize_habit_session(
+        {
+            "habit_id": "h1",
+            "event_id": "e1",
+            "planned_start": "2026-08-04T07:00:00-07:00",
+            "planned_end": "2026-08-04T07:30:00-07:00",
+        }
+    )
+    assert "status" not in session
+    assert "completed_at" not in session
+    assert "marked_by" not in session
+
+
+def test_normalize_habit_session_passes_through_status_fields():
+    session = normalize_habit_session(
+        {
+            "habit_id": "h1",
+            "event_id": "e1",
+            "planned_start": "2026-08-04T07:00:00-07:00",
+            "planned_end": "2026-08-04T07:30:00-07:00",
+            "status": "completed",
+            "completed_at": "2026-08-04T08:00:00-07:00",
+            "marked_by": "user",
+        }
+    )
+    assert session["status"] == "completed"
+    assert session["completed_at"] == "2026-08-04T08:00:00-07:00"
+    assert session["marked_by"] == "user"
 
 
 def test_parses_tool_call_and_invariant_expectations(tmp_path):

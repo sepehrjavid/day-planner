@@ -1400,3 +1400,64 @@ summary (only that `review_habit_week` gets called at the right time).
 PR B — the actual cut, removing the manual session_status/outcome/
 bumped_by derivation prose — will need that coverage closed first, the
 same lesson A4.3's repeat-bump cut already learned.
+
+---
+
+## A4.3 — the review-interpretation cut: closing the coverage gap, then PR B
+
+Closed the gap flagged above before cutting anything, the same order
+A4.3's repeat-bump cut established: no existing scenario exercised the
+model *reporting* session_status/outcome/interpretation back to the
+user, only that `review_habit_week` got called at the right time.
+
+**New scenario** `review_reports_interpretation_correctly.yaml`: one
+review request covering three sessions, one per interpretation family
+that actually needs checking — `gym-mon` (moved + explicitly
+`completed` → `success`, the classic A1.5 "moved isn't a failure"
+case), `gym-wed` (still `pending`, planned time well in the past →
+must be surfaced as a question, never asserted as a miss — the one
+this cut could plausibly break), and `tennis-thu` (explicitly
+`skipped`, and now overlapped by a *tagged Gym session* → `expected`,
+the guardrails working as intended, not a real signal). Required
+extending `normalize_habit_session` (`evals/scenario.py`) to pass
+through an optional `status`/`completed_at`/`marked_by` so a scenario
+can seed an already-marked session directly, without the trial itself
+having to call `mark_habit_session` first.
+
+**New invariant** `review_does_not_assert_pending_session_as_missed`:
+re-derives which of `world.habit_sessions` are still `pending` (the
+same default `compute_habit_review` itself uses) directly from the
+fixture, then scans `reply_text` for a blunt failure-assertion phrase
+("you missed", "failed to", …) — a cheap, deterministic catch for the
+exact misreading paragraph 12 exists to prevent, the same spirit as
+`explanation_cites_real_entities`, not a full semantic check of
+everything the reply says.
+
+**A second small gap, found and closed in the same pass**: `runner.py`
+clock-pins `agent.py`'s `_now()` to the scenario's `today` for every
+trial, but never pinned `habit_tools._now()` — meaning
+`_interpret_session`'s "ask" vs "unknown" split was being judged
+against the *real* wall clock, not the scenario's fictional date. Fixed
+by pinning both to the same scenario `today` in `run_trial`.
+
+**Verification, both eyeballed and gated**: read actual reply text for
+several trials directly (not just the invariant's pass/fail), both
+pre- and post-cut — the model correctly reports the moved+completed
+session as done, asks a direct question about the still-pending one
+("did you get a chance to do that one?"), and correctly attributes the
+skipped/bumped one to the Gym session that took its slot, in every
+trial read. Gated run: 3 review-related scenarios (the new one,
+`repeat_bump_avoided`, `replan_reviews_prior_week_first`), repeat=10,
+30 trials each side. Pre-cut: decision 93.3% (28/30). Post-cut:
+decision 90.0% (27/30) — within noise; **zero failures on
+`review_does_not_assert_pending_session_as_missed` in either run**. The
+one post-cut miss beyond the already-known background pattern was a
+single `review_habit_week` zero-call trial (1/10 on one scenario) —
+a tool-invocation miss matching the documented background rate, not an
+interpretation-reporting failure.
+
+**Decision**: ship the cut. The invariant this cut could plausibly have
+broken held at 100% pre- and post-cut, and direct inspection of reply
+text confirms the model's actual reasoning quality, not just the
+narrow mechanical check, survived the cut unchanged. Full pytest suite
+green (396 passed).

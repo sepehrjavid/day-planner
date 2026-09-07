@@ -1,0 +1,42 @@
+name: a review never asserts a pending session as missed, and reads moved/gone correctly against completion and conflicts
+tier: decision
+given:
+  today: "2026-08-24"  # a Monday
+  zones:
+    - {label: Work, start: "09:00", end: "17:30", days: [Mon, Tue, Wed, Thu, Fri]}
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 30, wake_up_buffer: 15}
+  habits:
+    - {label: Gym, goal: "180 min/week, sessions 45-60 minutes"}
+    - {label: Tennis, goal: "60 min/week, sessions 60 minutes"}
+  # Three sessions from the week just ended (Aug 17-23), one per
+  # interpretation family review_habit_week's docstring describes:
+  #   - gym-mon: moved + explicitly "completed" -> "success", the classic
+  #     A1.5 case a calendar-diff-only read would misreport as a partial
+  #     failure just because it isn't sitting at its original time.
+  #   - gym-wed: still "pending" (nobody marked it either way) and its
+  #     planned time is well in the past -> must be surfaced as an open
+  #     question, never asserted as a miss -- this is the one the new
+  #     invariant below actually checks.
+  #   - tennis-thu: explicitly "skipped", and gone from its original slot
+  #     -- but what's there now is itself a tagged Gym session, so this is
+  #     the guardrails working as intended, not a real signal to alarm
+  #     the user over.
+  habit_sessions:
+    - {habit_id: "h1", event_id: "gym-mon", calendar_id: "me@gmail.com", planned_start: "2026-08-17T07:00:00", planned_end: "2026-08-17T07:45:00", status: "completed", completed_at: "2026-08-17T08:00:00", marked_by: "user"}
+    - {habit_id: "h1", event_id: "gym-wed", calendar_id: "me@gmail.com", planned_start: "2026-08-19T07:00:00", planned_end: "2026-08-19T07:45:00"}
+    - {habit_id: "h2", event_id: "tennis-thu", calendar_id: "me@gmail.com", planned_start: "2026-08-20T18:00:00", planned_end: "2026-08-20T19:00:00", status: "skipped"}
+  calendar_events:
+    # gym-mon moved to the evening the same day -> outcome "moved".
+    - {id: "gym-mon", summary: "Gym", start: "2026-08-17T18:00:00", end: "2026-08-17T18:45:00", habit_id: "h1"}
+    # gym-wed: no matching event at all -> outcome "gone"; irrelevant to
+    # its interpretation either way, since "pending" short-circuits first.
+    # tennis-thu is gone too, but a Gym session now overlaps its old slot.
+    - {id: "gym-thu-extra", summary: "Gym", start: "2026-08-20T18:00:00", end: "2026-08-20T18:45:00", habit_id: "h1"}
+when:
+  user_says: "How did my gym and tennis habits go last week?"
+expect:
+  tool_calls:
+    - {name: review_habit_week, min_count: 1}
+  invariants:
+    - review_does_not_assert_pending_session_as_missed
+    - explanation_cites_real_entities

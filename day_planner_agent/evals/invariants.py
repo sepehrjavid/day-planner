@@ -904,6 +904,46 @@ def avoids_repeatedly_bumped_slot(
     return InvariantResult(not violations, "; ".join(violations))
 
 
+_PENDING_ASSERTED_AS_MISSED_PHRASES = (
+    "you missed",
+    "you didn't make it",
+    "you didn't go",
+    "you skipped",
+    "failed to",
+    "you didn't do",
+    "wasn't done",
+    "was not done",
+)
+
+
+def review_does_not_assert_pending_session_as_missed(
+    world: World, placed_events: list[dict], tool_calls: list[dict], reply_text: str = ""
+) -> InvariantResult:
+    """review_habit_week's own docstring, and now habit_tools.py's
+    "interpretation" field (A4.3): a still-"pending" session_status
+    means unknown, not failed — never state or imply it was missed,
+    skipped, or not done, regardless of what the calendar diff (outcome)
+    alone shows. Checks world.habit_sessions directly (the scenario's own
+    seed data, defaulting a missing "status" the same way
+    compute_habit_review does) for any session still "pending", rather
+    than trusting the model's own tool call — stays correct if the
+    fixture changes. Then scans reply_text for a blunt failure-assertion
+    phrase — a cheap, deterministic catch for the exact misreading this
+    rule exists to prevent, the same spirit as
+    explanation_cites_real_entities, not a full semantic check of what
+    the reply says about each specific session."""
+    pending = [s for s in world.habit_sessions if s.get("status", "pending") == "pending"]
+    if not pending:
+        return InvariantResult(True, "no pending session in this fixture — not applicable")
+
+    lowered = reply_text.lower()
+    hits = [p for p in _PENDING_ASSERTED_AS_MISSED_PHRASES if p in lowered]
+    return InvariantResult(
+        not hits,
+        f"reply asserts a pending session was missed/failed: {hits}" if hits else "",
+    )
+
+
 TIER2_INVARIANTS = {
     "heavier_load_on_lighter_days": heavier_load_on_lighter_days,
     "weekend_preferred_when_weekend_is_free": weekend_preferred_when_weekend_is_free,
@@ -913,6 +953,7 @@ TIER2_INVARIANTS = {
     "list_habits_precedes_placement": list_habits_precedes_placement,
     "review_habit_week_precedes_replan": review_habit_week_precedes_replan,
     "avoids_repeatedly_bumped_slot": avoids_repeatedly_bumped_slot,
+    "review_does_not_assert_pending_session_as_missed": review_does_not_assert_pending_session_as_missed,
 }
 
 ALL_INVARIANTS = {**TIER1_INVARIANTS, **TIER2_INVARIANTS}
