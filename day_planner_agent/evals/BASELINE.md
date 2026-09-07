@@ -1332,3 +1332,71 @@ from the prose; what remains is genuinely model work: classifying
 utterances, judging when a conflict is worth asking about, resolving
 relative dates, deriving commute times, reading review outcomes, and
 explaining placements back to the user.
+
+---
+
+## A4.3 — the roadmap's own scope was revised; next up is the review-interpretation field (PR A)
+
+The roadmap's ~2,500-token target for this task was revised to a
+measured ~3,500–4,000-token floor once the genuinely irreducible
+content was actually summed, with four further cuts specified to land
+around ~4,700: (1) an `interpretation` field on `review_habit_week`
+(the largest remaining mechanism-in-prose in the file), (2) extending
+`find_zone_collisions`'s replacement to `update_profile`/
+`set_sleep_schedule` (paragraph 17's cut only ever covered the zone
+trigger), (3)+(4) batched — paragraph 13's redundant per-tool bulleted
+list and paragraph 9's `allowed_zones` mechanics. This entry covers
+cut (1)'s PR A.
+
+**PR A (additive): `interpretation` field on `review_habit_week`.**
+Added to `compute_habit_review` (`habit_tools.py`), computed once per
+session rather than left for the model to re-derive: `"success"` (any
+`completed` session, any outcome), `"ask"` (still `pending`, planned
+time has passed), `"unknown"` (`pending`, not due yet), `"acknowledged"`
+(`skipped` but `kept` — nothing to explain beyond the mark itself),
+`"expected"` (moved/gone, and either the conflicting event is itself a
+tagged session of another tracked habit — exact `habit_id` match — or
+the original slot falls inside a named zone, checked via the same
+preloaded-zone cache `_emit_habit_session_telemetry` already reads, so
+this costs no extra backend round-trip), or `"possible_signal"`
+(moved/gone with neither explanation).
+
+**A deliberate, disclosed limitation**: the current prose also treats
+a moved/gone session as "expected" when it matches a *stated
+preference* or the *sleep schedule*. Preferences are free text with
+nothing structured to match against, and checking the sleep schedule
+would need a fresh `get_sleep_schedule` call this computation
+otherwise has no reason to make — so both cases fall into
+`"possible_signal"` instead of `"expected"`. `review_habit_week`'s
+docstring and `instruction.md`'s new pointer sentence both say so
+explicitly, so the model knows to double-check a `"possible_signal"`
+against the shown preferences before treating it as a real pattern.
+
+**A real bug, caught by running the targeted eval before merging, not
+after**: `_interpret_session`'s first version compared a timezone-aware
+`_now()` against `entry["planned_end"]` and raised
+`TypeError("can't compare offset-naive and offset-aware datetimes")`
+whenever `planned_end` had no UTC offset — exactly the naive-timestamp
+shape `scheduling_tool.py`'s `_adapt_busy_events` already had to handle
+once before, this time surfacing through `repeat_bump_avoided.yaml`'s
+fixture data. The first small run (2 scenarios, repeat=8, 16 trials)
+read decision tier at 37.5% with every failure traced to this exact
+exception. Fixed by making `_now()` naive again (matching `agent.py`'s
+own seam) and stripping `tzinfo` from `planned_end` before comparing —
+wall-clock to wall-clock, the same convention `_zone_constrains`
+already used implicitly. Locked in with a dedicated regression test
+(`test_interpret_pending_naive_planned_end_does_not_raise`). Re-run
+after the fix: decision tier 93.8% (15/16), the one remaining miss the
+already-documented background pattern, zero exceptions.
+
+**Unit coverage**: 9 new tests for `_interpret_session` covering every
+branch of the truth table above, plus the naive-timestamp regression;
+existing `review_habit_week` tests updated for the new return key.
+Full pytest suite green (390 passed).
+
+**A known coverage gap going into PR B**: no eval scenario exercises
+the model *reporting* an interpretation back to the user in a review
+summary (only that `review_habit_week` gets called at the right time).
+PR B — the actual cut, removing the manual session_status/outcome/
+bumped_by derivation prose — will need that coverage closed first, the
+same lesson A4.3's repeat-bump cut already learned.

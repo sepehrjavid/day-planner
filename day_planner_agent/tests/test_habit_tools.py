@@ -8,6 +8,8 @@ day_planner_backend_app's own test suite already covers its /agent/*
 habits routes directly.
 """
 
+from datetime import datetime
+
 import httpx
 import pytest
 
@@ -490,7 +492,8 @@ async def test_review_habit_week_emits_telemetry_to_state_not_the_return_value(
 
     result = await habit_tools.review_habit_week(tool_context, "2026-08-01", "2026-08-08")
 
-    # Unchanged from what A1.5 already established — no new keys.
+    # A1.5's shape, plus A4.3's "interpretation" (added, not replacing
+    # anything below it — see review_habit_week's own docstring).
     assert set(result["sessions"][0].keys()) == {
         "habit_id",
         "habit_label",
@@ -502,7 +505,9 @@ async def test_review_habit_week_emits_telemetry_to_state_not_the_return_value(
         "completed_at",
         "marked_by",
         "outcome",
+        "interpretation",
     }
+    assert result["sessions"][0]["interpretation"] == "success"
 
     telemetry = tool_context.state["day_planner:habit_session_outcomes"]
     assert len(telemetry) == 1
@@ -675,6 +680,91 @@ def test_zone_constrains_false_with_no_zones():
 
     dt = datetime.fromisoformat("2026-08-04T10:00:00-07:00")
     assert habit_tools._zone_constrains(dt, []) is False
+
+
+# ---------------------------------------------------------------------------
+# _interpret_session (pure function, A4.3 paragraph 12 PR A)
+# ---------------------------------------------------------------------------
+
+_NOW = datetime.fromisoformat("2026-08-10T12:00:00")  # naive, matches _now()'s own contract
+
+
+def _entry(*, session_status="pending", outcome="kept", planned_end="2026-08-04T07:30:00-07:00"):
+    return {
+        "session_status": session_status,
+        "outcome": outcome,
+        "planned_start": "2026-08-04T07:00:00-07:00",
+        "planned_end": planned_end,
+    }
+
+
+def test_interpret_completed_is_success_regardless_of_outcome():
+    for outcome in ("kept", "moved", "gone"):
+        entry = _entry(session_status="completed", outcome=outcome)
+        assert habit_tools._interpret_session(entry, conflict=None, zones=[], now=_NOW) == "success"
+
+
+def test_interpret_pending_not_yet_due_is_unknown():
+    entry = _entry(session_status="pending", planned_end="2026-08-11T07:30:00-07:00")  # after _NOW
+    assert habit_tools._interpret_session(entry, conflict=None, zones=[], now=_NOW) == "unknown"
+
+
+def test_interpret_pending_past_due_is_ask():
+    entry = _entry(session_status="pending", planned_end="2026-08-09T07:30:00-07:00")  # before _NOW
+    assert habit_tools._interpret_session(entry, conflict=None, zones=[], now=_NOW) == "ask"
+
+
+def test_interpret_pending_naive_planned_end_does_not_raise():
+    """Regression: habit_sessions can carry a bare wall-clock planned_end
+    with no offset (the same naive-timestamp shape scheduling_tool.py's
+    _adapt_busy_events already had to handle) — comparing it to now must
+    not raise TypeError("can't compare offset-naive and offset-aware
+    datetimes"), found via a real eval run against repeat_bump_avoided's
+    fixture data before this fix."""
+    entry = _entry(session_status="pending", planned_end="2026-08-09T07:30:00")  # naive, before _NOW
+    assert habit_tools._interpret_session(entry, conflict=None, zones=[], now=_NOW) == "ask"
+
+
+def test_interpret_skipped_but_kept_is_acknowledged():
+    entry = _entry(session_status="skipped", outcome="kept")
+    assert habit_tools._interpret_session(entry, conflict=None, zones=[], now=_NOW) == "acknowledged"
+
+
+def test_interpret_moved_bumped_by_tracked_habit_is_expected():
+    entry = _entry(session_status="skipped", outcome="moved")
+    conflict = {"title": "Tennis", "habit_id": "h2"}
+    assert habit_tools._interpret_session(entry, conflict=conflict, zones=[], now=_NOW) == "expected"
+
+
+def test_interpret_gone_original_slot_inside_zone_is_expected():
+    entry = _entry(session_status="skipped", outcome="gone")  # planned_start: Tue 07:00
+    zones = [{"label": "Work", "start_time": "06:00", "end_time": "09:00", "days_of_week": ["tue"]}]
+    assert habit_tools._interpret_session(entry, conflict=None, zones=zones, now=_NOW) == "expected"
+
+
+def test_interpret_moved_unrelated_conflict_is_possible_signal():
+    entry = _entry(session_status="skipped", outcome="moved")
+    conflict = {"title": "Standup ran long"}  # no habit_id
+    assert (
+        habit_tools._interpret_session(entry, conflict=conflict, zones=[], now=_NOW)
+        == "possible_signal"
+    )
+
+
+def test_interpret_gone_no_conflict_no_zone_is_possible_signal():
+    entry = _entry(session_status="skipped", outcome="gone")
+    assert habit_tools._interpret_session(entry, conflict=None, zones=[], now=_NOW) == "possible_signal"
+
+
+def test_interpret_moved_conflict_habit_id_falsy_falls_through_to_zone_check():
+    """A conflicting event with habit_id present but empty/None must not
+    short-circuit to "expected" on a falsy-but-present key."""
+    entry = _entry(session_status="skipped", outcome="moved")
+    conflict = {"title": "Standup", "habit_id": None}
+    assert (
+        habit_tools._interpret_session(entry, conflict=conflict, zones=[], now=_NOW)
+        == "possible_signal"
+    )
 
 
 # ---------------------------------------------------------------------------

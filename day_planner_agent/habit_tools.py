@@ -48,6 +48,19 @@ _HABIT_SESSION_OUTCOMES_STATE_KEY = "day_planner:habit_session_outcomes"
 _WEEKDAY_CODES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
+def _now() -> datetime:
+    """A module attribute rather than a bare datetime.now() call so a test
+    can pin it (see agent.py's identical seam, A0.4) — this module's first
+    need for "now" is _interpret_session's "ask" case below. Naive, same
+    as agent.py's own _now(): "planned_end" itself isn't reliably
+    timezone-aware either (habit_sessions can carry a bare wall-clock
+    string with no offset — the same naive-timestamp shape
+    scheduling_tool.py's _adapt_busy_events already had to handle), so
+    _interpret_session compares wall-clock to wall-clock rather than
+    assuming either side carries a real offset."""
+    return datetime.now()
+
+
 def _hash_session_ref(calendar_id: str, event_id: str) -> str:
     """One-way session identifier for telemetry dedup — see
     _emit_habit_session_telemetry. Deliberately not the raw
@@ -273,6 +286,26 @@ async def review_habit_week(tool_context: ToolContext, date_from: str, date_to: 
         handle identically to get_calendar_events — an "error" here means
         the review could not be performed due to a backend failure, not
         that nothing was planned; don't report it as an empty period.
+
+        "interpretation" is exactly the "read the two together" judgment
+        above, already made — "success" (any "completed" session,
+        regardless of outcome), "ask" (still "pending" and its planned
+        time has passed — worth a direct question, never an assertion
+        either way), "unknown" (still "pending", not due yet — not a
+        failure), "acknowledged" (explicitly "skipped" but "kept" —
+        nothing to explain, the mark itself is the whole story),
+        "expected" (moved/gone by another one of the user's own tracked
+        habits, or the original slot now sits inside a zone — the
+        guardrails working as intended, not something to alarm the user
+        over), or "possible_signal" (moved/gone with no such explanation —
+        worth surfacing as a *possible* cause, never a verdict, and only
+        once you already know it wasn't completed). Use it directly
+        rather than re-deriving the same judgment by hand. One gap it
+        doesn't cover: a "possible_signal" can still turn out to match a
+        stated profile preference the computation has no way to check —
+        free text, not structured data — so read "possible_signal"
+        against the preferences shown below before treating it as a real
+        pattern worth mentioning.
     """
     result = await compute_habit_review(tool_context, date_from, date_to)
     if result.get("status") == "success":
@@ -332,6 +365,21 @@ async def compute_habit_review(tool_context: ToolContext, date_from: str, date_t
         logger.warning("review_habit_week: list_habits enrichment failed", exc_info=True)
         habit_labels = {}
 
+    # Reuses A0.2's preloaded zone cache (same as _emit_habit_session_telemetry
+    # below) rather than an extra list_zones round-trip — "interpretation"'s
+    # zone check is a same-cost addition to an existing computation, not a
+    # new backend dependency. Missing entirely (no preload yet, or a preload
+    # failure) just means the zone check contributes nothing this turn, the
+    # same staleness/absence every other use of this cache already accepts.
+    # Best-effort like every other read of this cache: a broken state lookup
+    # must degrade "interpretation" quality, never break review_habit_week's
+    # actual return value.
+    try:
+        zones = tool_context.state.get(zone_tools.PRELOADED_ZONES_STATE_KEY) or []
+    except Exception:
+        logger.warning("review_habit_week: reading preloaded zones failed", exc_info=True)
+        zones = []
+
     results = []
     for session in sessions:
         current = events_by_key.get((session["calendar_id"], session["event_id"]))
@@ -355,8 +403,10 @@ async def compute_habit_review(tool_context: ToolContext, date_from: str, date_t
             "marked_by": session.get("marked_by"),
             "outcome": outcome,
         }
+        conflict = _conflicting_event(events, session) if outcome != "kept" else None
         if outcome != "kept":
-            entry["bumped_by"] = _find_conflict(events, session)
+            entry["bumped_by"] = conflict["title"] if conflict else None
+        entry["interpretation"] = _interpret_session(entry, conflict=conflict, zones=zones, now=_now())
         results.append(entry)
 
     return {"status": "success", "sessions": results}
@@ -519,10 +569,13 @@ def _same_instant(a: str, b: str) -> bool:
         return a == b
 
 
-def _find_conflict(events: list[dict], session: dict) -> str | None:
-    """The title of whatever now overlaps a session's originally-planned
-    slot on the same calendar, excluding the session's own event — the
-    best available signal for *why* a session moved or disappeared."""
+def _conflicting_event(events: list[dict], session: dict) -> dict | None:
+    """The calendar event that now overlaps a session's originally-planned
+    slot on the same calendar, excluding the session's own event — or None
+    if nothing does. The best available signal for *why* a session moved
+    or disappeared: its "title" becomes "bumped_by", and its "habit_id"
+    (present only if the conflict is itself a tagged habit session) feeds
+    "interpretation"'s "expected" case below."""
     try:
         planned_start = datetime.fromisoformat(session["planned_start"])
         planned_end = datetime.fromisoformat(session["planned_end"])
@@ -543,5 +596,48 @@ def _find_conflict(events: list[dict], session: dict) -> str | None:
         except (ValueError, TypeError):
             continue
         if overlaps:
-            return event["title"]
+            return event
     return None
+
+
+def _interpret_session(
+    entry: dict, *, conflict: dict | None, zones: list[dict], now: datetime
+) -> str:
+    """The "read session_status and outcome together" judgment
+    review_habit_week's docstring describes, computed once here instead of
+    left for the model to re-derive per session. See that docstring for
+    the full meaning of each returned value.
+
+    Deliberately conservative about "expected": it only recognizes a
+    conflict caused by another tracked habit (exact habit_id match) or by
+    a named zone (the session's original slot falling inside one, using
+    the same cache _emit_habit_session_telemetry already reads) — not a
+    stated profile preference or the sleep schedule, since preferences are
+    free text with nothing structured to match against, and checking the
+    sleep schedule would mean a backend call this computation doesn't
+    otherwise need. Both fall into "possible_signal" instead; the
+    docstring says as much."""
+    if entry["session_status"] == "completed":
+        return "success"
+
+    if entry["session_status"] == "pending":
+        try:
+            planned_end = datetime.fromisoformat(entry["planned_end"]).replace(tzinfo=None)
+        except (ValueError, TypeError):
+            return "unknown"
+        return "ask" if planned_end <= now else "unknown"
+
+    if entry["outcome"] == "kept":
+        return "acknowledged"
+
+    if conflict is not None and conflict.get("habit_id"):
+        return "expected"
+
+    try:
+        planned_start = datetime.fromisoformat(entry["planned_start"])
+    except (ValueError, TypeError):
+        planned_start = None
+    if planned_start is not None and _zone_constrains(planned_start, zones):
+        return "expected"
+
+    return "possible_signal"
