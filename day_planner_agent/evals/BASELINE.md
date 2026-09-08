@@ -1521,3 +1521,117 @@ in either run.** Full pytest suite green (408 passed).
 that can be — the invariant this cut could plausibly have broken held
 at 100% on both sides, and the remaining miss is the same
 already-characterized noise this suite has carried since A3.8.
+
+---
+
+## A4.3 — the last batched cut: paragraph 9 caught a real regression, paragraph 13's bullets shipped alone
+
+The final item in A4.3's scope: paragraph 13's redundant per-tool
+bulleted list (the classification tests above it already carry the
+same logic) and paragraph 9's `allowed_zones` mechanics
+(`get_available_slots` already applies them). Planned as one batched
+PR with a single targeted run, per the roadmap's own cost/risk call for
+two redundancy-removal cuts. It did not ship that way — paragraph 9's
+half turned out to be load-bearing.
+
+**Before cutting paragraph 9, a real dependency was checked and
+confirmed absent**: cut 5 (free-interval derivation) had already
+removed the *other* place this file explained the "cool-down"/"wake-up"
+fixed-label convention, which could have left paragraph 9 as the last
+copy. Checked `update_habit`'s own docstring — it already documents
+the convention in full ("Also accepts the fixed labels 'cool-down' and
+'wake-up' for the two overridable windows derived from the sleep
+schedule... never the sleep period itself — that has no override").
+On that basis, paragraph 9's sentence explaining the same mechanics was
+cut as genuinely redundant, alongside the mechanical half of the
+override sentence, keeping the policy line the roadmap explicitly
+calls out ("never write a one-off conversational exception into
+`allowed_zones`") and the "replaces the old habit-goal-text override"
+migration note verbatim.
+
+**The targeted run caught what the docstring check couldn't**: a
+6-scenario matched pre/post comparison (repeat=10, 60 trials each
+side, `--instruction` against the pre-cut file) read post-cut
+constraint at 91.7% against a 98.3% pre-cut baseline — a real gap, not
+noise, with two of the misses a failure mode that had never appeared
+before: `add_calendar_event('Reading Session') missing habit_id`, both
+on `cooldown_override_reading_habit.yaml` — the one scenario that
+places a session for a habit already configured with
+`allowed_zones: ["cool-down"]`.
+
+**Isolated to confirm it wasn't a fluke**: that scenario alone, repeat=15
+each side. Pre-cut (original instruction): 93.3% (14/15), zero
+habit_id misses. Post-cut (paragraph 9 fully cut): 66.7% (10/15), four
+habit_id misses — the exact same failure mode, reproducibly, at a rate
+far above anything else in this suite. The docstring existing was not
+enough — something about reading the full override *mechanics* in
+prose, at placement time, was apparently reinforcing to the model that
+a cool-down-anchored session is a genuine habit session worth tagging,
+in a way a tool docstring read only at `update_habit`-call time
+doesn't reach. **Reverted paragraph 9 to the original text, byte-for-
+byte** (diffed against the pre-cut file to confirm).
+
+**Re-verified the revert, then checked the residual rate wasn't itself
+suspicious**: with paragraph 9 back and paragraph 13's bullets still
+trimmed, the isolated scenario read 86.7% (13/15, zero habit_id
+misses) and a 6-scenario batch read 96.7% (58/60, two habit_id misses,
+both on the same scenario again). That residual worried enough to
+check further — a second independent 15-trial sample of the *original,
+unmodified* instruction on the same isolated scenario came back 80.0%
+(12/15), including one habit_id miss of its own. Tallied across every
+run of this specific scenario: original instruction, two samples,
+1/30 habit_id misses (3.3%); paragraph-9-reverted state, two samples,
+2/25 (8%); the full paragraph-9-cut state, one sample, 4/15 (26.7%).
+The reverted state's rate is not distinguishable from the original's
+own sample-to-sample noise (0/15 and 1/15 from two runs of the
+identical, unchanged instruction); the full-cut state's rate is
+starkly higher than either. Paragraph 13's bullet trim — which doesn't
+touch habit_id tagging, cool-down, or the Reading habit's placement
+logic at all, only classification of *new* user statements into
+update_profile/create_zone/set_sleep_schedule/create_habit/save_memory
+— has no plausible mechanism to cause this failure, and the numbers
+agree.
+
+**What actually shipped**: paragraph 9 unchanged. Paragraph 13's
+bulleted list trimmed — each bullet's opening "here's what this
+category means again" clause removed (genuinely redundant with the
+ordered tests immediately above), while keeping every piece of
+mechanical/operational content the tests don't cover:
+`create_zone`'s duration-anchoring and two-zone-rows-for-a-round-trip
+rules, `update_profile`'s "pass only changed fields" and
+replace-don't-duplicate guidance, every cross-tool exclusivity
+warning, and the zone-anchored-habit handling note under
+`create_habit`. At least one concrete example survives per tool,
+per review guidance on this specific half of the cut — two survive
+for `update_profile`, since they illustrate genuinely different
+preference shapes (a blackout window vs. a cross-habit rule) the test
+above doesn't itself distinguish.
+
+**As flagged going in, this half is effectively unverifiable by this
+suite**: no invariant checks classification, and only two scenarios in
+the whole suite call `create_zone` at all — both about collision
+detection, neither about choosing zone vs. preference vs. habit for an
+ambiguous utterance. The clean run above confirms nothing else broke;
+it is not evidence the classification bullets were safe to trim, only
+that trimming them didn't touch anything this suite happens to check.
+
+**Token count, honestly**: 26,108 → 25,738 bytes (~85 tokens), far
+short of the ~650-token estimate the roadmap's batched-cut plan was
+built on — because paragraph 9, which accounted for roughly two-fifths
+of that estimate, turned out to be load-bearing and stays. This is the
+honest number, not a shortfall to make up elsewhere: the acceptance
+criterion is the token count landing where careful, verified cuts
+actually leave it, not a pre-set target chasing a number that assumed
+cuts which turned out not to exist.
+
+Full pytest suite green (408 passed).
+
+**Decision**: ship paragraph 13's trim alone. Paragraph 9 is a
+genuine, empirically-confirmed regression — reverted, not shipped, and
+recorded here as a real finding: "the engine already applies this" and
+"the tool docstring already explains it" are necessary conditions for
+a cut to be safe, not sufficient ones. This is the second time this
+project has needed the reachable-replacement check to include actual
+behavioral verification, not just a coverage check on where the
+information lives (A4.2's registered-but-unexplained-tool regression
+was the first).
