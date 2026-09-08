@@ -24,6 +24,7 @@ from .habit_tools import (
 )
 from .memory_tools import get_profile, save_memory, update_profile
 from .scheduling_tool import (
+    find_sleep_schedule_collisions,
     find_zone_collisions,
     get_available_slots,
     log_shadow_comparison,
@@ -348,6 +349,7 @@ _llm_agent = Agent(
         set_sleep_schedule,
         get_sleep_schedule,
         find_zone_collisions,
+        find_sleep_schedule_collisions,
         get_available_slots,
     ],
 )

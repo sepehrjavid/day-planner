@@ -112,6 +112,62 @@ def zone_occurrences(
     return occurrences
 
 
+def sleep_schedule_occurrences(
+    schedule: SleepSchedule, date_range: tuple[date, date], *, tz: ZoneInfo
+) -> list[Interval]:
+    """Every sleep-derived unavailable window within [start_date, end_date)
+    — the sleep span itself, plus cool_down_minutes immediately before it
+    and wake_up_buffer_minutes immediately after, one set per night waking
+    inside the range, clipped to exactly that span. Mirrors
+    zone_occurrences' shape and contract for the sleep schedule instead of
+    a Zone.
+
+    Deliberately doesn't take `allowed_zones` the way free_intervals'
+    own inline sleep-window logic does — kept separate rather than
+    refactored to share it, since the two callers want genuinely
+    different things: free_intervals needs a *habit's own* override
+    applied before deciding what's free, but this function's one caller,
+    find_sleep_schedule_collisions (scheduling_tool.py), wants the raw,
+    unfiltered set — the same way find_zone_collisions already treats
+    zone_occurrences, never checking a habit's allowed_zones itself and
+    leaving that judgment to the model reviewing the result."""
+    start_date, end_date = date_range
+    if end_date <= start_date:
+        return []
+
+    range_start = datetime.combine(start_date, time.min, tzinfo=tz)
+    range_end = datetime.combine(end_date, time.min, tzinfo=tz)
+
+    raw: list[Interval] = []
+    wake_day = start_date
+    while wake_day <= end_date + timedelta(days=1):
+        sleep_span = _sleep_span_waking_on(schedule, wake_day, tz)
+        raw.append(sleep_span)
+        if schedule.cool_down_minutes > 0:
+            raw.append(
+                Interval(
+                    sleep_span.start - timedelta(minutes=schedule.cool_down_minutes),
+                    sleep_span.start,
+                )
+            )
+        if schedule.wake_up_buffer_minutes > 0:
+            raw.append(
+                Interval(
+                    sleep_span.end,
+                    sleep_span.end + timedelta(minutes=schedule.wake_up_buffer_minutes),
+                )
+            )
+        wake_day += timedelta(days=1)
+
+    occurrences: list[Interval] = []
+    for iv in raw:
+        s = max(iv.start, range_start)
+        e = min(iv.end, range_end)
+        if s < e:
+            occurrences.append(Interval(s, e))
+    return occurrences
+
+
 def _merge(intervals: list[Interval]) -> list[Interval]:
     """Sorted, overlap-merged. A zero-length interval is absorbed into
     whatever it touches and otherwise contributes nothing — it can never

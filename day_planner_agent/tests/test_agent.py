@@ -496,6 +496,15 @@ def test_find_zone_collisions_is_registered_with_instruction_text():
     assert "find_zone_collisions" in agent._build_instruction(FakeReadonlyContext({}))
 
 
+def test_find_sleep_schedule_collisions_is_registered_with_instruction_text():
+    """find_zone_collisions' sibling for the sleep-schedule half of
+    paragraph 10's "conflict you create by learning something new" case
+    — same add-then-cut pattern, tool and text shipped together."""
+    tool_names = {getattr(t, "__name__", None) for t in agent._llm_agent.tools}
+    assert "find_sleep_schedule_collisions" in tool_names
+    assert "find_sleep_schedule_collisions" in agent._build_instruction(FakeReadonlyContext({}))
+
+
 class FakeTool:
     def __init__(self, name: str) -> None:
         self.name = name

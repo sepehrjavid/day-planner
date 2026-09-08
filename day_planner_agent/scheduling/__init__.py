@@ -14,6 +14,9 @@ A4.3) — this one only has to be correct and tested on its own.
   schedule, and existing busy time, what's actually open.
 - `zone_occurrences` — concrete occurrences of one zone, for placing a
   zone-anchored habit at exactly the zone's own times.
+- `sleep_schedule_occurrences` — concrete sleep/cool-down/wake-up
+  windows over a range, the sleep-schedule analogue of zone_occurrences,
+  for checking what a changed sleep schedule now collides with.
 - `collisions_with` — which already-placed sessions a new or changed
   constraint now conflicts with.
 - `target_accounting` — parse a habit's free-text goal into a weekly
@@ -27,7 +30,7 @@ DayOverride) every function here operates on, and each submodule's own
 docstring for the specific rule it implements.
 """
 
-from .intervals import collisions_with, free_intervals, zone_occurrences
+from .intervals import collisions_with, free_intervals, sleep_schedule_occurrences, zone_occurrences
 from .models import DAYS_OF_WEEK, DayOverride, Interval, SleepSchedule, Zone
 from .scoring import ReviewEntry, ScoredCandidate, score_candidates
 from .targets import (
@@ -51,6 +54,7 @@ __all__ = [
     "parse_session_length_range",
     "parse_weekly_target_minutes",
     "score_candidates",
+    "sleep_schedule_occurrences",
     "target_accounting",
     "zone_occurrences",
 ]

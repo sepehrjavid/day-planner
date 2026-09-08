@@ -1,0 +1,26 @@
+name: a changed sleep schedule collides with an already-placed Gym session
+tier: constraint
+given:
+  today: "2026-08-24"  # a Monday
+  zones: []
+  sleep_schedule: {sleep: "23:00", wake: "07:00", cool_down: 0, wake_up_buffer: 0}
+  habits:
+    - {label: Gym, goal: "180 min/week, sessions 30-60 minutes"}
+  calendar_events:
+    # Fine under the current schedule (no cool-down at all) but falls
+    # inside the 45-minute cool-down the user is about to add — the
+    # "conflict you create by learning something new" case (instruction.md's
+    # second placement paragraph, A4.3's find_sleep_schedule_collisions).
+    - {summary: Gym, start: "2026-08-25T22:00:00", end: "2026-08-25T22:45:00", habit_id: "h1"}
+when:
+  user_says: >
+    Actually, let's add a 45 minute wind-down before bed — set my
+    cool-down to 45 minutes, same sleep and wake times as before.
+expect:
+  tool_calls:
+    - {name: set_sleep_schedule, min_count: 1}
+  invariants:
+    - no_silent_edit_of_pre_existing_habit_session
+    - no_session_overlaps_any_zone
+    - no_session_overlaps_sleep_or_cooldown
+    - every_habit_session_passes_habit_id
