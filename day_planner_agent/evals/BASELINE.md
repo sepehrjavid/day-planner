@@ -1461,3 +1461,63 @@ broken held at 100% pre- and post-cut, and direct inspection of reply
 text confirms the model's actual reasoning quality, not just the
 narrow mechanical check, survived the cut unchanged. Full pytest suite
 green (396 passed).
+
+---
+
+## A4.3 — paragraph 10: find_sleep_schedule_collisions (PR A, then the cut)
+
+`find_zone_collisions` (PR #49) only ever covered the zone trigger of
+"the conflict you create by learning something new" — `update_profile`
+and `set_sleep_schedule` still instructed a manual `get_calendar_events`
+scan. **Scoped down from the roadmap's literal "extend
+find_zone_collisions" wording**: only `set_sleep_schedule` moves to
+code here. Its windows (sleep span, cool-down, wake-up buffer) are
+structured, the same as a zone. `update_profile`'s preferences are free
+text with nothing structured to check against — the identical
+limitation already disclosed for the `interpretation` field's
+`possible_signal` case — so that half stays manual, permanently, and
+the cut below now says so explicitly rather than leaving it looking
+like an oversight.
+
+**PR A**: new pure function `scheduling.sleep_schedule_occurrences`
+(mirrors `zone_occurrences`' shape/contract), new tool
+`find_sleep_schedule_collisions` (a straight sibling of
+`find_zone_collisions` — same `collisions_with` call, same return
+shape), registered with instruction text in one PR, matching how
+`find_zone_collisions` itself shipped. Deliberately *not* refactored to
+share `free_intervals`' own inline sleep-window logic: `free_intervals`
+needs a habit's own `allowed_zones` override applied before deciding
+what's free, while this wants the raw, unfiltered set — the same way
+`find_zone_collisions` never checks a habit's `allowed_zones` either,
+leaving that judgment to the model reviewing the result. New scenario
+`sleep_schedule_change_collides_with_existing_session.yaml` — no prior
+coverage existed for this case.
+
+**The cut**: paragraph 10's manual-scan sentence covered both triggers
+in one clause — "Whenever the user states or changes a preference via
+update_profile ... or you call set_sleep_schedule, check the new or
+changed constraint...". Removed only `set_sleep_schedule` from that
+trigger list, leaving `update_profile`'s manual scan verbatim, and
+added one sentence explaining why it stays manual permanently: "This
+one stays a manual scan permanently, not a pending migration: a
+profile preference is free text, with no structured window a tool
+could check the way a zone's start_time/end_time or the sleep
+schedule's own fields are." — flagged by review as worth adding so a
+future reader doesn't mistake the asymmetry for unfinished work and try
+to "finish" migrating `update_profile` into a tool that can't exist.
+
+**Verification**: matched pre/post-cut run (3 scenarios — the new
+sleep-schedule-collision one, the existing zone-collision one, and
+`basic_week_placement` as a general canary — repeat=10, 30 trials each
+side, using `--instruction` against the pre-cut file for a same-day
+controlled comparison). Pre-cut: constraint 100% (30/30). Post-cut:
+constraint 96.7% (29/30) — the one miss is `basic_week_placement`'s
+already-documented background zero-call pattern, unrelated to this
+cut. **Zero failures on `no_silent_edit_of_pre_existing_habit_session`,
+either collision scenario's tool-call check, or any safety invariant,
+in either run.** Full pytest suite green (408 passed).
+
+**Decision**: ship the cut. Paragraph 10 is now fully cut for the half
+that can be — the invariant this cut could plausibly have broken held
+at 100% on both sides, and the remaining miss is the same
+already-characterized noise this suite has carried since A3.8.
