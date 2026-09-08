@@ -452,6 +452,131 @@ async def test_find_zone_collisions_ignores_sessions_outside_the_zone_window(
     assert result["colliding_sessions"] == []
 
 
+# ---------------------------------------------------------------------------
+# find_sleep_schedule_collisions
+# ---------------------------------------------------------------------------
+
+
+async def test_find_sleep_schedule_collisions_not_found_with_no_schedule(tool_context, monkeypatch):
+    _install(monkeypatch, sleep_schedule=None)
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-10"
+    )
+    assert result["status"] == "not_found"
+
+
+async def test_find_sleep_schedule_collisions_needs_auth_when_no_calendar_connected(
+    tool_context, monkeypatch
+):
+    _install(monkeypatch, sleep_schedule=SLEEP_SCHEDULE, tz=None)
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-10"
+    )
+    assert result["status"] == "needs_auth"
+
+
+async def test_find_sleep_schedule_collisions_propagates_calendar_events_failure_status(
+    tool_context, monkeypatch
+):
+    _install(monkeypatch, sleep_schedule=SLEEP_SCHEDULE)
+
+    async def failing_get_calendar_events(tool_context, date_from, date_to):
+        return {"status": "error", "error_message": "boom"}
+
+    monkeypatch.setattr(calendar_tool, "get_calendar_events", failing_get_calendar_events)
+
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-10"
+    )
+    assert result == {"status": "error", "error_message": "boom"}
+
+
+async def test_find_sleep_schedule_collisions_finds_a_habit_tagged_session_inside_the_sleep_window(
+    tool_context, monkeypatch
+):
+    # 2026-08-03T23:30 is inside SLEEP_SCHEDULE's 23:00-07:00 span.
+    colliding_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Late reading",
+        "habit_id": "h1",
+        "start_time": "2026-08-03T23:30:00-04:00",
+        "end_time": "2026-08-03T23:50:00-04:00",
+    }
+    _install(monkeypatch, sleep_schedule=SLEEP_SCHEDULE, events=[colliding_event])
+
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == [colliding_event]
+
+
+async def test_find_sleep_schedule_collisions_finds_a_session_inside_the_cool_down_window(
+    tool_context, monkeypatch
+):
+    schedule = dict(SLEEP_SCHEDULE, cool_down_minutes=30)
+    # 22:45-22:55 falls inside the 22:30-23:00 cool-down window.
+    colliding_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Gym",
+        "habit_id": "h1",
+        "start_time": "2026-08-03T22:45:00-04:00",
+        "end_time": "2026-08-03T22:55:00-04:00",
+    }
+    _install(monkeypatch, sleep_schedule=schedule, events=[colliding_event])
+
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == [colliding_event]
+
+
+async def test_find_sleep_schedule_collisions_ignores_plain_appointments(tool_context, monkeypatch):
+    plain_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Late call",
+        "start_time": "2026-08-03T23:30:00-04:00",
+        "end_time": "2026-08-03T23:50:00-04:00",
+    }
+    _install(monkeypatch, sleep_schedule=SLEEP_SCHEDULE, events=[plain_event])
+
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == []
+
+
+async def test_find_sleep_schedule_collisions_ignores_sessions_outside_the_windows(
+    tool_context, monkeypatch
+):
+    # Mid-afternoon — nowhere near the 23:00-07:00 sleep span or its
+    # (zero, by default) cool-down/wake-up buffers.
+    daytime_event = {
+        "event_id": "e1",
+        "calendar_id": "me@gmail.com",
+        "title": "Gym",
+        "habit_id": "h1",
+        "start_time": "2026-08-03T14:00:00-04:00",
+        "end_time": "2026-08-03T14:45:00-04:00",
+    }
+    _install(monkeypatch, sleep_schedule=SLEEP_SCHEDULE, events=[daytime_event])
+
+    result = await scheduling_tool.find_sleep_schedule_collisions(
+        tool_context, "2026-08-03", "2026-08-04"
+    )
+
+    assert result["status"] == "success"
+    assert result["colliding_sessions"] == []
+
+
 async def test_shadow_comparison_never_raises_on_backend_failure(tool_context, monkeypatch):
     async def failing_list_habits(user_id, status=None):
         raise domain_client.BACKEND_ERROR[0]("boom")

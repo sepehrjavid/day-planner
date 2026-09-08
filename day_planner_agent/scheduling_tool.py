@@ -1,6 +1,16 @@
 """Wires the scheduling engine (day_planner_agent/scheduling/, A4.1) into
-the agent — both `get_available_slots` and `find_zone_collisions` are now
-registered, model-callable tools (A4.3).
+the agent — `get_available_slots`, `find_zone_collisions`, and
+`find_sleep_schedule_collisions` are all now registered, model-callable
+tools (A4.3).
+
+**find_sleep_schedule_collisions** is `find_zone_collisions`'s sibling
+for the other half of paragraph 10's "conflict you create by learning
+something new" case — set_sleep_schedule's own window, not a zone's.
+Same tool + text together in one PR pattern; it does *not* cover a
+changed profile preference, which stays a manual scan (see that tool's
+own docstring) since a preference is free text with nothing structured
+to check it against — the same limitation already disclosed for the
+`interpretation` field's "possible_signal" case (habit_tools.py).
 
 **get_available_slots's history**: originally built in shadow mode (A4.2)
 — fully unit-tested but deliberately **not** registered in agent.py's
@@ -513,9 +523,10 @@ async def find_zone_collisions(
     For the "conflict you create by learning something new" case in
     instruction.md's second placement paragraph — call this right after
     create_zone or update_zone, over at least the next 1-2 weeks, the
-    same range you'd otherwise scan by hand. It covers a zone specifically;
-    a changed profile preference or sleep schedule still needs the manual
-    check described there.
+    same range you'd otherwise scan by hand. It covers a zone specifically —
+    see find_sleep_schedule_collisions for the sleep-schedule case; a
+    changed profile preference still needs the manual check described
+    there.
 
     Args:
         zone_label: The zone to check, by its label (see create_zone,
@@ -544,6 +555,81 @@ async def find_zone_collisions(
         return {
             "status": "error",
             "error_message": "Could not check for zone collisions right now due to a backend error.",
+        }
+
+
+async def _compute_sleep_schedule_collisions(
+    tool_context: ToolContext, user_id: str, date_from: str, date_to: str
+) -> dict:
+    sleep_raw = await domain_client.get_sleep_schedule(user_id)
+    if sleep_raw is None:
+        return {"status": "not_found", "message": "No sleep schedule is set for this user."}
+
+    tz_name = await calendar_tool.resolve_reference_timezone(tool_context, user_id)
+    if tz_name is None:
+        return {
+            "status": "needs_auth",
+            "message": "No connected calendar to resolve a reference timezone from.",
+        }
+    tz = ZoneInfo(tz_name)
+
+    calendar_state = await calendar_tool.get_calendar_events(tool_context, date_from, date_to)
+    if calendar_state["status"] != "success":
+        return calendar_state
+
+    occurrences = scheduling.sleep_schedule_occurrences(
+        _adapt_sleep_schedule(sleep_raw),
+        (date.fromisoformat(date_from), date.fromisoformat(date_to)),
+        tz=tz,
+    )
+    paired = _adapt_habit_tagged_sessions(calendar_state["events"])
+    colliding = scheduling.collisions_with(occurrences, paired)
+
+    return {"status": "success", "colliding_sessions": colliding}
+
+
+async def find_sleep_schedule_collisions(
+    tool_context: ToolContext, date_from: str, date_to: str
+) -> dict:
+    """Which already-placed habit sessions the sleep schedule's windows
+    now collide with, computed by the scheduling engine rather than by
+    scanning get_calendar_events yourself. Covers the sleep period itself
+    plus cool-down and wake-up buffers, exactly the same three windows
+    the placement paragraph derives from the sleep schedule.
+
+    For the "conflict you create by learning something new" case in
+    instruction.md's second placement paragraph — call this right after
+    set_sleep_schedule, over at least the next 1-2 weeks, the same range
+    you'd otherwise scan by hand. It covers the sleep schedule
+    specifically; a changed profile preference still needs the manual
+    check described there — see find_zone_collisions for the zone case.
+
+    Args:
+        date_from: Start date, inclusive, "YYYY-MM-DD".
+        date_to: End date, exclusive, "YYYY-MM-DD".
+
+    Returns:
+        dict with "status". On "success", "colliding_sessions" is every
+        habit-tagged event (see get_calendar_events — same shape:
+        event_id, calendar_id, title, start_time, end_time, habit_id)
+        whose time falls inside the sleep period, cool-down, or wake-up
+        window somewhere in this range, ready to act on without a second
+        lookup. An empty list means no collision, not that the check
+        failed. On "not_found", no sleep schedule is set for this user at
+        all. On "needs_auth"/"error", handle the same as
+        get_calendar_events — the check could not run, not that nothing
+        collides.
+    """
+    user_id = tool_context.session.user_id
+    try:
+        return await _compute_sleep_schedule_collisions(tool_context, user_id, date_from, date_to)
+    except backend_client.NeedsAuth as exc:
+        return {"status": "needs_auth", "connect_url": exc.connect_url, "message": exc.message}
+    except domain_client.BACKEND_ERROR:
+        logger.warning("find_sleep_schedule_collisions backend call failed", exc_info=True)
+        return {
+            "status": "error",
+            "error_message": "Could not check for sleep schedule collisions right now due to a backend error.",
         }
 
 

@@ -19,6 +19,7 @@ from day_planner_agent.scheduling import (
     parse_session_length_range,
     parse_weekly_target_minutes,
     score_candidates,
+    sleep_schedule_occurrences,
     target_accounting,
     zone_occurrences,
 )
@@ -245,6 +246,55 @@ def test_zone_occurrences_handles_midnight_crossing():
     night_shift = Zone(label="Night shift", start_time="22:00", end_time="06:00", days_of_week=("mon",))
     occurrences = zone_occurrences(night_shift, (date(2026, 8, 3), date(2026, 8, 4)), tz=TZ)
     assert occurrences == [Interval(_dt(2026, 8, 3, 22, 0), _dt(2026, 8, 4, 6, 0))]
+
+
+# ---------------------------------------------------------------------------
+# sleep_schedule_occurrences
+# ---------------------------------------------------------------------------
+
+
+def test_sleep_schedule_occurrences_matches_free_intervals_gaps():
+    """The occurrences this returns are exactly what free_intervals treats
+    as blocked for the sleep schedule — cross-checked against
+    test_cool_down_and_wake_up_block_by_default's own expected free gap
+    (07:15-22:30) rather than duplicating that derivation here."""
+    sleep = SleepSchedule(
+        sleep_time="23:00", wake_time="07:00", cool_down_minutes=30, wake_up_buffer_minutes=15
+    )
+    occurrences = sleep_schedule_occurrences(sleep, (date(2026, 8, 3), date(2026, 8, 4)), tz=TZ)
+    # Sleep [00:00-07:00) and wake-up [07:00-07:15) from the night waking
+    # on Aug 3 (clipped at the range start); cool-down [22:30-23:00) and
+    # sleep [23:00-00:00) from the night waking on Aug 4 (clipped at the
+    # range end).
+    assert sorted(occurrences, key=lambda iv: iv.start) == [
+        _iv(2026, 8, 3, 0, 0, 7, 0),
+        _iv(2026, 8, 3, 7, 0, 7, 15),
+        _iv(2026, 8, 3, 22, 30, 23, 0),
+        Interval(_dt(2026, 8, 3, 23, 0), _dt(2026, 8, 4, 0, 0)),
+    ]
+
+
+def test_sleep_schedule_occurrences_no_cool_down_or_wake_up_when_zero():
+    sleep = SleepSchedule(sleep_time="23:00", wake_time="07:00")  # defaults: both 0
+    occurrences = sleep_schedule_occurrences(sleep, (date(2026, 8, 3), date(2026, 8, 4)), tz=TZ)
+    assert occurrences == [
+        _iv(2026, 8, 3, 0, 0, 7, 0),
+        Interval(_dt(2026, 8, 3, 23, 0), _dt(2026, 8, 4, 0, 0)),
+    ]
+
+
+def test_sleep_schedule_occurrences_empty_range_is_empty():
+    sleep = SleepSchedule(sleep_time="23:00", wake_time="07:00")
+    assert sleep_schedule_occurrences(sleep, (date(2026, 8, 3), date(2026, 8, 3)), tz=TZ) == []
+
+
+def test_sleep_schedule_occurrences_respects_day_override():
+    sleep = SleepSchedule(
+        sleep_time="23:00", wake_time="07:00", day_overrides={"sun": DayOverride(wake_time="10:00")}
+    )
+    # 2026-08-09 is a Sunday.
+    occurrences = sleep_schedule_occurrences(sleep, (date(2026, 8, 9), date(2026, 8, 10)), tz=TZ)
+    assert _iv(2026, 8, 9, 0, 0, 10, 0) in occurrences
 
 
 # ---------------------------------------------------------------------------
