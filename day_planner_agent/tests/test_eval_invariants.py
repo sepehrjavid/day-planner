@@ -944,3 +944,46 @@ def test_avoids_repeatedly_bumped_slot_ignores_kept_sessions():
     placed = [_event_with_id("new-mon", "Gym", "2026-08-24T18:00:00", "2026-08-24T18:45:00", habit_id="h1")]
     result = inv.avoids_repeatedly_bumped_slot(scenario, placed, [])
     assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# review_does_not_assert_pending_session_as_missed (A4.3 interpretation-field cut)
+# ---------------------------------------------------------------------------
+
+
+def test_review_pending_check_passes_trivially_with_no_pending_sessions():
+    completed = dict(_session("h1", "gym-mon", "2026-08-10T07:00:00", "2026-08-10T07:45:00"), status="completed")
+    scenario = _world(habit_sessions=[completed])
+    result = inv.review_does_not_assert_pending_session_as_missed(scenario, [], [], reply_text="Great work, gym is on track.")
+    assert result.passed is True
+
+
+def test_review_pending_check_passes_with_pending_session_and_no_assertion():
+    pending = _session("h1", "gym-wed", "2026-08-19T07:00:00", "2026-08-19T07:45:00")  # status defaults pending
+    scenario = _world(habit_sessions=[pending])
+    result = inv.review_does_not_assert_pending_session_as_missed(
+        scenario, [], [], reply_text="Did you get to the gym on Wednesday? I don't see a mark either way yet."
+    )
+    assert result.passed is True
+
+
+def test_review_pending_check_fails_when_reply_asserts_a_pending_session_was_missed():
+    pending = _session("h1", "gym-wed", "2026-08-19T07:00:00", "2026-08-19T07:45:00")
+    scenario = _world(habit_sessions=[pending])
+    result = inv.review_does_not_assert_pending_session_as_missed(
+        scenario, [], [], reply_text="Looks like you missed your Wednesday gym session."
+    )
+    assert result.passed is False
+
+
+def test_review_pending_check_ignores_explicitly_completed_or_skipped_sessions():
+    completed = dict(_session("h1", "gym-mon", "2026-08-10T07:00:00", "2026-08-10T07:45:00"), status="completed")
+    skipped = dict(_session("h2", "tennis-thu", "2026-08-20T18:00:00", "2026-08-20T19:00:00"), status="skipped")
+    scenario = _world(habit_sessions=[completed, skipped])
+    result = inv.review_does_not_assert_pending_session_as_missed(
+        scenario, [], [], reply_text="You skipped tennis Thursday, but nailed gym Monday."
+    )
+    # "you skipped" appears, but only describing the *explicitly-marked*
+    # skipped session — there's no pending session in this fixture at all,
+    # so the check doesn't even look at the wording.
+    assert result.passed is True

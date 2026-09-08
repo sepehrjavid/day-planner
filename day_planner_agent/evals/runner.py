@@ -143,6 +143,7 @@ async def run_trial(
     # at import time, so it must not be imported before the environment
     # variables above are in place.
     from day_planner_agent import agent as agent_module
+    from day_planner_agent import habit_tools as habit_tools_module
     from day_planner_agent.tests.conftest import ScenarioFixture
 
     if instruction_template is not None:
@@ -174,6 +175,11 @@ async def run_trial(
     )
     fixture.install(_PlainPatcher())
     agent_module._now = lambda: datetime.strptime(scenario.given.today, "%Y-%m-%d")
+    # A4.3: habit_tools._interpret_session needs "now" too (its "ask" vs
+    # "unknown" split), and has its own identical clock seam — pin it to
+    # the same scenario "today" so a fixture's "planned time has passed"
+    # is judged against the scenario's own clock, not the real one.
+    habit_tools_module._now = lambda: datetime.strptime(scenario.given.today, "%Y-%m-%d")
 
     app_name = "day_planner_agent_eval"
     session_id = f"eval-{uuid.uuid4()}"

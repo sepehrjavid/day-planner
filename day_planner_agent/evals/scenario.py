@@ -72,21 +72,33 @@ def normalize_habit(raw: dict, *, habit_id: str) -> dict:
 
 
 def normalize_habit_session(raw: dict) -> dict:
-    """raw: {habit_id, event_id, calendar_id?, planned_start, planned_end}
-    — a *previously placed* habit session, in the shape
-    domain_client.list_habit_sessions/upsert_habit_session already use.
-    Distinct from calendar_events (the current state of the calendar):
-    this is what the agent originally planned, so compute_habit_review
-    (habit_tools.py) can diff the two and derive a real "moved"/"gone"
-    outcome with a genuine bumped_by — needed for A4.3's repeat-bump cut,
-    which nothing in this suite could exercise before this existed."""
-    return {
+    """raw: {habit_id, event_id, calendar_id?, planned_start, planned_end,
+    status?, completed_at?, marked_by?} — a *previously placed* habit
+    session, in the shape domain_client.list_habit_sessions/
+    upsert_habit_session already use. Distinct from calendar_events (the
+    current state of the calendar): this is what the agent originally
+    planned, so compute_habit_review (habit_tools.py) can diff the two and
+    derive a real "moved"/"gone" outcome with a genuine bumped_by — needed
+    for A4.3's repeat-bump cut, which nothing in this suite could exercise
+    before this existed. status/completed_at/marked_by are optional and
+    default the same way compute_habit_review itself defaults an absent
+    one ("pending", null, null) — needed for A4.3's interpretation-field
+    cut, to seed a scenario with an already-"completed"/"skipped" session
+    without the trial itself having to call mark_habit_session first."""
+    session = {
         "habit_id": raw["habit_id"],
         "event_id": raw["event_id"],
         "calendar_id": raw.get("calendar_id", "me@gmail.com"),
         "planned_start": raw["planned_start"],
         "planned_end": raw["planned_end"],
     }
+    if "status" in raw:
+        session["status"] = raw["status"]
+    if "completed_at" in raw:
+        session["completed_at"] = raw["completed_at"]
+    if "marked_by" in raw:
+        session["marked_by"] = raw["marked_by"]
+    return session
 
 
 def normalize_calendar_event(raw: dict, *, event_id: str) -> dict:
